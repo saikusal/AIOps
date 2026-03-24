@@ -1,0 +1,31 @@
+{% extends "genai/app_base.html" %}
+
+{% block title %}AIOps Assistant{% endblock %}
+{% block topbar_title %}Assistant Workspace{% endblock %}
+
+{% block extra_head %}
+<style>
+  .assistant-shell {
+    min-height: calc(100vh - 150px);
+  }
+  .assistant-panel {
+    overflow: hidden;
+    height: calc(100vh - 170px);
+  }
+  .assistant-panel #genai-chat-modal {
+    height: 100%;
+    border-radius: 22px;
+    box-shadow: none;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="assistant-shell">
+  <section class="assistant-panel panel">
+    <div id="genai-chat-modal" class="card">
+      {% include "genai/includes/chat_widget.html" %}
+    </div>
+  </section>
+</section>
+{% endblock %}

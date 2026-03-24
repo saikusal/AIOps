@@ -1,0 +1,20 @@
+{
+  "allowed_prefixes": [
+    ["df", "-h"],
+    ["free", "-m"],
+    ["uptime"],
+    ["top", "-b", "-n", "1"],
+    ["systemctl", "status"],
+    ["journalctl", "-u"],
+    ["ps", "aux"],
+    ["ss", "-tulpn"],
+    ["ip", "a"],
+    ["ip", "-s", "link"],
+    ["dmesg", "--ctime", "--level=err,warn"],
+    ["docker", "logs"],
+    ["docker", "ps"],
+    ["kubectl", "get"],
+    ["kubectl", "describe"],
+    ["kubectl", "logs"]
+  ]
+}

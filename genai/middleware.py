@@ -1,0 +1,13 @@
+from .sso import ensure_sso_user
+
+
+class HeaderSSOAuthMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        try:
+            ensure_sso_user(request)
+        except Exception:
+            pass
+        return self.get_response(request)

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Incident Timeline</title>
+  <style>
+    :root { --bg:#f5efe5; --panel:#fffaf0; --ink:#1e2933; --accent:#0f766e; --muted:#5f6b76; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:"IBM Plex Sans","Segoe UI",sans-serif; color:var(--ink); background:radial-gradient(circle at top left, rgba(15,118,110,0.14), transparent 30%), linear-gradient(180deg, #faf6ee 0%, var(--bg) 100%); }
+    main { max-width:1180px; margin:0 auto; padding:32px 20px 48px; }
+    .hero, .card { background:var(--panel); border:1px solid rgba(30,41,51,0.08); border-radius:22px; box-shadow:0 22px 64px rgba(30,41,51,0.08); }
+    .hero { padding:28px; margin-bottom:22px; }
+    .timeline { display:grid; gap:14px; }
+    .card { padding:18px; }
+    .event-meta { color:var(--muted); font-size:0.92rem; margin-bottom:8px; }
+    pre { margin:12px 0 0; padding:14px; border-radius:14px; background:#1d1f21; color:#f9f2e8; overflow:auto; white-space:pre-wrap; word-break:break-word; }
+    a { color:var(--accent); text-decoration:none; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero" id="hero">
+      <h1>Incident Timeline</h1>
+      <p>Loading incident details...</p>
+      <p><a href="/genai/incidents/dashboard/">Back to incidents</a></p>
+    </section>
+    <section class="timeline" id="timeline"></section>
+  </main>
+  <script>
+    const incidentKey = "{{ incident_key }}";
+    const hero = document.getElementById("hero");
+    const timeline = document.getElementById("timeline");
+    async function loadTimeline() {
+      const response = await fetch(`/genai/incidents/${incidentKey}/timeline/`);
+      const body = await response.json();
+      if (!response.ok) {
+        hero.innerHTML = `<h1>Incident not found</h1><p>${body.error || "The requested incident does not exist."}</p><p><a href="/genai/incidents/dashboard/">Back to incidents</a></p>`;
+        return;
+      }
+      hero.innerHTML = `
+        <h1>${body.title}</h1>
+        <p><strong>Status:</strong> ${body.status} | <strong>Application:</strong> ${body.application || "-"} | <strong>Service:</strong> ${body.primary_service || body.target_host || "-"}</p>
+        <p><strong>Summary:</strong> ${body.summary || "-"}</p>
+        <p><strong>Blast Radius:</strong> ${(body.blast_radius || []).join(", ") || "Localized or unknown"}</p>
+        <p><a href="/genai/incidents/dashboard/">Back to incidents</a> | <a href="/genai/alerts/dashboard/">Alert recommendations</a></p>
+      `;
+      timeline.innerHTML = (body.timeline || []).map((event) => `
+        <section class="card">
+          <div class="event-meta">${event.created_at} · ${event.event_type}</div>
+          <h2>${event.title}</h2>
+          <p>${event.detail || ""}</p>
+          <pre>${JSON.stringify(event.payload || {}, null, 2)}</pre>
+        </section>
+      `).join("");
+    }
+    loadTimeline();
+    setInterval(loadTimeline, 10000);
+  </script>
+</body>
+</html>

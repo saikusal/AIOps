@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIOps Incidents</title>
+  <style>
+    :root { --bg:#f5efe5; --panel:#fffaf0; --ink:#1e2933; --accent:#0f766e; --muted:#5f6b76; --danger:#b42318; --warn:#a16207; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:"IBM Plex Sans","Segoe UI",sans-serif; color:var(--ink); background:radial-gradient(circle at top left, rgba(15,118,110,0.14), transparent 30%), linear-gradient(180deg, #faf6ee 0%, var(--bg) 100%); }
+    main { max-width:1180px; margin:0 auto; padding:32px 20px 48px; }
+    .hero, .card { background:var(--panel); border:1px solid rgba(30,41,51,0.08); border-radius:22px; box-shadow:0 22px 64px rgba(30,41,51,0.08); }
+    .hero { padding:28px; margin-bottom:22px; }
+    .grid { display:grid; gap:18px; }
+    .card { padding:18px; }
+    .pill { display:inline-flex; align-items:center; padding:8px 12px; border-radius:999px; font-size:0.9rem; background:rgba(30,41,51,0.06); margin-right:8px; }
+    .status-open { color:var(--danger); }
+    .status-investigating { color:var(--warn); }
+    .status-resolved { color:var(--accent); }
+    a { color:var(--accent); text-decoration:none; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <h1>Incident Timeline</h1>
+      <p>Correlated incidents group related alerts into a single object. Each incident tracks alert correlation, AiDE reasoning, diagnostics, command execution, and post-command analysis in one timeline.</p>
+      <div class="pill"><a href="/genai/applications/dashboard/">Applications</a></div>
+      <div class="pill"><a href="/genai/alerts/dashboard/">Alert Recommendations</a></div>
+    </section>
+    <section class="grid" id="results"></section>
+  </main>
+  <script>
+    const results = document.getElementById("results");
+    function statusClass(status) {
+      const normalized = String(status || "").toLowerCase();
+      if (normalized === "resolved") return "status-resolved";
+      if (normalized === "investigating") return "status-investigating";
+      return "status-open";
+    }
+    async function loadIncidents() {
+      const response = await fetch("/genai/incidents/recent/");
+      const body = await response.json();
+      const incidents = body.results || [];
+      if (!incidents.length) {
+        results.innerHTML = '<section class="card"><h2>No incidents yet</h2><p class="subtle">Fire an alert and correlate it into an incident timeline.</p></section>';
+        return;
+      }
+      results.innerHTML = incidents.map((incident) => `
+        <section class="card">
+          <h2><a href="/genai/incidents/${incident.incident_key}/">${incident.title}</a></h2>
+          <div class="pill ${statusClass(incident.status)}">${incident.status}</div>
+          <div class="pill">${incident.application || "unknown application"}</div>
+          <div class="pill">${incident.primary_service || incident.target_host || "unscoped"}</div>
+          <p><strong>Summary:</strong> ${incident.summary || "-"}</p>
+          <p><strong>Blast Radius:</strong> ${(incident.blast_radius || []).join(", ") || "Localized or unknown"}</p>
+          <p><strong>Alerts:</strong> ${(incident.alerts || []).map((item) => `${item.alert_name} (${item.status})`).join(", ") || "None"}</p>
+          <p><strong>Prediction:</strong> ${incident.prediction ? `${Math.round((incident.prediction.risk_score || 0) * 100)}% risk in next ${incident.prediction.predicted_window_minutes || 15}m` : "Unavailable"}</p>
+          <p><strong>Updated:</strong> ${incident.updated_at || "-"}</p>
+        </section>
+      `).join("");
+    }
+    loadIncidents();
+    setInterval(loadIncidents, 10000);
+  </script>
+</body>
+</html>

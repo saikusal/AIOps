@@ -1,0 +1,1208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIOps Alert Recommendations</title>
+  <style>
+    :root {
+      --bg: #f5efe5;
+      --panel: #fffaf0;
+      --ink: #1e2933;
+      --accent: #0f766e;
+      --accent-soft: #d4efe9;
+      --danger: #b42318;
+      --warn: #a16207;
+      --muted: #5f6b76;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(15, 118, 110, 0.14), transparent 30%),
+        linear-gradient(180deg, #faf6ee 0%, var(--bg) 100%);
+    }
+    body.graph-mode {
+      color: #e6f7ff;
+      background:
+        radial-gradient(circle at center, rgba(0, 214, 255, 0.16), transparent 22%),
+        radial-gradient(circle at center, rgba(0, 214, 255, 0.08), transparent 38%),
+        linear-gradient(180deg, #030b11 0%, #02070c 100%);
+    }
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }
+    body.graph-mode main {
+      max-width: 100%;
+      padding: 24px;
+    }
+    .hero, .card {
+      background: var(--panel);
+      border: 1px solid rgba(30, 41, 51, 0.08);
+      border-radius: 22px;
+      box-shadow: 0 22px 64px rgba(30, 41, 51, 0.08);
+    }
+    body.graph-mode .hero,
+    body.graph-mode .card {
+      background: rgba(4, 12, 18, 0.86);
+      border-color: rgba(83, 196, 255, 0.12);
+      box-shadow: 0 28px 90px rgba(0, 0, 0, 0.45);
+    }
+    .hero {
+      padding: 28px;
+      margin-bottom: 22px;
+    }
+    body.graph-mode .hero {
+      margin-bottom: 18px;
+      background:
+        radial-gradient(circle at center, rgba(0, 214, 255, 0.08), transparent 40%),
+        rgba(4, 12, 18, 0.72);
+    }
+    .hero h1 {
+      margin: 0 0 10px;
+      font-size: clamp(2rem, 5vw, 3.2rem);
+    }
+    .hero p {
+      margin: 0;
+      max-width: 780px;
+      line-height: 1.55;
+    }
+    .meta {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 18px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 12px;
+      border-radius: 999px;
+      font-size: 0.92rem;
+      background: rgba(30, 41, 51, 0.06);
+    }
+    body.graph-mode .pill {
+      background: rgba(83, 196, 255, 0.08);
+      color: #dff7ff;
+    }
+    .grid {
+      display: grid;
+      gap: 18px;
+    }
+    .card {
+      padding: 18px;
+    }
+    .card header {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+    }
+    .card h2 {
+      margin: 0 0 6px;
+      font-size: 1.35rem;
+    }
+    .subtle {
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+    body.graph-mode .subtle {
+      color: rgba(223, 247, 255, 0.68);
+    }
+    .status-firing { color: var(--danger); }
+    .status-resolved { color: var(--accent); }
+    .status-pending { color: var(--warn); }
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 16px;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 11px 16px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      background: var(--accent);
+      color: white;
+    }
+    button.secondary {
+      background: rgba(30, 41, 51, 0.08);
+      color: var(--ink);
+    }
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    pre {
+      margin: 14px 0 0;
+      padding: 14px;
+      border-radius: 16px;
+      background: #1d1f21;
+      color: #f9f2e8;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .section-title {
+      margin: 18px 0 8px;
+      font-size: 1rem;
+      font-weight: 700;
+    }
+    .rca-grid {
+      display: grid;
+      gap: 14px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      margin-top: 14px;
+    }
+    .rca-card {
+      border: 1px solid rgba(30, 41, 51, 0.08);
+      border-radius: 18px;
+      padding: 14px;
+      background: rgba(255,255,255,0.6);
+    }
+    body.graph-mode .rca-card {
+      background: rgba(8, 17, 24, 0.62);
+      border-color: rgba(83, 196, 255, 0.1);
+    }
+    .rca-card strong {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 0.86rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .dependency-graph {
+      position: relative;
+      width: 100%;
+      min-height: 520px;
+      margin-top: 8px;
+      border-radius: 28px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 20% 24%, rgba(15, 118, 110, 0.16), transparent 18%),
+        radial-gradient(circle at 50% 50%, rgba(180, 35, 24, 0.12), transparent 16%),
+        radial-gradient(circle at 78% 28%, rgba(161, 98, 7, 0.12), transparent 20%),
+        radial-gradient(circle at 76% 76%, rgba(15, 118, 110, 0.08), transparent 24%),
+        linear-gradient(180deg, rgba(255,255,255,0.92), rgba(245, 239, 229, 0.96));
+      border: 1px solid rgba(30, 41, 51, 0.08);
+      padding: 12px;
+      isolation: isolate;
+    }
+    body.graph-mode .dependency-graph {
+      min-height: calc(100vh - 220px);
+      background:
+        radial-gradient(circle at center, rgba(0, 214, 255, 0.16), transparent 22%),
+        radial-gradient(circle at center, rgba(0, 214, 255, 0.08), transparent 46%),
+        linear-gradient(180deg, rgba(3, 11, 17, 0.98), rgba(2, 8, 13, 0.98));
+      border-color: rgba(83, 196, 255, 0.12);
+      box-shadow: inset 0 0 120px rgba(0, 214, 255, 0.08), 0 30px 90px rgba(0, 0, 0, 0.48);
+    }
+    .dependency-graph::before {
+      content: "";
+      position: absolute;
+      inset: 18px;
+      border-radius: 24px;
+      background:
+        radial-gradient(circle at center, rgba(15, 118, 110, 0.08), transparent 30%),
+        radial-gradient(circle at center, rgba(30, 41, 51, 0.03) 1px, transparent 1px);
+      background-size: auto, 22px 22px;
+      opacity: 0.7;
+      pointer-events: none;
+      z-index: 0;
+    }
+    body.graph-mode .dependency-graph::before {
+      inset: 0;
+      border-radius: inherit;
+      background:
+        radial-gradient(circle at center, rgba(0, 214, 255, 0.08), transparent 40%),
+        radial-gradient(circle at center, rgba(83, 196, 255, 0.025) 1px, transparent 1px);
+      background-size: auto, 28px 28px;
+      opacity: 0.5;
+    }
+    .dependency-graph::after {
+      content: "";
+      position: absolute;
+      inset: 32px;
+      border-radius: 50%;
+      border: 1px dashed rgba(30, 41, 51, 0.08);
+      opacity: 0.55;
+      pointer-events: none;
+      z-index: 0;
+    }
+    body.graph-mode .dependency-graph::after {
+      inset: 6%;
+      border-radius: 50%;
+      border-color: rgba(83, 196, 255, 0.08);
+    }
+    .dependency-graph svg {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      height: 100%;
+      min-height: 496px;
+      display: block;
+    }
+    .graph-mesh-link {
+      stroke: rgba(46, 182, 255, 0.38);
+      stroke-width: 1.2;
+      fill: none;
+      opacity: 0.68;
+    }
+    .graph-mesh-link-faint {
+      stroke: rgba(46, 182, 255, 0.14);
+      stroke-width: 0.8;
+      fill: none;
+      opacity: 0.5;
+    }
+    .graph-mesh-dot {
+      fill: rgba(46, 182, 255, 0.72);
+      opacity: 0.76;
+    }
+    .graph-mesh-dot-faint {
+      fill: rgba(46, 182, 255, 0.32);
+      opacity: 0.48;
+    }
+    .graph-link-flow {
+      fill: none;
+      stroke-linecap: round;
+      stroke-dasharray: 10 12;
+      animation: graphFlow 7s linear infinite;
+      opacity: 0.55;
+    }
+    .graph-link {
+      fill: none;
+      stroke-linecap: round;
+      opacity: 0.88;
+    }
+    .graph-link-dependency {
+      stroke: rgba(15, 118, 110, 0.42);
+      stroke-width: 2.6;
+    }
+    .graph-link-impacted {
+      stroke: rgba(180, 35, 24, 0.34);
+      stroke-width: 2.8;
+    }
+    .graph-link-halo {
+      stroke: rgba(255,255,255,0.72);
+      stroke-width: 8;
+      fill: none;
+    }
+    .graph-link-severity-high {
+      stroke: rgba(180, 35, 24, 0.42);
+    }
+    .graph-link-severity-medium {
+      stroke: rgba(161, 98, 7, 0.42);
+    }
+    .graph-node {
+      cursor: pointer;
+      transition: transform 180ms ease, opacity 180ms ease, filter 180ms ease;
+      transform-origin: center;
+    }
+    .graph-node:hover {
+      transform: scale(1.05);
+      filter: saturate(1.08);
+    }
+    .graph-node.is-dimmed {
+      opacity: 0.28;
+    }
+    .graph-node.is-active {
+      opacity: 1;
+    }
+    .graph-node circle,
+    .graph-node rect {
+      stroke-width: 2;
+      filter: drop-shadow(0 12px 22px rgba(30, 41, 51, 0.12));
+      transition: filter 180ms ease, stroke 180ms ease, fill 180ms ease;
+    }
+    body.graph-mode .graph-node circle,
+    body.graph-mode .graph-node rect {
+      filter: drop-shadow(0 0 14px rgba(64, 208, 255, 0.18)) drop-shadow(0 12px 34px rgba(0, 0, 0, 0.42));
+    }
+    .graph-node:hover circle,
+    .graph-node:hover rect {
+      filter: drop-shadow(0 16px 28px rgba(30, 41, 51, 0.18));
+    }
+    .graph-node-healthy {
+      fill: rgba(15, 118, 110, 0.14);
+      stroke: rgba(15, 118, 110, 0.48);
+    }
+    body.graph-mode .graph-node-healthy {
+      fill: rgba(25, 174, 238, 0.18);
+      stroke: rgba(64, 208, 255, 0.72);
+    }
+    .graph-node-source {
+      fill: rgba(180, 35, 24, 0.14);
+      stroke: rgba(180, 35, 24, 0.52);
+    }
+    body.graph-mode .graph-node-source {
+      fill: rgba(255, 120, 120, 0.18);
+      stroke: rgba(255, 176, 176, 0.9);
+    }
+    .graph-node-impacted {
+      fill: rgba(161, 98, 7, 0.14);
+      stroke: rgba(161, 98, 7, 0.48);
+    }
+    body.graph-mode .graph-node-impacted {
+      fill: rgba(255, 151, 151, 0.16);
+      stroke: rgba(255, 176, 176, 0.76);
+    }
+    .graph-core-ring {
+      fill: rgba(180, 35, 24, 0.08);
+      stroke: rgba(180, 35, 24, 0.18);
+      stroke-width: 2;
+    }
+    body.graph-mode .graph-core-ring {
+      fill: rgba(255, 120, 120, 0.06);
+      stroke: rgba(255, 176, 176, 0.2);
+    }
+    .graph-core-glow {
+      fill: rgba(180, 35, 24, 0.08);
+      filter: blur(20px);
+    }
+    body.graph-mode .graph-core-glow {
+      fill: rgba(255, 143, 143, 0.18);
+      filter: blur(26px);
+    }
+    .graph-core-pulse {
+      fill: none;
+      stroke: rgba(180, 35, 24, 0.18);
+      stroke-width: 2;
+      animation: graphPulse 3s ease-out infinite;
+      transform-origin: center;
+    }
+    .graph-label {
+      font-size: 14px;
+      font-weight: 700;
+      fill: #1e2933;
+      text-anchor: middle;
+    }
+    body.graph-mode .graph-label {
+      fill: #ebfbff;
+    }
+    .graph-subtext {
+      font-size: 11px;
+      fill: #5f6b76;
+      text-anchor: middle;
+    }
+    body.graph-mode .graph-subtext {
+      fill: rgba(223, 247, 255, 0.72);
+    }
+    .graph-node-detail {
+      position: absolute;
+      min-width: 220px;
+      max-width: 300px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(30, 41, 51, 0.08);
+      background: rgba(255, 250, 240, 0.96);
+      box-shadow: 0 18px 40px rgba(30, 41, 51, 0.16);
+      backdrop-filter: blur(10px);
+      pointer-events: none;
+      opacity: 0;
+      transform: translateY(6px);
+      transition: opacity 160ms ease, transform 160ms ease;
+      z-index: 2;
+    }
+    body.graph-mode .graph-node-detail {
+      background: rgba(6, 16, 24, 0.94);
+      border-color: rgba(83, 196, 255, 0.14);
+      color: #e7fbff;
+      box-shadow: 0 20px 48px rgba(0, 0, 0, 0.42);
+    }
+    .graph-node-detail.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .graph-node-detail strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 0.98rem;
+    }
+    .graph-node-detail .subtle {
+      display: block;
+      margin-bottom: 10px;
+      font-size: 0.84rem;
+    }
+    .graph-node-detail .metric {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 4px 0;
+      font-size: 0.88rem;
+    }
+    .graph-badge-pill {
+      fill: rgba(255,255,255,0.88);
+      stroke: rgba(30, 41, 51, 0.08);
+      stroke-width: 1.25;
+    }
+    body.graph-mode .graph-badge-pill {
+      fill: rgba(8, 18, 25, 0.88);
+      stroke: rgba(83, 196, 255, 0.16);
+    }
+    .graph-badge-pill-critical {
+      fill: rgba(180, 35, 24, 0.14);
+      stroke: rgba(180, 35, 24, 0.28);
+    }
+    .graph-badge-pill-atrisk {
+      fill: rgba(161, 98, 7, 0.14);
+      stroke: rgba(161, 98, 7, 0.28);
+    }
+    .graph-badge-pill-dependency {
+      fill: rgba(15, 118, 110, 0.12);
+      stroke: rgba(15, 118, 110, 0.24);
+    }
+    .graph-badge-text {
+      font-size: 10px;
+      font-weight: 700;
+      fill: #1e2933;
+      text-anchor: middle;
+      letter-spacing: 0.04em;
+    }
+    body.graph-mode .graph-badge-text {
+      fill: #e7fbff;
+    }
+    body.graph-mode pre {
+      background: rgba(4, 12, 18, 0.94);
+      color: #e6fbff;
+    }
+    @keyframes graphPulse {
+      0% { transform: scale(0.94); opacity: 0.55; }
+      70% { transform: scale(1.16); opacity: 0; }
+      100% { transform: scale(1.16); opacity: 0; }
+    }
+    @keyframes graphFlow {
+      from { stroke-dashoffset: 0; }
+      to { stroke-dashoffset: -44; }
+    }
+    @media (max-width: 1080px) {
+      .dependency-graph {
+        min-height: 440px;
+      }
+      .dependency-graph svg {
+        min-height: 416px;
+      }
+    }
+    .evidence-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .evidence-item {
+      border-left: 4px solid rgba(15, 118, 110, 0.45);
+      background: rgba(15, 118, 110, 0.06);
+      padding: 10px 12px;
+      border-radius: 12px;
+    }
+    body.graph-mode .hero p {
+      max-width: 980px;
+    }
+    body.graph-mode .graph-only-shell {
+      display: grid;
+      gap: 18px;
+    }
+    body.graph-mode .graph-only-shell .graph-meta {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <h1>Alert Recommendations</h1>
+      <p>
+        This view shows recent AiDE recommendations generated from Prometheus and Alertmanager alerts.
+        When a recommendation contains a target app container and an executable command, you can trigger the in-container agent directly from here.
+      </p>
+      <div class="meta">
+        <div class="pill" id="summaryPill">Loading recommendations...</div>
+        <div class="pill">Auto refresh: 10s</div>
+        <a class="pill" href="/genai/incidents/dashboard/" style="text-decoration:none; color:inherit;">Incident Timeline</a>
+      </div>
+    </section>
+
+    <section class="grid" id="results"></section>
+  </main>
+
+  <script>
+    const resultsContainer = document.getElementById("results");
+    const summaryPill = document.getElementById("summaryPill");
+    const params = new URLSearchParams(window.location.search);
+    const selectedService = params.get("service");
+    const selectedGraph = params.get("graph");
+    if (selectedGraph) {
+      document.body.classList.add("graph-mode");
+    }
+    let latestEntries = [];
+    const pendingExecutions = new Set();
+
+    function statusClass(status) {
+      const normalized = String(status || "").toLowerCase();
+      if (normalized === "firing") return "status-firing";
+      if (normalized === "resolved") return "status-resolved";
+      return "status-pending";
+    }
+
+    function formatAnalysis(value) {
+      if (value === null || value === undefined || value === "") {
+        return "No post-command analysis yet.";
+      }
+      if (typeof value === "string") {
+        return value;
+      }
+      try {
+        return JSON.stringify(value, null, 2);
+      } catch (error) {
+        return String(value);
+      }
+    }
+
+    function summarizeEvidence(entry) {
+      const evidence = [];
+      if (entry.initial_ai_reasoning || entry.why) {
+        evidence.push(entry.initial_ai_reasoning || entry.why);
+      }
+      if (entry.post_command_ai_analysis || entry.final_answer) {
+        evidence.push(entry.post_command_ai_analysis || entry.final_answer);
+      }
+      if (entry.execution_status === "completed" && entry.diagnostic_command) {
+        evidence.push(`Diagnostic command executed: ${entry.diagnostic_command}`);
+      }
+      return evidence.slice(0, 3);
+    }
+
+    function escapeNodeText(value) {
+      return String(value || "").replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+    }
+
+    function formatMetricValue(value) {
+      if (value === null || value === undefined || value === "") {
+        return "Unknown";
+      }
+      if (typeof value === "number") {
+        if (!Number.isFinite(value)) {
+          return "Unknown";
+        }
+        if (value > 0 && value < 1) {
+          return `${(value * 100).toFixed(1)}%`;
+        }
+        return value.toFixed(value < 10 ? 2 : 0);
+      }
+      return String(value);
+    }
+
+    function seededRandom(seed) {
+      let state = 0;
+      const source = String(seed || "graph-seed");
+      for (let index = 0; index < source.length; index += 1) {
+        state = ((state * 31) + source.charCodeAt(index)) >>> 0;
+      }
+      return function next() {
+        state = (1664525 * state + 1013904223) >>> 0;
+        return state / 4294967296;
+      };
+    }
+
+    function distance(a, b) {
+      const dx = a.x - b.x;
+      const dy = a.y - b.y;
+      return Math.sqrt((dx * dx) + (dy * dy));
+    }
+
+    function generateMesh(seed, width, height, focusX, focusY) {
+      const random = seededRandom(seed);
+      const meshPoints = [];
+      const outerPoints = [];
+      const count = 128;
+      const centerX = focusX;
+      const centerY = focusY;
+      const radiusX = width * 0.32;
+      const radiusY = height * 0.34;
+
+      for (let index = 0; index < count; index += 1) {
+        const angle = random() * Math.PI * 2;
+        const radiusFactor = 0.2 + Math.pow(random(), 0.82) * 0.82;
+        meshPoints.push({
+          x: centerX + (Math.cos(angle) * radiusX * radiusFactor),
+          y: centerY + (Math.sin(angle) * radiusY * radiusFactor),
+          faint: random() > 0.78,
+        });
+      }
+
+      for (let index = 0; index < 22; index += 1) {
+        outerPoints.push({
+          x: random() * width,
+          y: random() * height,
+          faint: true,
+        });
+      }
+
+      const createLinks = (points, maxDistance) => {
+        const links = [];
+        for (let index = 0; index < points.length; index += 1) {
+          for (let inner = index + 1; inner < points.length; inner += 1) {
+            const length = distance(points[index], points[inner]);
+            if (length < maxDistance) {
+              links.push({
+                from: points[index],
+                to: points[inner],
+                faint: points[index].faint || points[inner].faint,
+              });
+            }
+          }
+        }
+        return links;
+      };
+
+      return {
+        meshPoints,
+        outerPoints,
+        meshLinks: createLinks(meshPoints, Math.min(width, height) * 0.14),
+        outerLinks: createLinks(outerPoints, Math.min(width, height) * 0.22),
+      };
+    }
+
+    function buildNodeMetrics(entry, nodeName, nodeType) {
+      const metrics = [];
+      if (nodeType === "source") {
+        metrics.push(["Alert", entry.alert_name || "Unknown"]);
+        metrics.push(["Status", entry.status || "Unknown"]);
+        metrics.push(["Risk", formatMetricValue(entry.predicted_risk_score)]);
+      } else if (nodeType === "dependency") {
+        metrics.push(["Role", "Supporting dependency"]);
+        metrics.push(["Connection", `Feeds ${entry.target_host || "service"}`]);
+      } else {
+        metrics.push(["Role", "Potentially impacted"]);
+        metrics.push(["Signal", entry.status === "firing" ? "Actively affected" : "Within blast radius"]);
+      }
+
+      if (entry.incident_title || entry.incident_key) {
+        metrics.push(["Incident", entry.incident_title || entry.incident_key]);
+      }
+
+      return metrics.slice(0, 4);
+    }
+
+    function renderGraphTooltip(node) {
+      return `
+        <strong>${escapeNodeText(node.name)}</strong>
+        <span class="subtle">${escapeNodeText(node.description)}</span>
+        ${node.metrics.map(([label, value]) => `
+          <div class="metric">
+            <span>${escapeNodeText(label)}</span>
+            <span>${escapeNodeText(value)}</span>
+          </div>
+        `).join("")}
+      `;
+    }
+
+    function renderDependencyGraph(entry) {
+      const source = entry.target_host || entry.alert_name || "incident";
+      const dependsOn = (entry.depends_on || []).slice(0, 4);
+      const blastRadius = (entry.blast_radius || []).slice(0, 5);
+      const isFocusedGraph = Boolean(selectedGraph);
+      const graphWidth = isFocusedGraph ? 1320 : 900;
+      const graphHeight = isFocusedGraph ? 860 : 500;
+      const centerX = isFocusedGraph ? 660 : 450;
+      const centerY = isFocusedGraph ? 430 : 250;
+      const dependencyRadiusX = 240;
+      const dependencyRadiusY = 168;
+      const impactRadiusX = 260;
+      const impactRadiusY = 178;
+      const focusedDependencyRadiusX = graphWidth * 0.2;
+      const focusedDependencyRadiusY = graphHeight * 0.23;
+      const focusedImpactRadiusX = graphWidth * 0.22;
+      const focusedImpactRadiusY = graphHeight * 0.25;
+      const mesh = isFocusedGraph
+        ? generateMesh(entry.alert_id || entry.alert_name || "mesh", graphWidth, graphHeight, centerX, centerY)
+        : null;
+      const coreNode = {
+        id: `source-${entry.alert_id}`,
+        name: source,
+        type: "source",
+        subtitle: "Suspected root cause",
+        description: "This node is the current best root-cause candidate from AiDE's analysis.",
+        x: centerX,
+        y: centerY,
+        radius: isFocusedGraph ? 66 : 56,
+        metrics: buildNodeMetrics(entry, source, "source"),
+      };
+
+      const createArcNodes = (names, side, type, subtitle, description) => {
+        if (!names.length) {
+          return [];
+        }
+        const startAngle = side === "left" ? 212 : -32;
+        const endAngle = side === "left" ? 148 : 32;
+        return names.map((name, index) => {
+          const ratio = names.length === 1 ? 0.5 : index / (names.length - 1);
+          const angle = (startAngle + ((endAngle - startAngle) * ratio)) * (Math.PI / 180);
+          const radiusX = side === "left"
+            ? (isFocusedGraph ? focusedDependencyRadiusX : dependencyRadiusX)
+            : (isFocusedGraph ? focusedImpactRadiusX : impactRadiusX);
+          const radiusY = side === "left"
+            ? (isFocusedGraph ? focusedDependencyRadiusY : dependencyRadiusY)
+            : (isFocusedGraph ? focusedImpactRadiusY : impactRadiusY);
+          return {
+            id: `${type}-${entry.alert_id}-${index}`,
+            name,
+            type,
+            subtitle,
+            description,
+            x: centerX + (Math.cos(angle) * radiusX),
+            y: centerY + (Math.sin(angle) * radiusY),
+            radius: 34,
+            metrics: buildNodeMetrics(entry, name, type),
+          };
+        });
+      };
+
+      const dependencyNodes = createArcNodes(
+        dependsOn,
+        "left",
+        "dependency",
+        "Dependency",
+        "This service or platform dependency is upstream of the suspected failure."
+      );
+      const impactedNodes = createArcNodes(
+        blastRadius,
+        "right",
+        "impacted",
+        "Potentially impacted",
+        "This node sits inside the predicted blast radius and may show user-visible degradation."
+      );
+      const nodes = [...dependencyNodes, coreNode, ...impactedNodes];
+      const links = [
+        ...dependencyNodes.map((node) => ({ from: node, to: coreNode, kind: "dependency" })),
+        ...impactedNodes.map((node) => ({ from: coreNode, to: node, kind: "impacted" })),
+      ];
+
+      const graphId = String(entry.alert_id || entry.alert_name || "graph").replace(/[^a-zA-Z0-9_-]/g, "");
+      const sourceSeverity = String(entry.status || "").toLowerCase() === "firing" ? "critical" : "observed";
+
+      const badgeForNode = (node) => {
+        if (node.type === "source") {
+          return { label: sourceSeverity === "critical" ? "CRITICAL" : "LIVE", variant: sourceSeverity === "critical" ? "critical" : "atrisk" };
+        }
+        if (node.type === "impacted") {
+          return { label: "AT RISK", variant: "atrisk" };
+        }
+        return { label: "DEPEND", variant: "dependency" };
+      };
+
+      const renderLink = (link) => {
+        const ctrlX1 = link.kind === "dependency" ? link.from.x + 72 : link.from.x + 84;
+        const ctrlX2 = link.kind === "dependency" ? link.to.x - 84 : link.to.x - 72;
+        const ctrlY1 = link.from.y + ((link.to.y - link.from.y) * 0.18);
+        const ctrlY2 = link.to.y - ((link.to.y - link.from.y) * 0.18);
+        const d = `M ${link.from.x} ${link.from.y} C ${ctrlX1} ${ctrlY1}, ${ctrlX2} ${ctrlY2}, ${link.to.x} ${link.to.y}`;
+        const severityClass = link.kind === "impacted"
+          ? (String(entry.status || "").toLowerCase() === "firing" ? "graph-link-severity-high" : "graph-link-severity-medium")
+          : "";
+        return `
+          <path class="graph-link-halo" d="${d}"></path>
+          <path class="graph-link-flow ${severityClass}" d="${d}"></path>
+          <path class="graph-link graph-link-${link.kind} ${severityClass}" data-link-kind="${link.kind}" d="${d}"></path>
+        `;
+      };
+
+      const renderNode = (node) => {
+        const cssClass = node.type === "source"
+          ? "graph-node-source"
+          : (node.type === "impacted" ? "graph-node-impacted" : "graph-node-healthy");
+        const badge = badgeForNode(node);
+        const nodeWidth = isFocusedGraph ? 146 : 128;
+        const nodeHeight = isFocusedGraph ? 58 : 52;
+        const textX = nodeWidth / 2;
+
+        if (node.type === "source") {
+          return `
+            <g
+              class="graph-node"
+              data-graph-id="${graphId}"
+              data-node-name="${escapeNodeText(node.name)}"
+              data-node-type="${escapeNodeText(node.subtitle)}"
+              data-node-description="${escapeNodeText(node.description)}"
+              data-node-metrics="${escapeNodeText(JSON.stringify(node.metrics))}"
+              data-node-group="source"
+              transform="translate(${node.x}, ${node.y})"
+            >
+              <circle class="graph-core-pulse" r="92"></circle>
+              <circle class="graph-core-glow" r="82"></circle>
+              <circle class="graph-core-ring" r="76"></circle>
+              <circle class="${cssClass}" r="${node.radius}"></circle>
+              <rect class="graph-badge-pill graph-badge-pill-${badge.variant}" x="-36" y="-80" width="72" height="20" rx="10" ry="10"></rect>
+              <text class="graph-badge-text" x="0" y="-66">${badge.label}</text>
+              <text class="graph-label" x="0" y="-4">${escapeNodeText(node.name)}</text>
+              <text class="graph-subtext" x="0" y="18">${escapeNodeText(node.subtitle)}</text>
+            </g>
+          `;
+        }
+
+        return `
+            <g
+              class="graph-node"
+              data-graph-id="${graphId}"
+              data-node-name="${escapeNodeText(node.name)}"
+              data-node-type="${escapeNodeText(node.subtitle)}"
+              data-node-description="${escapeNodeText(node.description)}"
+              data-node-metrics="${escapeNodeText(JSON.stringify(node.metrics))}"
+              data-node-group="${node.type}"
+              transform="translate(${node.x - (nodeWidth / 2)}, ${node.y - (nodeHeight / 2)})"
+            >
+            <rect class="${cssClass}" x="0" y="0" width="${nodeWidth}" height="${nodeHeight}" rx="20" ry="20"></rect>
+            <rect class="graph-badge-pill graph-badge-pill-${badge.variant}" x="${(nodeWidth / 2) - 24}" y="-10" width="48" height="18" rx="9" ry="9"></rect>
+            <text class="graph-badge-text" x="${textX}" y="2">${badge.label}</text>
+            <text class="graph-label" x="${textX}" y="${isFocusedGraph ? 24 : 22}">${escapeNodeText(node.name)}</text>
+            <text class="graph-subtext" x="${textX}" y="${isFocusedGraph ? 42 : 38}">${escapeNodeText(node.subtitle)}</text>
+          </g>
+        `;
+      };
+
+      return `
+        <div class="dependency-graph ${isFocusedGraph ? 'dependency-graph-focused' : ''}">
+          <div class="graph-node-detail" id="graph-detail-${graphId}"></div>
+          <svg viewBox="0 0 ${graphWidth} ${graphHeight}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Dependency graph">
+            ${isFocusedGraph ? `
+              ${mesh.outerLinks.map((link) => `
+                <path class="graph-mesh-link-faint" d="M ${link.from.x} ${link.from.y} L ${link.to.x} ${link.to.y}"></path>
+              `).join("")}
+              ${mesh.outerPoints.map((point) => `
+                <circle class="graph-mesh-dot-faint" cx="${point.x}" cy="${point.y}" r="2.2"></circle>
+              `).join("")}
+              ${mesh.meshLinks.map((link) => `
+                <path class="${link.faint ? 'graph-mesh-link-faint' : 'graph-mesh-link'}" d="M ${link.from.x} ${link.from.y} L ${link.to.x} ${link.to.y}"></path>
+              `).join("")}
+              ${mesh.meshPoints.map((point) => `
+                <circle class="${point.faint ? 'graph-mesh-dot-faint' : 'graph-mesh-dot'}" cx="${point.x}" cy="${point.y}" r="${point.faint ? 2.2 : 3}"></circle>
+              `).join("")}
+            ` : ""}
+            ${links.map(renderLink).join("")}
+            ${nodes.map(renderNode).join("")}
+          </svg>
+        </div>
+      `;
+    }
+
+    function attachGraphInteractions(scope) {
+      const graphContainers = scope.querySelectorAll(".dependency-graph");
+      graphContainers.forEach((container) => {
+        const detail = container.querySelector(".graph-node-detail");
+        const graphNodes = container.querySelectorAll(".graph-node");
+        const graphLinks = container.querySelectorAll(".graph-link");
+        const graphFlows = container.querySelectorAll(".graph-link-flow");
+        if (!detail || !graphNodes.length) {
+          return;
+        }
+
+        const hideDetail = () => {
+          detail.classList.remove("visible");
+          graphNodes.forEach((node) => {
+            node.classList.remove("is-dimmed", "is-active");
+          });
+          graphLinks.forEach((link) => {
+            link.style.opacity = "";
+          });
+          graphFlows.forEach((link) => {
+            link.style.opacity = "";
+          });
+        };
+
+        graphNodes.forEach((node) => {
+          node.addEventListener("mouseenter", (event) => {
+            const parsedNode = {
+              name: node.dataset.nodeName || "Unknown node",
+              subtitle: node.dataset.nodeType || "",
+              description: node.dataset.nodeDescription || "",
+              metrics: JSON.parse(node.dataset.nodeMetrics || "[]"),
+              type: node.dataset.nodeGroup || "source",
+            };
+            detail.innerHTML = renderGraphTooltip(parsedNode);
+            const containerRect = container.getBoundingClientRect();
+            const nodeRect = node.getBoundingClientRect();
+            const preferredLeft = (nodeRect.right - containerRect.left) + 16;
+            const preferredTop = (nodeRect.top - containerRect.top) - 4;
+            const maxLeft = Math.max(containerRect.width - 310, 18);
+            const left = preferredLeft <= maxLeft
+              ? preferredLeft
+              : Math.max((nodeRect.left - containerRect.left) - 306, 18);
+            const top = Math.min(
+              Math.max(preferredTop, 18),
+              Math.max(containerRect.height - 180, 18)
+            );
+            detail.style.left = `${left}px`;
+            detail.style.top = `${top}px`;
+            detail.classList.add("visible");
+
+            graphNodes.forEach((candidate) => {
+              if (candidate === node) {
+                candidate.classList.add("is-active");
+                candidate.classList.remove("is-dimmed");
+              } else {
+                candidate.classList.add("is-dimmed");
+                candidate.classList.remove("is-active");
+              }
+            });
+
+            const group = node.dataset.nodeGroup || "source";
+            graphLinks.forEach((link) => {
+              if (group === "source") {
+                link.style.opacity = "0.96";
+              } else if (group === "dependency") {
+                link.style.opacity = link.dataset.linkKind === "dependency" ? "0.96" : "0.16";
+              } else {
+                link.style.opacity = link.dataset.linkKind === "impacted" ? "0.96" : "0.16";
+              }
+            });
+            graphFlows.forEach((link) => {
+              if (group === "source") {
+                link.style.opacity = "0.65";
+              } else if (group === "dependency") {
+                link.style.opacity = link.classList.contains("graph-link-severity-high") || link.classList.contains("graph-link-severity-medium")
+                  ? "0.08"
+                  : "0.6";
+              } else {
+                link.style.opacity = link.classList.contains("graph-link-severity-high") || link.classList.contains("graph-link-severity-medium")
+                  ? "0.62"
+                  : "0.08";
+              }
+            });
+          });
+
+        });
+
+        container.addEventListener("mouseleave", hideDetail);
+      });
+    }
+
+    async function executeRecommendation(entry) {
+      latestEntries = latestEntries.map((current) => {
+        if (current.alert_id !== entry.alert_id) {
+          return current;
+        }
+        return {
+          ...current,
+          execution_status: "running"
+        };
+      });
+      render(latestEntries);
+
+      const response = await fetch("/genai/execute_command/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          alert_id: entry.alert_id,
+          command: entry.diagnostic_command,
+          original_question: entry.summary || entry.alert_name,
+          target_host: entry.target_host
+        })
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        throw new Error(body.error || body.detail || "Command execution failed");
+      }
+      latestEntries = latestEntries.map((current) => {
+        if (current.alert_id !== entry.alert_id) {
+          return current;
+        }
+        return {
+          ...current,
+          last_execution_at: body.last_execution_at || new Date().toISOString(),
+          execution_status: body.execution_status || (body.agent_success ? "completed" : "failed"),
+          agent_success: body.agent_success,
+          agent_response: body.agent_response,
+          command_output: body.command_output,
+          final_answer: body.final_answer,
+          post_command_ai_analysis: body.final_answer
+        };
+      });
+      render(latestEntries);
+      await loadRecommendations();
+    }
+
+    function render(entries) {
+      let filteredEntries = selectedService
+        ? entries.filter((entry) => {
+            const labels = entry.labels || {};
+            return entry.target_host === selectedService || labels.service === selectedService;
+          })
+        : entries;
+      if (selectedGraph) {
+        filteredEntries = filteredEntries.filter((entry) => String(entry.alert_id) === String(selectedGraph));
+      }
+      summaryPill.textContent = selectedService
+        ? `${filteredEntries.length} recommendation(s) for ${selectedService}`
+        : selectedGraph
+          ? `${filteredEntries.length} focused graph view`
+          : `${entries.length} recent recommendation(s)`;
+      resultsContainer.innerHTML = "";
+
+      if (!filteredEntries.length) {
+        resultsContainer.innerHTML = '<section class="card"><h2>No recommendations yet</h2><p class="subtle">Fire a demo alert and this page will populate automatically.</p></section>';
+        return;
+      }
+
+      for (const entry of filteredEntries) {
+        const card = document.createElement("section");
+        card.className = "card";
+        const executionEnabled = Boolean(entry.should_execute && entry.target_host && entry.diagnostic_command);
+        const isRunning = pendingExecutions.has(entry.alert_id);
+        const executionStatus = entry.execution_status || (entry.last_execution_at ? "completed" : "pending");
+        const executionLabel =
+          isRunning || executionStatus === "running" ? "Command executing..." :
+          executionStatus === "completed" ? "Command executed" :
+          executionStatus === "failed" ? "Command failed" :
+          "Awaiting command execution";
+
+        if (selectedGraph) {
+          card.innerHTML = `
+            <div class="graph-only-shell">
+              <header>
+                <div>
+                  <h2>${entry.alert_name || "Unknown Alert"}</h2>
+                  <div class="subtle ${statusClass(entry.status)}">Status: ${entry.status || "unknown"}</div>
+                  <div class="subtle">Root-cause candidate: ${entry.target_host || "-"}</div>
+                </div>
+                <div class="graph-meta">
+                  <div class="pill">Blast Radius: ${entry.blast_radius && entry.blast_radius.length ? entry.blast_radius.length : 0}</div>
+                  <div class="pill">Dependencies: ${entry.depends_on && entry.depends_on.length ? entry.depends_on.length : 0}</div>
+                  <a class="pill" href="/genai/alerts/dashboard/" style="text-decoration:none; color:inherit;">Back to Recommendations</a>
+                </div>
+              </header>
+              ${renderDependencyGraph(entry)}
+            </div>
+          `;
+          resultsContainer.appendChild(card);
+          attachGraphInteractions(card);
+          continue;
+        }
+
+        card.innerHTML = `
+          <header>
+            <div>
+              <h2>${entry.alert_name || "Unknown Alert"}</h2>
+              <div class="subtle ${statusClass(entry.status)}">Status: ${entry.status || "unknown"}</div>
+              <div class="subtle">Created: ${entry.created_at || "-"}</div>
+              <div class="subtle">Target Host: ${entry.target_host || "-"}</div>
+            </div>
+            <div class="pill">${entry.from_alertmanager ? "Alertmanager" : "Manual"}</div>
+          </header>
+          <div class="section-title">Initial AI Diagnosis</div>
+          <p><strong>Summary:</strong> ${entry.initial_ai_diagnosis || entry.summary || "-"}</p>
+          <p><strong>Reasoning:</strong> ${entry.initial_ai_reasoning || entry.why || "-"}</p>
+          <p><strong>Command:</strong> <code>${entry.diagnostic_command || "-"}</code></p>
+          <p><strong>Incident:</strong> ${entry.incident_key ? `<a href="/genai/incidents/${entry.incident_key}/">${entry.incident_title || entry.incident_key}</a>` : "-"}</p>
+          <div class="rca-grid">
+            <div class="rca-card">
+              <strong>Likely Source</strong>
+              <div>${entry.target_host || entry.alert_name || "-"}</div>
+            </div>
+            <div class="rca-card">
+              <strong>Blast Radius</strong>
+              <div>${entry.blast_radius && entry.blast_radius.length ? entry.blast_radius.join(", ") : "Localized or unknown"}</div>
+            </div>
+            <div class="rca-card">
+              <strong>Dependency Flow</strong>
+              ${renderDependencyGraph(entry)}
+            </div>
+          </div>
+          <div class="section-title">Evidence Graph</div>
+          <div class="evidence-list">
+            ${summarizeEvidence(entry).map((item) => `<div class="evidence-item">${item}</div>`).join("") || '<div class="evidence-item">No evidence captured yet.</div>'}
+          </div>
+          <div class="section-title">Post-Command AI Analysis</div>
+          <p><strong>Status:</strong> ${executionLabel}</p>
+          <p><strong>Analysis:</strong></p>
+          <pre>${formatAnalysis(entry.post_command_ai_analysis || entry.final_answer)}</pre>
+          <div class="actions">
+            <button data-alert-id="${entry.alert_id}" ${(executionEnabled && !isRunning) ? "" : "disabled"}>${isRunning ? "Running..." : "Run In App Container"}</button>
+            <button class="secondary" data-copy-command="${entry.alert_id}" ${entry.diagnostic_command ? "" : "disabled"}>Copy Command</button>
+            <a class="pill" href="/genai/alerts/dashboard/?graph=${encodeURIComponent(entry.alert_id)}" target="_blank" rel="noreferrer" style="text-decoration:none; color:inherit;">Open Graph</a>
+          </div>
+        `;
+
+        const runButton = card.querySelector("button[data-alert-id]");
+        runButton?.addEventListener("click", async () => {
+          pendingExecutions.add(entry.alert_id);
+          latestEntries = latestEntries.map((current) => {
+            if (current.alert_id !== entry.alert_id) {
+              return current;
+            }
+            return {
+              ...current,
+              execution_status: "running"
+            };
+          });
+          render(latestEntries);
+          try {
+            await executeRecommendation(entry);
+          } catch (error) {
+            pendingExecutions.delete(entry.alert_id);
+            latestEntries = latestEntries.map((current) => {
+              if (current.alert_id !== entry.alert_id) {
+                return current;
+              }
+              return {
+                ...current,
+                execution_status: "failed"
+              };
+            });
+            render(latestEntries);
+            alert(String(error));
+            return;
+          }
+          pendingExecutions.delete(entry.alert_id);
+          render(latestEntries);
+        });
+
+        const copyButton = card.querySelector("button[data-copy-command]");
+        copyButton?.addEventListener("click", async () => {
+          await navigator.clipboard.writeText(entry.diagnostic_command || "");
+          copyButton.textContent = "Copied";
+          setTimeout(() => { copyButton.textContent = "Copy Command"; }, 1200);
+        });
+
+        resultsContainer.appendChild(card);
+        attachGraphInteractions(card);
+      }
+    }
+
+    async function loadRecommendations() {
+      const response = await fetch("/genai/alerts/recent/");
+      const body = await response.json();
+      const incoming = body.results || [];
+      latestEntries = incoming.map((entry) => {
+        if (!pendingExecutions.has(entry.alert_id)) {
+          return entry;
+        }
+        const existing = latestEntries.find((current) => current.alert_id === entry.alert_id);
+        if (!existing) {
+          return {
+            ...entry,
+            execution_status: "running"
+          };
+        }
+        return {
+          ...entry,
+          ...existing,
+          execution_status: "running"
+        };
+      });
+      render(latestEntries);
+    }
+
+    loadRecommendations();
+    setInterval(loadRecommendations, 10000);
+  </script>
+</body>
+</html>

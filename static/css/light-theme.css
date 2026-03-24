@@ -1,0 +1,70 @@
+/* General Body Styles */
+body {
+    background-color: #ffffff;
+    background-attachment: fixed;
+    min-height: 100vh;
+    font-family: 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+    color: #396ea3; /* Default text color for light theme */
+    transition: background-color 0.3s, color 0.3s;
+}
+
+/* Navbar Styles */
+.navbar {
+    background-color: rgba(255, 255, 255, 0.95);
+    box-shadow: 0 2px 4px rgba(0,0,0,.1);
+}
+
+/* Card Styles */
+.card {
+    background-color: rgba(255, 255, 255, 0.9);
+    border: 1px solid #dee2e6;
+}
+
+.card-header {
+    background-color: #f8f9fa;
+    border-bottom: 1px solid #dee2e6;
+}
+
+/* Table Styles */
+.table {
+    background-color: #ffffff;
+    color: #212529;
+}
+
+.table-striped > tbody > tr:nth-of-type(odd) {
+    background-color: rgba(0, 0, 0, 0.05);
+}
+
+thead {
+    background-color: #0d6efd; /* Match Bootstrap primary button */
+    color: #FFFFFF; /* White */
+    font-weight: bold;
+}
+
+/* Welcome Message */
+.welcome-message {
+    background-color: rgba(255, 255, 255, 0.9);
+    padding: 40px;
+    border-radius: .5rem;
+    text-align: center;
+}
+
+/* Pagination Styles */
+.pagination .page-link {
+    color: #0d6efd;
+    background-color: #fff;
+    border-color: #dee2e6;
+}
+
+.pagination .page-item.active .page-link {
+    z-index: 3;
+    color: #fff;
+    background-color: #0d6efd;
+    border-color: #0d6efd;
+}
+
+.pagination .page-item.disabled .page-link {
+    color: #6c757d;
+    background-color: #fff;
+    border-color: #dee2e6;
+}

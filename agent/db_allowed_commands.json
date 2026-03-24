@@ -1,0 +1,15 @@
+{
+  "allowed_prefixes": [
+    ["pg_isready", "-h", "db"],
+    ["psql", "-h", "db", "-U", "user", "-d", "aiops", "-c"],
+    ["tail", "-n"],
+    ["cat"],
+    ["df", "-h"],
+    ["free", "-m"],
+    ["uptime"],
+    ["top", "-b", "-n", "1"],
+    ["ps", "aux"],
+    ["ss", "-tulpn"],
+    ["ip", "a"]
+  ]
+}

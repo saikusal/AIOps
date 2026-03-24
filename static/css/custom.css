@@ -1,0 +1,47 @@
+/* General Body Styles */
+body {
+    background: linear-gradient(to right, #fbc2eb, #a6c1ee); /* Pinkish to bluish gradient */
+    background-attachment: fixed;
+    min-height: 100vh;
+    font-family: 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+}
+
+/* Navbar Styles */
+.navbar {
+    background-color: rgba(255, 255, 255, 0.95);
+    box-shadow: 0 2px 4px rgba(0,0,0,.1);
+}
+
+/* Card Styles */
+.card {
+    background-color: rgba(255, 255, 255, 0.9);
+}
+
+/* Table Styles */
+.table {
+    background-color: #ffffff;
+}
+
+/* Welcome Message */
+.welcome-message {
+    background-color: rgba(255, 255, 255, 0.9);
+    padding: 40px;
+    border-radius: .5rem;
+    text-align: center;
+}
+
+/* Pagination Styles */
+.pagination .page-link {
+    color: #0d6efd;
+}
+
+.pagination .page-item.active .page-link {
+    z-index: 3;
+    color: #fff;
+    background-color: #0d6efd;
+    border-color: #0d6efd;
+}
+
+.pagination .page-item.disabled .page-link {
+    color: #6c757d;
+}

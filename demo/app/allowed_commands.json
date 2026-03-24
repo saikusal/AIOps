@@ -1,0 +1,15 @@
+{
+  "allowed_prefixes": [
+    ["tail", "-n"],
+    ["cat"],
+    ["df", "-h"],
+    ["free", "-m"],
+    ["uptime"],
+    ["top", "-b", "-n", "1"],
+    ["ps", "aux"],
+    ["ss", "-tulpn"],
+    ["ip", "a"],
+    ["ip", "-s", "link"],
+    ["dmesg", "--ctime", "--level=err,warn"]
+  ]
+}

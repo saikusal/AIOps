@@ -1,0 +1,83 @@
+/* General Body Styles */
+body.dark-mode {
+    background: #121212; /* Dark background */
+    color: #e0e0e0; /* Light text color */
+}
+
+/* Navbar Styles */
+.dark-mode .navbar {
+    background-color: #1f1f1f;
+    box-shadow: 0 2px 4px rgba(0,0,0,.5);
+}
+
+/* Card Styles */
+.dark-mode .card {
+    background-color: #1e1e1e;
+    border: 1px solid #444;
+}
+
+.dark-mode .card-header {
+    background-color: #2a2a2a;
+    border-bottom: 1px solid #444;
+}
+
+/* Table Styles */
+.dark-mode .table {
+    background-color: #1e1e1e;
+    color: #e0e0e0; /* Fallback color */
+}
+
+/* Explicitly set text color for all table cells to ensure readability */
+.dark-mode .table th,
+.dark-mode .table td {
+    color: #e0e0e0;
+}
+
+.dark-mode .table-striped > tbody > tr:nth-of-type(odd) {
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.dark-mode thead {
+    color: #e0e0e0;
+}
+
+/* Welcome Message */
+.dark-mode .welcome-message {
+    background-color: #1e1e1e;
+    color: #e0e0e0;
+}
+
+/* Pagination Styles */
+.dark-mode .pagination .page-link {
+    color: #bb86fc;
+    background-color: #1e1e1e;
+    border-color: #444;
+}
+
+.dark-mode .pagination .page-item.active .page-link {
+    color: #fff;
+    background-color: #bb86fc;
+    border-color: #bb86fc;
+}
+
+.dark-mode .pagination .page-item.disabled .page-link {
+    color: #6c757d;
+    background-color: #1e1e1e;
+    border-color: #444;
+}
+
+/* Form Input Styles */
+.dark-mode .form-control,
+.dark-mode .form-select {
+    background-color: #2a2a2a;
+    color: #e0e0e0;
+    border-color: #444;
+}
+
+.dark-mode .form-control:focus,
+.dark-mode .form-select:focus {
+    background-color: #2a2a2a;
+    color: #e0e0e0;
+    border-color: #bb86fc;
+    box-shadow: 0 0 0 0.25rem rgba(187, 134, 252, 0.25);
+}

@@ -1,0 +1,50 @@
+filebeat.inputs:
+  - type: filestream
+    id: aiops-app-log
+    enabled: true
+    paths:
+      - /var/log/aiops/app.log
+      - /var/log/aiops/app.log.*
+    parsers:
+      - multiline:
+          type: pattern
+          pattern: '^[A-Z]+ '
+          negate: true
+          match: after
+    fields:
+      service.name: aiops-web
+      log_type: django_app
+    fields_under_root: true
+
+  - type: filestream
+    id: demo-app-logs
+    enabled: true
+    paths:
+      - /var/log/demo/app-*.log
+    fields:
+      service.name: demo-services
+      log_type: demo_app
+    fields_under_root: true
+
+  - type: filestream
+    id: demo-nginx-logs
+    enabled: true
+    paths:
+      - /var/log/demo/frontend_access.log
+      - /var/log/demo/frontend_error.log
+      - /var/log/demo/gateway_access.log
+      - /var/log/demo/gateway_error.log
+    fields:
+      service.name: demo-nginx
+      log_type: demo_nginx
+    fields_under_root: true
+
+processors:
+  - add_host_metadata: ~
+  - add_fields:
+      target: ''
+      fields:
+        environment: demo
+
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]

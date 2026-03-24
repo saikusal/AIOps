@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIOps Demo</title>
+  <style>
+    :root {
+      --bg: #f3efe5;
+      --panel: #fff9ee;
+      --ink: #1f2a30;
+      --accent: #b44c2b;
+      --accent-soft: #eac8b4;
+      --ok: #2d6a4f;
+      --warn: #b08900;
+      --bad: #9b2226;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top right, rgba(180, 76, 43, 0.18), transparent 35%),
+        linear-gradient(180deg, #f8f4ea 0%, var(--bg) 100%);
+      color: var(--ink);
+    }
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }
+    .hero, .panel {
+      background: var(--panel);
+      border: 1px solid rgba(31, 42, 48, 0.08);
+      border-radius: 20px;
+      box-shadow: 0 20px 60px rgba(31, 42, 48, 0.08);
+    }
+    .hero { padding: 28px; margin-bottom: 24px; }
+    .hero h1 { margin: 0 0 10px; font-size: clamp(2rem, 5vw, 3.4rem); }
+    .hero p { margin: 0; max-width: 720px; line-height: 1.55; }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 20px;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 18px;
+      background: var(--accent);
+      color: white;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: rgba(31, 42, 48, 0.08);
+      color: var(--ink);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 18px;
+    }
+    .panel { padding: 18px; }
+    .metric {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 10px;
+      border-radius: 999px;
+      margin-top: 10px;
+      font-size: 0.9rem;
+      background: rgba(31, 42, 48, 0.06);
+    }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+    pre {
+      background: #221f1c;
+      color: #f9f2e8;
+      padding: 16px;
+      border-radius: 16px;
+      overflow: auto;
+      min-height: 220px;
+    }
+    .transaction-form {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+      margin-top: 18px;
+    }
+    label {
+      font-size: 0.9rem;
+      font-weight: 600;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    input, select {
+      border: 1px solid rgba(31, 42, 48, 0.18);
+      border-radius: 12px;
+      padding: 10px 12px;
+      font: inherit;
+      background: white;
+      color: var(--ink);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <h1>Customer Dashboard Demo</h1>
+      <p>
+        This page calls three backend services through an Nginx gateway. When the
+        database path degrades, the customer-facing page slows down and the telemetry stack
+        captures the propagation across frontend, gateway, app services, and database.
+      </p>
+      <div class="actions">
+        <button id="refreshButton">Refresh Dashboard</button>
+        <button id="checkoutButton">Run Checkout</button>
+        <button id="autoButton" class="secondary">Toggle Auto Refresh</button>
+      </div>
+      <div id="summary" class="metric">Idle</div>
+      <div class="transaction-form">
+        <label>
+          Customer
+          <input id="customerName" value="Ajith Demo User">
+        </label>
+        <label>
+          SKU
+          <select id="sku">
+            <option value="SKU-100">SKU-100</option>
+            <option value="SKU-200">SKU-200</option>
+            <option value="SKU-300">SKU-300</option>
+          </select>
+        </label>
+        <label>
+          Quantity
+          <input id="quantity" type="number" min="1" value="1">
+        </label>
+        <label>
+          Amount
+          <input id="amount" type="number" min="1" step="0.01" value="199.00">
+        </label>
+      </div>
+    </section>
+
+    <section class="grid" id="cards"></section>
+
+    <section class="panel" style="margin-top: 24px;">
+      <h2 style="margin-top: 0;">Latest Checkout Transaction</h2>
+      <pre id="transactionPayload">No transaction executed yet.</pre>
+    </section>
+
+    <section class="panel" style="margin-top: 24px;">
+      <h2 style="margin-top: 0;">Latest Combined Response</h2>
+      <pre id="payload">Waiting for first refresh...</pre>
+    </section>
+  </main>
+
+  <script>
+    const services = [
+      { key: "orders", label: "Orders API" },
+      { key: "inventory", label: "Inventory API" },
+      { key: "billing", label: "Billing API" }
+    ];
+    const cards = document.getElementById("cards");
+    const payload = document.getElementById("payload");
+    const transactionPayload = document.getElementById("transactionPayload");
+    const summary = document.getElementById("summary");
+    const refreshButton = document.getElementById("refreshButton");
+    const checkoutButton = document.getElementById("checkoutButton");
+    const autoButton = document.getElementById("autoButton");
+    const customerName = document.getElementById("customerName");
+    const sku = document.getElementById("sku");
+    const quantity = document.getElementById("quantity");
+    const amount = document.getElementById("amount");
+    let autoRefresh = false;
+    let autoTimer = null;
+
+    function ensureCards() {
+      cards.innerHTML = "";
+      for (const service of services) {
+        const panel = document.createElement("section");
+        panel.className = "panel";
+        panel.id = `card-${service.key}`;
+        panel.innerHTML = `
+          <h2 style="margin: 0 0 8px;">${service.label}</h2>
+          <p style="margin: 0 0 8px;">Waiting for data.</p>
+          <div class="metric">No calls yet</div>
+        `;
+        cards.appendChild(panel);
+      }
+    }
+
+    function setCard(serviceKey, status, text, metricText) {
+      const panel = document.getElementById(`card-${serviceKey}`);
+      const klass = status === "ok" ? "ok" : status === "warn" ? "warn" : "bad";
+      panel.querySelector("p").textContent = text;
+      panel.querySelector(".metric").textContent = metricText;
+      panel.querySelector(".metric").className = `metric ${klass}`;
+    }
+
+    async function fetchService(serviceKey) {
+      const startedAt = performance.now();
+      const response = await fetch(`/api/${serviceKey}`, { headers: { "X-Demo-Client": "frontend" } });
+      const elapsed = performance.now() - startedAt;
+      const body = await response.json();
+      return { ok: response.ok, status: response.status, body, elapsed };
+    }
+
+    async function refreshDashboard() {
+      summary.textContent = "Fetching service data...";
+      const startedAt = performance.now();
+      const result = {};
+      let failures = 0;
+
+      await Promise.all(services.map(async (service) => {
+        try {
+          const response = await fetchService(service.key);
+          result[service.key] = response;
+          const metricText = `${response.status} in ${response.elapsed.toFixed(0)} ms`;
+          if (response.ok) {
+            setCard(
+              service.key,
+              response.elapsed > 3000 ? "warn" : "ok",
+              `State: ${response.body.records?.[0]?.state || "unknown"} | DB ${response.body.db_duration_seconds}s | Events ${response.body.summary?.total_events ?? "-"}`,
+              metricText
+            );
+          } else {
+            failures += 1;
+            setCard(service.key, "bad", response.body.error || "Request failed", metricText);
+          }
+        } catch (error) {
+          failures += 1;
+          result[service.key] = { ok: false, status: 0, error: String(error) };
+          setCard(service.key, "bad", String(error), "Network error");
+        }
+      }));
+
+      const totalElapsed = performance.now() - startedAt;
+      summary.textContent = `${failures ? "Customer impact detected" : "Healthy"} | Combined page load ${totalElapsed.toFixed(0)} ms`;
+      summary.className = `metric ${failures || totalElapsed > 3000 ? "bad" : "ok"}`;
+      payload.textContent = JSON.stringify({
+        generated_at: new Date().toISOString(),
+        total_elapsed_ms: Number(totalElapsed.toFixed(2)),
+        services: result
+      }, null, 2);
+    }
+
+    async function postJson(url, body) {
+      const startedAt = performance.now();
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Demo-Client": "frontend" },
+        body: JSON.stringify(body)
+      });
+      const elapsed = performance.now() - startedAt;
+      const responseBody = await response.json();
+      return { ok: response.ok, status: response.status, body: responseBody, elapsed };
+    }
+
+    async function runCheckout() {
+      const orderRef = `ord-${Date.now()}`;
+      const checkoutPayload = {
+        order_ref: orderRef,
+        customer_name: customerName.value,
+        sku: sku.value,
+        quantity: Number(quantity.value),
+        amount: Number(amount.value)
+      };
+      const steps = [
+        { key: "orders/create", label: "Order creation" },
+        { key: "inventory/reserve", label: "Inventory reservation" },
+        { key: "billing/charge", label: "Billing authorization" }
+      ];
+      const result = { order_ref: orderRef, started_at: new Date().toISOString(), steps: [] };
+      let failed = false;
+
+      summary.textContent = "Running checkout transaction...";
+      summary.className = "metric warn";
+
+      for (const step of steps) {
+        try {
+          const response = await postJson(`/api/${step.key}`, checkoutPayload);
+          result.steps.push({
+            label: step.label,
+            status: response.status,
+            elapsed_ms: Number(response.elapsed.toFixed(2)),
+            body: response.body
+          });
+          if (!response.ok) {
+            failed = true;
+            break;
+          }
+        } catch (error) {
+          failed = true;
+          result.steps.push({
+            label: step.label,
+            status: 0,
+            error: String(error)
+          });
+          break;
+        }
+      }
+
+      result.completed_at = new Date().toISOString();
+      transactionPayload.textContent = JSON.stringify(result, null, 2);
+      summary.textContent = failed
+        ? `Customer impact detected | Checkout ${orderRef} failed`
+        : `Healthy | Checkout ${orderRef} completed`;
+      summary.className = `metric ${failed ? "bad" : "ok"}`;
+      await refreshDashboard();
+    }
+
+    refreshButton.addEventListener("click", refreshDashboard);
+    checkoutButton.addEventListener("click", runCheckout);
+    autoButton.addEventListener("click", () => {
+      autoRefresh = !autoRefresh;
+      autoButton.textContent = autoRefresh ? "Disable Auto Refresh" : "Toggle Auto Refresh";
+      if (autoRefresh) {
+        refreshDashboard();
+        autoTimer = setInterval(refreshDashboard, 8000);
+      } else if (autoTimer) {
+        clearInterval(autoTimer);
+      }
+    });
+
+    ensureCards();
+    refreshDashboard();
+  </script>
+</body>
+</html>

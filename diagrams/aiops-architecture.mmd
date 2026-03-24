@@ -1,0 +1,81 @@
+flowchart LR
+    user[User Browser]
+    google[Google OAuth]
+
+    subgraph ui[AIOps Control Plane]
+        web[Django Web App<br/>genai + doc_search]
+        pg[(PostgreSQL)]
+        redis[(Redis)]
+        aide[AiDE LLM]
+        agent[App Agents / db-agent]
+    end
+
+    subgraph demo[Demo Application Plane]
+        frontend[Frontend Nginx]
+        gateway[Gateway Nginx]
+        orders[app-orders]
+        inventory[app-inventory]
+        billing[app-billing]
+        toxiproxy[Toxiproxy]
+        db[(Demo Postgres)]
+    end
+
+    subgraph obs[Observability Plane]
+        prometheus[Prometheus]
+        alertmanager[Alertmanager]
+        grafana[Grafana]
+        otel[OTEL Collector]
+        jaeger[Jaeger]
+        elastic[Elasticsearch]
+        filebeat[Filebeat]
+        nodeexp[node-exporter]
+        pgexp[postgres-exporter]
+        ngxexp[Nginx Exporters]
+    end
+
+    google --> web
+    user --> web
+
+    web --> pg
+    web --> redis
+    web --> aide
+    web --> agent
+
+    user --> frontend
+    frontend --> gateway
+    gateway --> orders
+    gateway --> inventory
+    gateway --> billing
+    orders --> toxiproxy
+    inventory --> toxiproxy
+    billing --> toxiproxy
+    toxiproxy --> db
+
+    web --> prometheus
+    web --> jaeger
+    web --> elastic
+
+    alertmanager --> web
+    prometheus --> alertmanager
+    grafana --> prometheus
+    grafana --> jaeger
+    grafana --> elastic
+
+    web --> otel
+    orders --> otel
+    inventory --> otel
+    billing --> otel
+    otel --> jaeger
+    otel --> prometheus
+
+    filebeat --> elastic
+    web --> filebeat
+    frontend --> filebeat
+    gateway --> filebeat
+    orders --> filebeat
+    inventory --> filebeat
+    billing --> filebeat
+
+    nodeexp --> prometheus
+    pgexp --> prometheus
+    ngxexp --> prometheus

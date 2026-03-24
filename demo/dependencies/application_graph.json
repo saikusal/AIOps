@@ -1,0 +1,36 @@
+{
+  "applications": {
+    "customer-portal": {
+      "frontend": ["gateway"],
+      "gateway": ["app-orders", "app-inventory", "app-billing"],
+      "app-orders": ["db"],
+      "app-inventory": ["db"],
+      "app-billing": ["db"],
+      "db": []
+    },
+    "payments-hub": {
+      "payments-frontend": ["payments-gateway"],
+      "payments-gateway": ["payments-ledger", "payments-settlement", "payments-fraud"],
+      "payments-ledger": ["payments-db"],
+      "payments-settlement": ["payments-db"],
+      "payments-fraud": ["payments-db"],
+      "payments-db": []
+    },
+    "support-desk": {
+      "support-frontend": ["support-gateway"],
+      "support-gateway": ["support-tickets", "support-notify", "support-reporting"],
+      "support-tickets": ["support-db"],
+      "support-notify": ["support-db"],
+      "support-reporting": ["support-db"],
+      "support-db": []
+    },
+    "analytics-studio": {
+      "analytics-frontend": ["analytics-gateway"],
+      "analytics-gateway": ["analytics-ingestion", "analytics-processing", "analytics-api"],
+      "analytics-ingestion": ["analytics-db"],
+      "analytics-processing": ["analytics-db"],
+      "analytics-api": ["analytics-processing", "analytics-db"],
+      "analytics-db": []
+    }
+  }
+}

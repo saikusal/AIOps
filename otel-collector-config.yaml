@@ -1,0 +1,33 @@
+receivers:
+  otlp:
+    protocols:
+      grpc: {}
+      http: {}
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:8889
+  logging:
+    loglevel: info
+
+processors:
+  batch: {}
+
+connectors:
+  spanmetrics:
+    namespace: traces_spanmetrics
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/jaeger, spanmetrics, logging]
+    metrics:
+      receivers: [otlp, spanmetrics]
+      processors: [batch]
+      exporters: [prometheus, logging]

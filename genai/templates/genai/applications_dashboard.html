@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIOps Application Portfolio</title>
+  <style>
+    :root {
+      --bg: #f5efe5;
+      --panel: #fffaf0;
+      --ink: #1e2933;
+      --accent: #0f766e;
+      --accent-soft: #d4efe9;
+      --danger: #b42318;
+      --warn: #a16207;
+      --ok: #0f766e;
+      --muted: #5f6b76;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(15, 118, 110, 0.14), transparent 30%),
+        linear-gradient(180deg, #faf6ee 0%, var(--bg) 100%);
+    }
+    main {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }
+    .hero, .app-card, .component-card {
+      background: var(--panel);
+      border: 1px solid rgba(30, 41, 51, 0.08);
+      border-radius: 22px;
+      box-shadow: 0 22px 64px rgba(30, 41, 51, 0.08);
+    }
+    .hero {
+      padding: 28px;
+      margin-bottom: 22px;
+    }
+    .hero h1 {
+      margin: 0 0 10px;
+      font-size: clamp(2rem, 5vw, 3.2rem);
+    }
+    .hero p {
+      margin: 0;
+      max-width: 860px;
+      line-height: 1.55;
+    }
+    .meta {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 18px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 12px;
+      border-radius: 999px;
+      font-size: 0.92rem;
+      background: rgba(30, 41, 51, 0.06);
+    }
+    .refresh-control {
+      border: 1px solid rgba(30, 41, 51, 0.12);
+      background: white;
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font: inherit;
+    }
+    .refresh-button {
+      border: 0;
+      border-radius: 999px;
+      padding: 8px 14px;
+      font: inherit;
+      font-weight: 600;
+      background: var(--accent);
+      color: white;
+      cursor: pointer;
+    }
+    .grid {
+      display: grid;
+      gap: 18px;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      align-items: start;
+    }
+    .app-card {
+      padding: 20px;
+      position: relative;
+      overflow: visible;
+      min-height: 230px;
+    }
+    .app-card.status-healthy {
+      border-left: 8px solid var(--ok);
+    }
+    .app-card.status-degraded {
+      border-left: 8px solid var(--warn);
+    }
+    .app-card.status-down {
+      border-left: 8px solid var(--danger);
+    }
+    .app-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: flex-start;
+    }
+    .app-card h2 {
+      margin: 0 0 8px;
+      font-size: 1.6rem;
+    }
+    .component-grid {
+      display: grid;
+      gap: 12px;
+      grid-auto-flow: column;
+      grid-auto-columns: minmax(230px, 260px);
+      overflow-x: auto;
+      overflow-y: hidden;
+      margin-top: 16px;
+      padding-bottom: 4px;
+    }
+    .component-card {
+      padding: 16px;
+      text-decoration: none;
+      color: inherit;
+      display: block;
+      border-width: 2px;
+      box-shadow: 0 12px 32px rgba(30, 41, 51, 0.08);
+    }
+    .component-card:hover {
+      transform: translateY(-2px);
+      transition: transform 140ms ease;
+    }
+    .component-card.status-healthy {
+      border-color: rgba(15, 118, 110, 0.35);
+      background: linear-gradient(180deg, rgba(212, 239, 233, 0.6), var(--panel));
+    }
+    .component-card.status-degraded {
+      border-color: rgba(161, 98, 7, 0.35);
+      background: linear-gradient(180deg, rgba(252, 235, 203, 0.7), var(--panel));
+    }
+    .component-card.status-down {
+      border-color: rgba(180, 35, 24, 0.35);
+      background: linear-gradient(180deg, rgba(254, 228, 226, 0.75), var(--panel));
+    }
+    .component-card h3 {
+      margin: 0 0 8px;
+      font-size: 1.2rem;
+    }
+    .hover-panel {
+      position: absolute;
+      left: calc(100% + 12px);
+      top: 0;
+      width: min(980px, 72vw);
+      z-index: 20;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateX(8px);
+      transition: opacity 160ms ease, transform 160ms ease;
+      background: var(--panel);
+      border: 1px solid rgba(30, 41, 51, 0.08);
+      border-radius: 20px;
+      box-shadow: 0 28px 64px rgba(30, 41, 51, 0.18);
+      padding: 18px;
+    }
+    .app-card:hover .hover-panel,
+    .app-card:focus-within .hover-panel {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateX(0);
+    }
+    .subtle {
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+    .status {
+      font-weight: 700;
+      text-transform: capitalize;
+    }
+    .status-healthy { color: var(--ok); }
+    .status-degraded { color: var(--warn); }
+    .status-down { color: var(--danger); }
+    .section-title {
+      margin: 18px 0 8px;
+      font-size: 1rem;
+      font-weight: 700;
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .metric {
+      background: rgba(30, 41, 51, 0.04);
+      border-radius: 14px;
+      padding: 10px 12px;
+    }
+    .metric strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    ul {
+      margin: 10px 0 0;
+      padding-left: 18px;
+    }
+    li { margin-bottom: 6px; }
+    .summary-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
+    .health-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+    .health-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 0.88rem;
+      font-weight: 600;
+      text-decoration: none;
+      color: inherit;
+      background: rgba(30, 41, 51, 0.06);
+    }
+    .health-chip.status-healthy {
+      background: rgba(15, 118, 110, 0.12);
+      color: var(--ok);
+    }
+    .health-chip.status-degraded {
+      background: rgba(161, 98, 7, 0.14);
+      color: var(--warn);
+    }
+    .health-chip.status-down {
+      background: rgba(180, 35, 24, 0.12);
+      color: var(--danger);
+    }
+    .tiny-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .tiny-pill {
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 0.8rem;
+      background: rgba(30, 41, 51, 0.08);
+    }
+    @media (max-width: 1100px) {
+      .hover-panel {
+        left: 0;
+        right: 0;
+        top: calc(100% + 10px);
+        width: auto;
+        transform: translateY(8px);
+      }
+      .app-card:hover .hover-panel,
+      .app-card:focus-within .hover-panel {
+        transform: translateY(0);
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <h1>Application Portfolio</h1>
+      <p>
+        This view shows production-style applications as top-level entities. Each application card stays compact, while hover reveals internal components such as frontend, gateway, database, and microservices. Click any component to open the alert recommendation view for that service.
+      </p>
+      <div class="meta">
+        <div class="pill" id="summaryPill">Loading applications...</div>
+        <div class="pill" id="generatedPill">Waiting for telemetry snapshot</div>
+        <label class="pill" for="refreshInterval">Auto refresh</label>
+        <select id="refreshInterval" class="refresh-control">
+          <option value="15000">15s</option>
+          <option value="30000" selected>30s</option>
+          <option value="60000">60s</option>
+          <option value="0">Off</option>
+        </select>
+        <button id="refreshNow" class="refresh-button" type="button">Refresh now</button>
+        <a class="pill" href="/genai/incidents/dashboard/" style="text-decoration:none; color:inherit;">Incidents</a>
+      </div>
+    </section>
+
+    <section class="grid" id="results"></section>
+  </main>
+
+  <script>
+    const resultsContainer = document.getElementById("results");
+    const summaryPill = document.getElementById("summaryPill");
+    const generatedPill = document.getElementById("generatedPill");
+    const refreshIntervalSelect = document.getElementById("refreshInterval");
+    const refreshNowButton = document.getElementById("refreshNow");
+    let refreshTimer = null;
+
+    function fmt(value, suffix = "") {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) {
+        return "-";
+      }
+      return `${Number(value).toFixed(2)}${suffix}`;
+    }
+
+    function statusClass(status) {
+      const normalized = String(status || "").toLowerCase();
+      if (normalized === "healthy") return "status-healthy";
+      if (normalized === "down") return "status-down";
+      return "status-degraded";
+    }
+
+    function render(payload) {
+      const entries = payload.results || [];
+      summaryPill.textContent = `${entries.length} application(s)`;
+      generatedPill.textContent = payload.generated_at ? `Snapshot: ${payload.generated_at}` : "Snapshot unavailable";
+      resultsContainer.innerHTML = "";
+
+      for (const entry of entries) {
+        const card = document.createElement("section");
+        card.className = `app-card ${statusClass(entry.status)}`;
+        card.innerHTML = `
+          <div class="app-header">
+            <div>
+              <div class="subtle">Application</div>
+              <h2>${entry.title}</h2>
+              <div class="subtle">${entry.description || ""}</div>
+            </div>
+            <div>
+              <div class="status ${statusClass(entry.status)}">${entry.status}</div>
+              <div class="subtle">Active alerts: ${entry.active_alert_count || 0}</div>
+            </div>
+          </div>
+          <div class="summary-row">
+            <div class="pill">Components: ${(entry.components || []).length}</div>
+            <div class="pill">Active alerts: ${entry.active_alert_count || 0}</div>
+            <div class="pill">Predicted incident risk next ${entry.prediction?.predicted_window_minutes || 15}m: ${entry.prediction ? Math.round((entry.prediction.risk_score || 0) * 100) : 0}%</div>
+          </div>
+          <div class="section-title">AiDE Insight</div>
+          <p>${entry.ai_insight || "-"}</p>
+          <div class="section-title">Blast Radius</div>
+          <div class="tiny-list">
+            ${(entry.blast_radius || []).length
+              ? entry.blast_radius.map((node) => `<span class="tiny-pill">${node}</span>`).join("")
+              : '<span class="tiny-pill">No transitive dependents</span>'}
+          </div>
+          <div class="health-row">
+            ${(entry.components || []).map((component) => `
+              <a class="health-chip ${statusClass(component.status)}" href="/genai/alerts/dashboard/?service=${encodeURIComponent(component.service)}" target="_blank" rel="noreferrer">
+                ${component.title}
+              </a>
+            `).join("")}
+          </div>
+          <div class="hover-panel">
+            <div class="section-title">Internal Components</div>
+            <div class="component-grid">
+              ${(entry.components || []).map((component) => `
+                <a class="component-card ${statusClass(component.status)}" href="/genai/alerts/dashboard/?service=${encodeURIComponent(component.service)}" target="_blank" rel="noreferrer">
+                  <div class="subtle">${component.kind}</div>
+                  <h3>${component.title}</h3>
+                  <div class="status ${statusClass(component.status)}">${component.status}</div>
+                  <div class="subtle">Target host: ${component.target_host}</div>
+                  <div class="section-title">AiDE Insight</div>
+                  <p>${component.ai_insight || "-"}</p>
+                  <div class="section-title">Prediction</div>
+                  <p>${component.prediction ? `${component.prediction.prediction_status} incident risk (${Math.round((component.prediction.risk_score || 0) * 100)}%) in the next ${component.prediction.predicted_window_minutes || 15} minutes` : "Prediction unavailable"}</p>
+                  <p class="subtle">${component.prediction?.explanation || "This score estimates whether the service is likely to degrade or trigger an incident window soon."}</p>
+                  <div class="section-title">Dependencies</div>
+                  <div class="tiny-list">
+                    ${(component.depends_on || []).length
+                      ? component.depends_on.map((node) => `<span class="tiny-pill">${node}</span>`).join("")
+                      : '<span class="tiny-pill">No downstream dependency</span>'}
+                  </div>
+                  <div class="section-title">Blast Radius</div>
+                  <div class="tiny-list">
+                    ${(component.blast_radius || []).length
+                      ? component.blast_radius.map((node) => `<span class="tiny-pill">${node}</span>`).join("")
+                      : '<span class="tiny-pill">Localized impact</span>'}
+                  </div>
+                  <div class="metrics">
+                    <div class="metric">
+                      <strong>Reachability</strong>
+                      ${fmt(component.metrics?.up)}
+                    </div>
+                    <div class="metric">
+                      <strong>Traffic / Load</strong>
+                      ${fmt(component.metrics?.request_rate, "/s")}
+                    </div>
+                    <div class="metric">
+                      <strong>Latency p95</strong>
+                      ${fmt(component.metrics?.latency_p95_seconds, "s")}
+                    </div>
+                    <div class="metric">
+                      <strong>Error Rate</strong>
+                      ${fmt(component.metrics?.error_rate, "/s")}
+                    </div>
+                  </div>
+                  <div class="section-title">Recent Signals</div>
+                  <ul>
+                    ${(component.recent_alerts || []).length
+                      ? component.recent_alerts.map((alert) => `<li>${alert.alert_name}: ${alert.status}</li>`).join("")
+                      : "<li>No recent alerts for this component.</li>"}
+                  </ul>
+                </a>
+              `).join("")}
+            </div>
+          </div>
+        `;
+        resultsContainer.appendChild(card);
+      }
+    }
+
+    async function loadOverview() {
+      const response = await fetch("/genai/applications/overview/");
+      const body = await response.json();
+      render(body);
+    }
+
+    function scheduleRefresh() {
+      if (refreshTimer) {
+        clearInterval(refreshTimer);
+        refreshTimer = null;
+      }
+      const interval = Number(refreshIntervalSelect.value || 0);
+      if (interval > 0) {
+        refreshTimer = setInterval(loadOverview, interval);
+      }
+    }
+
+    refreshIntervalSelect.addEventListener("change", scheduleRefresh);
+    refreshNowButton.addEventListener("click", loadOverview);
+    loadOverview();
+    scheduleRefresh();
+  </script>
+</body>
+</html>

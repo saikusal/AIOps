@@ -1,0 +1,1065 @@
+{% load static %}
+
+<style>
+    :root {
+        --chat-bg: #f5efe5;
+        --chat-panel: #fffaf0;
+        --chat-ink: #1e2933;
+        --chat-muted: #5f6b76;
+        --chat-accent: #0f766e;
+        --chat-accent-soft: #d4efe9;
+        --chat-line: rgba(30, 41, 51, 0.12);
+        --chat-danger: #b42318;
+    }
+    #chat-body, #genai-chat-body {
+        flex-grow: 1;
+        overflow-y: auto;
+        padding: 18px;
+        background:
+            radial-gradient(circle at top left, rgba(15, 118, 110, 0.08), transparent 30%),
+            linear-gradient(180deg, #faf6ee 0%, var(--chat-bg) 100%);
+    }
+
+    .chat-message {
+        margin-bottom: 10px;
+        padding: 12px 16px;
+        border-radius: 18px;
+        max-width: 85%;
+        font-size: 15px;
+        line-height: 1.5;
+        word-wrap: break-word;
+    }
+    .user-message {
+        background: linear-gradient(135deg, var(--chat-accent), #0b5d57);
+        color: white;
+        align-self: flex-end;
+        margin-left: auto;
+        box-shadow: 0 12px 32px rgba(15, 118, 110, 0.18);
+    }
+    .ai-message {
+        background-color: var(--chat-panel);
+        color: var(--chat-ink);
+        align-self: flex-start;
+        border: 1px solid var(--chat-line);
+        box-shadow: 0 12px 32px rgba(30, 41, 51, 0.06);
+    }
+    .ai-message pre {
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        background-color: #f7f3eb;
+        color: var(--chat-ink);
+        padding: 12px;
+        border-radius: 12px;
+        margin: 0;
+        border: 1px solid var(--chat-line);
+        font-size: 14px;
+        line-height: 1.6;
+        font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    }
+
+    .thinking-indicator {
+        display: flex;
+        align-items: center;
+        padding: 12px 16px;
+        background-color: var(--chat-panel);
+        color: var(--chat-ink);
+        border-radius: 18px;
+        margin-bottom: 10px;
+        max-width: 200px;
+        border: 1px solid var(--chat-line);
+    }
+
+    .thinking-dots { display: flex; gap: 4px; margin-left: 8px; }
+    .thinking-dot {
+        width: 8px;
+        height: 8px;
+        background-color: var(--chat-accent);
+        border-radius: 50%;
+        animation: rainbow-pulse 2s infinite ease-in-out;
+    }
+    .thinking-dot:nth-child(1) { animation-delay: -0.32s; }
+    .thinking-dot:nth-child(2) { animation-delay: -0.16s; }
+
+    @keyframes rainbow-pulse {
+        0%   { background-color: #0f766e; transform: scale(0.8); opacity: 0.5; }
+        50%  { background-color: #1e2933; transform: scale(1.1); opacity: 1; }
+        100% { background-color: #0f766e; transform: scale(0.8); opacity: 0.5; }
+    }
+
+    .rainbow-sparkle {
+        width: 24px;
+        height: 24px;
+        margin-right: 8px;
+        position: relative;
+        animation: spin 2s linear infinite;
+    }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    .rainbow-sparkle svg { width: 100%; height: 100%; }
+    .rainbow-sparkle path { fill: url(#rainbow-gradient); }
+
+    .chart-container { width: 100%; max-width: 700px; height: 260px; position: relative; margin-bottom: 8px; }
+
+    #genai-chat-input:focus {
+        background-color: #ffffff;
+        border-color: var(--chat-accent);
+        color: var(--chat-ink);
+        box-shadow: 0 0 0 0.2rem rgba(15, 118, 110, 0.2);
+    }
+
+    .ai-message a { color: var(--chat-accent); text-decoration: none; }
+    .ai-message a:hover { text-decoration: underline; }
+
+    #genai-chat-body::-webkit-scrollbar { width: 8px; }
+    #genai-chat-body::-webkit-scrollbar-track { background: #f0e8db; }
+    #genai-chat-body::-webkit-scrollbar-thumb { background: #b6c4c0; border-radius: 4px; }
+    #genai-chat-body::-webkit-scrollbar-thumb:hover { background: #8ea19c; }
+
+    .follow-up-container {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding-top: 10px;
+    }
+
+    .follow-up-btn {
+        background-color: transparent;
+        border: 1px solid var(--chat-accent);
+        color: var(--chat-accent);
+        border-radius: 16px;
+        padding: 5px 12px;
+        font-size: 14px;
+        cursor: pointer;
+        transition: background-color 0.2s, color 0.2s;
+    }
+
+    .follow-up-btn:hover {
+        background-color: var(--chat-accent);
+        color: white;
+    }
+
+    .chat-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+
+    .toolbar-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: white;
+        text-decoration: none;
+        border: 1px solid rgba(255, 255, 255, 0.28);
+        border-radius: 999px;
+        padding: 6px 10px;
+        font-size: 0.8rem;
+    }
+
+    .toolbar-link:hover {
+        background: rgba(255, 255, 255, 0.12);
+        color: white;
+    }
+
+    .chat-shell {
+        display: grid;
+        grid-template-columns: 280px 1fr;
+        min-height: 0;
+        flex: 1;
+    }
+
+    .chat-history {
+        border-right: 1px solid var(--chat-line);
+        background: linear-gradient(180deg, #f7f2e9 0%, #f1e9dc 100%);
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+    }
+
+    .chat-history-header {
+        padding: 14px;
+        border-bottom: 1px solid var(--chat-line);
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .history-title {
+        font-weight: 700;
+        color: var(--chat-ink);
+    }
+
+    .history-button {
+        border: 1px solid var(--chat-accent);
+        background: transparent;
+        color: var(--chat-accent);
+        border-radius: 999px;
+        padding: 8px 12px;
+        font-size: 0.9rem;
+        font-weight: 600;
+        cursor: pointer;
+    }
+
+    .history-button:hover {
+        background: var(--chat-accent);
+        color: white;
+    }
+
+    .history-list {
+        overflow-y: auto;
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .history-item {
+        border: 1px solid var(--chat-line);
+        border-radius: 16px;
+        background: rgba(255,255,255,0.72);
+        padding: 12px;
+        cursor: pointer;
+        transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .history-item:hover {
+        transform: translateY(-1px);
+        border-color: rgba(15, 118, 110, 0.35);
+        box-shadow: 0 12px 24px rgba(30, 41, 51, 0.08);
+    }
+
+    .history-item.active {
+        border-color: var(--chat-accent);
+        background: var(--chat-accent-soft);
+    }
+
+    .history-item-title {
+        font-size: 0.92rem;
+        font-weight: 700;
+        margin-bottom: 6px;
+        color: var(--chat-ink);
+    }
+
+    .history-item-preview {
+        color: var(--chat-muted);
+        font-size: 0.82rem;
+        line-height: 1.45;
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        overflow: hidden;
+    }
+
+    .history-item-time {
+        color: var(--chat-muted);
+        font-size: 0.75rem;
+        margin-top: 6px;
+    }
+
+    .chat-main {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+    }
+
+    .history-empty {
+        color: var(--chat-muted);
+        font-size: 0.86rem;
+        padding: 10px 2px;
+    }
+
+    @media (max-width: 960px) {
+        .chat-shell {
+            grid-template-columns: 1fr;
+        }
+        .chat-history {
+            border-right: 0;
+            border-bottom: 1px solid var(--chat-line);
+            max-height: 220px;
+        }
+    }
+</style>
+
+<div class="card-header text-white d-flex align-items-center" style="background: linear-gradient(135deg, var(--chat-accent), #0b5d57); border-bottom: 1px solid rgba(255,255,255,0.1);">
+    <div class="me-auto">
+        <div style="font-weight:700;">AIOps Assistant</div>
+        <div style="font-size:0.82rem; opacity:0.85;">Powered by AiDE with observability and optional RAG</div>
+    </div>
+    <div class="chat-toolbar">
+        <a class="toolbar-link" href="{% url 'genai:genai_console' %}" target="_blank" rel="noreferrer">Documents</a>
+        <button type="button" class="btn-close btn-close-white" id="genai-close-chat"></button>
+    </div>
+</div>
+<div class="chat-shell">
+    <aside class="chat-history">
+        <div class="chat-history-header">
+            <div class="history-title">Conversations</div>
+            <button type="button" class="history-button" id="genai-new-chat">New Chat</button>
+        </div>
+        <div class="history-list" id="genai-history-list">
+            <div class="history-empty">Loading conversations...</div>
+        </div>
+    </aside>
+
+    <div class="chat-main">
+        <div class="card-body d-flex flex-column" id="genai-chat-body">
+            <div class="ai-message" id="genai-welcome-message">
+                <strong>Assistant ready.</strong><br>
+                Ask about incidents, metrics, applications, infrastructure behavior, or uploaded documents.<br><br>
+                Type <code>cancel</code> to reset the current flow and start over.
+            </div>
+            <div id="genai-faq-container" class="mt-2">
+                <div class="faq-buttons"></div>
+            </div>
+        </div>
+
+        <div id="genai-download-container" class="p-2" style="display:none; background-color: #f7f3eb; border-top: 1px solid var(--chat-line);">
+            <button class="btn btn-secondary w-100" id="genai-download-btn">Download Results as Excel</button>
+        </div>
+
+        <div class="card-footer" style="background-color: var(--chat-panel); border-top: 1px solid var(--chat-line);">
+            <div class="input-group">
+                <input type="text" id="genai-chat-input" class="form-control" placeholder="Ask about apps, incidents, logs, metrics, or documents..." style="background-color: #ffffff; border: 1px solid var(--chat-line); color: var(--chat-ink);">
+                <button class="btn btn-primary" id="genai-chat-send" style="background-color: var(--chat-accent); border-color: var(--chat-accent);">Send</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// This script block is designed to be included.
+// It will run once the parent DOM is loaded.
+// We find elements by their IDs, assuming they are unique within the page/modal context.
+(function() {
+    const genaiChatBody = document.getElementById('genai-chat-body');
+    const genaiChatInput = document.getElementById('genai-chat-input');
+    const genaiChatSend = document.getElementById('genai-chat-send');
+    const faqButtonsContainer = document.querySelector('#genai-faq-container .faq-buttons');
+    const downloadContainer = document.getElementById('genai-download-container');
+    const downloadBtn = document.getElementById('genai-download-btn');
+    const genaiCloseChat = document.getElementById('genai-close-chat');
+    const genaiChatModal = document.getElementById('genai-chat-modal');
+    const historyList = document.getElementById('genai-history-list');
+    const newChatButton = document.getElementById('genai-new-chat');
+    const RECENT_SESSIONS_KEY = 'genai_recent_session_ids';
+
+    function getRecentSessionIds() {
+        try {
+            const raw = localStorage.getItem(RECENT_SESSIONS_KEY);
+            const parsed = raw ? JSON.parse(raw) : [];
+            return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+        } catch (error) {
+            return [];
+        }
+    }
+
+    function rememberSessionId(sessionId) {
+        if (!sessionId) return;
+        const ids = getRecentSessionIds().filter((value) => value !== sessionId);
+        ids.unshift(sessionId);
+        localStorage.setItem(RECENT_SESSIONS_KEY, JSON.stringify(ids.slice(0, 20)));
+    }
+
+    function formatSessionTime(value) {
+        if (!value) return '';
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return '';
+        return date.toLocaleString();
+    }
+
+    function renderSessionList(items) {
+        if (!historyList) return;
+        const currentSessionId = getSessionId();
+        if (!items.length) {
+            historyList.innerHTML = '<div class="history-empty">No conversations yet. Start a new chat to build history.</div>';
+            return;
+        }
+        historyList.innerHTML = '';
+        items.forEach((item) => {
+            const element = document.createElement('button');
+            element.type = 'button';
+            element.className = `history-item ${item.session_id === currentSessionId ? 'active' : ''}`;
+            element.innerHTML = `
+                <div class="history-item-title">${escapeHtml(item.title || 'Untitled conversation')}</div>
+                <div class="history-item-preview">${escapeHtml(item.last_message_preview || 'No messages yet')}</div>
+                <div class="history-item-time">${escapeHtml(formatSessionTime(item.updated_at))}</div>
+            `;
+            element.addEventListener('click', async () => {
+                if (item.session_id === getSessionId()) return;
+                await loadChatSession(item.session_id);
+            });
+            historyList.appendChild(element);
+        });
+    }
+
+    function getSessionId() {
+        return sessionStorage.getItem('genai_session_id') || '';
+    }
+
+    function setSessionId(sessionId) {
+        if (sessionId) {
+            sessionStorage.setItem('genai_session_id', sessionId);
+            rememberSessionId(sessionId);
+        }
+    }
+
+    function clearRenderedChat() {
+        if (!genaiChatBody) return;
+        const messages = genaiChatBody.querySelectorAll('.chat-message:not(#genai-welcome-message)');
+        messages.forEach(msg => msg.remove());
+        if (downloadContainer) downloadContainer.style.display = 'none';
+        lastSuccessfulSql = '';
+    }
+
+    function renderHistoricalMessage(message) {
+        if (!message) return;
+        if (message.role === 'user') {
+            addGenaiMessage(message.content, 'user');
+            return;
+        }
+        addGenaiMessage({
+            answer: message.content,
+            ...(message.metadata || {})
+        }, 'ai');
+    }
+
+    async function loadSessionList() {
+        try {
+            const response = await fetch("{% url 'genai:chat_session_list' %}", {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': '{{ csrf_token }}'
+                },
+                body: JSON.stringify({ session_ids: getRecentSessionIds() })
+            });
+            const data = await response.json();
+            if (response.ok) {
+                renderSessionList(data.results || []);
+            }
+        } catch (error) {
+            renderSessionList([]);
+        }
+    }
+
+    async function initializeChatSession() {
+        const existingSessionId = getSessionId();
+        const endpoint = existingSessionId
+            ? `{% url 'genai:chat_session_init' %}?session_id=${encodeURIComponent(existingSessionId)}`
+            : `{% url 'genai:chat_session_init' %}`;
+        const response = await fetch(endpoint);
+        const data = await response.json();
+        if (response.ok) {
+            setSessionId(data.session_id);
+            const messages = data.messages || [];
+            if (messages.length) {
+                const welcome = document.getElementById('genai-welcome-message');
+                if (welcome) welcome.style.display = 'none';
+                const faq = document.getElementById('genai-faq-container');
+                if (faq) faq.style.display = 'none';
+                messages.forEach(renderHistoricalMessage);
+            }
+            await loadSessionList();
+        }
+    }
+
+    async function loadChatSession(sessionId) {
+        if (!sessionId) return;
+        clearRenderedChat();
+        const response = await fetch(`{% url 'genai:chat_session_init' %}?session_id=${encodeURIComponent(sessionId)}`);
+        const data = await response.json();
+        if (response.ok) {
+            setSessionId(data.session_id);
+            const welcome = document.getElementById('genai-welcome-message');
+            if (welcome) welcome.style.display = data.messages?.length ? 'none' : 'block';
+            const faq = document.getElementById('genai-faq-container');
+            if (faq) faq.style.display = data.messages?.length ? 'none' : 'block';
+            (data.messages || []).forEach(renderHistoricalMessage);
+            await loadSessionList();
+        }
+    }
+
+    async function resetChat() {
+        const currentSessionId = getSessionId();
+        if (currentSessionId) {
+            try {
+                const response = await fetch("{% url 'genai:chat_session_reset' %}", {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': '{{ csrf_token }}'
+                    },
+                    body: JSON.stringify({ session_id: currentSessionId })
+                });
+                const data = await response.json();
+                if (response.ok && data.session_id) {
+                    setSessionId(data.session_id);
+                }
+            } catch (error) {
+                sessionStorage.removeItem('genai_session_id');
+            }
+        }
+        if (genaiChatBody) {
+            clearRenderedChat();
+            
+            // Show welcome message and FAQ
+            const welcome = document.getElementById('genai-welcome-message');
+            if (welcome) welcome.style.display = 'block';
+            const faq = document.getElementById('genai-faq-container');
+            if (faq) faq.style.display = 'block';
+
+            // Clear the session ID to start a fresh conversation
+            if (!getSessionId()) {
+                sessionStorage.removeItem('genai_session_id');
+            }
+            
+            // DEFINITIVE FIX: Reset the frontend state variables to exit special flows.
+            isServiceRequestFlow = false;
+            lastUnansweredQuestion = '';
+        }
+        await loadSessionList();
+    }
+
+    if (genaiCloseChat) {
+        genaiCloseChat.addEventListener('click', async () => {
+            await resetChat();
+            window.parent.postMessage('close-widget', '*');
+        });
+    }
+
+    if (newChatButton) {
+        newChatButton.addEventListener('click', async () => {
+            await resetChat();
+            genaiChatInput?.focus();
+        });
+    }
+
+    window.addEventListener('message', async (event) => {
+        if (event.data === 'open-widget') {
+            if (genaiChatModal) {
+                genaiChatModal.style.display = 'flex';
+                await resetChat();
+            }
+        }
+    });
+
+    function escapeHtml(s) {
+        if (s === null || s === undefined) return '';
+        return String(s).replace(/[&<>"']/g, c => ({'&':'&','<':'<','>':'>','"':'"',"'":'&#39;'})[c]);
+    }
+
+    let lastSuccessfulSql = '';
+    let lastUnansweredQuestion = '';
+    let isServiceRequestFlow = false; // State to track service request flow
+
+    function addGenaiMessage(data, sender) {
+        const body = genaiChatBody;
+        if (!body) return;
+        const messageElement = document.createElement('div');
+        messageElement.classList.add('chat-message', sender === 'user' ? 'user-message' : 'ai-message');
+
+        if (sender === 'user') {
+            messageElement.textContent = data; // For user, data is just the string
+        } else {
+            // For AI, data is the full JSON object from the backend
+            const content = data.answer || '';
+            const followUpQuestions = data.follow_up_questions || [];
+            const uiControl = data.ui_control;
+            const choices = data.choices || [];
+            const visualization = data.visualization;
+            const vizData = data.data;
+
+            const contentContainer = document.createElement('div');
+            
+            if (visualization && vizData) {
+                const summary = document.createElement('p');
+                summary.textContent = data.summary || content || 'Here is the data you requested:';
+                contentContainer.appendChild(summary);
+                if (visualization.chart_type === 'table') {
+                    renderTable(contentContainer, vizData);
+                } else {
+                    const chartContainer = document.createElement('div');
+                    chartContainer.className = 'chart-container';
+                    contentContainer.appendChild(chartContainer);
+                    const canvas = document.createElement('canvas');
+                    chartContainer.appendChild(canvas);
+                    setTimeout(() => renderChart(canvas, visualization, vizData), 50);
+                }
+            } else if (typeof content === 'string') {
+                // Use innerHTML if it contains tags, otherwise textContent to be safe
+                contentContainer.innerHTML = content.includes('<') && content.includes('>') ? content : `<p>${escapeHtml(content)}</p>`;
+            } else if (content) {
+                const pre = document.createElement('pre');
+                pre.textContent = JSON.stringify(content, null, 2);
+                contentContainer.appendChild(pre);
+            }
+            messageElement.appendChild(contentContainer);
+
+            // --- UI Control Logic ---
+            if (uiControl) {
+                const controlsContainer = document.createElement('div');
+                controlsContainer.className = 'follow-up-container'; // Reuse styles
+                controlsContainer.style.marginTop = '10px';
+
+                const disableControls = () => {
+                    controlsContainer.querySelectorAll('button, input').forEach(el => el.disabled = true);
+                };
+
+                if (uiControl === 'yes_no') {
+                    const yesBtn = document.createElement('button');
+                    yesBtn.textContent = 'Yes';
+                    yesBtn.className = 'follow-up-btn';
+                    yesBtn.onclick = () => { disableControls(); genaiSendMessage('yes'); };
+
+                    const noBtn = document.createElement('button');
+                    noBtn.textContent = 'No';
+                    noBtn.className = 'follow-up-btn';
+                    noBtn.onclick = () => { disableControls(); genaiSendMessage('no'); };
+
+                    controlsContainer.appendChild(yesBtn);
+                    controlsContainer.appendChild(noBtn);
+                } else if (uiControl === 'dropdown' && choices.length > 0) {
+                    choices.forEach(choice => {
+                        const btn = document.createElement('button');
+                        btn.className = 'follow-up-btn';
+                        btn.textContent = choice; // Use the full string for the button's text
+                        btn.onclick = () => {
+                            disableControls();
+                            // Send the choice (the label) back to the backend
+                            genaiSendMessage(choice);
+                        };
+                        controlsContainer.appendChild(btn);
+                    });
+                } else if (uiControl === 'datepicker') {
+                    const dateInput = document.createElement('input');
+                    dateInput.type = 'date';
+                    dateInput.className = 'form-control mt-2';
+                    dateInput.style.maxWidth = '200px';
+                    dateInput.style.display = 'inline-block';
+
+                    const submitBtn = document.createElement('button');
+                    submitBtn.textContent = 'Submit';
+                    submitBtn.className = 'btn btn-sm';
+                    submitBtn.style.backgroundColor = '#E2158A';
+                    submitBtn.style.borderColor = '#E2158A';
+                    submitBtn.style.color = 'white';
+                    submitBtn.style.marginLeft = '10px';
+                    submitBtn.onclick = () => {
+                        if (dateInput.value) {
+                            disableControls();
+                            genaiSendMessage(dateInput.value);
+                        }
+                    };
+                    controlsContainer.appendChild(dateInput);
+                    controlsContainer.appendChild(submitBtn);
+                }
+                messageElement.appendChild(controlsContainer);
+            }
+
+            // --- Follow-up Questions Logic ---
+            if (followUpQuestions && followUpQuestions.length > 0) {
+                const followUpContainer = document.createElement('div');
+                followUpContainer.className = 'follow-up-container';
+                followUpQuestions.forEach(q => {
+                    const btn = document.createElement('button');
+                    btn.className = 'follow-up-btn';
+                    btn.textContent = q;
+                    btn.onclick = () => genaiSendMessage(q);
+                    followUpContainer.appendChild(btn);
+                });
+                messageElement.appendChild(followUpContainer);
+            }
+
+            // --- Suggested Command Button ---
+            const suggestedCommand = data.suggested_command;
+            const targetHost = data.target_host;
+            const originalQuestion = data.question; // The backend response includes the original question
+            const isDestructive = data.is_destructive || false;
+
+            if (suggestedCommand && targetHost && originalQuestion) {
+                const commandContainer = document.createElement('div');
+                commandContainer.className = 'follow-up-container'; // Reuse styles
+                
+                const commandBtn = document.createElement('button');
+                // Use btn-danger for destructive actions, btn-warning otherwise
+                commandBtn.className = `btn ${isDestructive ? 'btn-danger' : 'btn-warning'} btn-sm`;
+                commandBtn.style.marginTop = '10px';
+
+                let buttonText = `
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-terminal" viewBox="0 0 16 16" style="margin-right: 5px;">
+                        <path d="M6 9a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3A.5.5 0 0 1 6 9zM3.854 4.146a.5.5 0 1 0-.708.708L4.793 6.5 3.146 8.146a.5.5 0 1 0 .708.708L5.5 7.207l1.646 1.647a.5.5 0 0 0 .708-.708L6.207 6.5 7.854 4.854a.5.5 0 1 0-.708-.708L5.5 5.793 3.854 4.146z"/>
+                        <path d="M2 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2H2zm12 1a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h12z"/>
+                    </svg>
+                    Run: <code>${escapeHtml(suggestedCommand)}</code> on <code>${escapeHtml(targetHost)}</code>
+                `;
+
+                if (isDestructive) {
+                    buttonText = `
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-exclamation-triangle-fill" viewBox="0 0 16 16" style="margin-right: 5px;">
+                        <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+                    </svg>
+                    <b>Warning:</b> Run Destructive Command: <code>${escapeHtml(suggestedCommand)}</code>
+                    `;
+                }
+                
+                commandBtn.innerHTML = buttonText;
+                
+                commandBtn.onclick = () => {
+                    commandBtn.disabled = true;
+                    commandBtn.innerHTML = 'Executing...';
+                    executeRemoteCommand(suggestedCommand, targetHost, originalQuestion);
+                };
+
+                commandContainer.appendChild(commandBtn);
+                messageElement.appendChild(commandContainer);
+            }
+        }
+
+        body.appendChild(messageElement);
+        messageElement.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+
+    function renderTable(container, data) {
+        const table = document.createElement('table');
+        table.className = 'table table-bordered table-sm';
+        const thead = document.createElement('thead');
+        const tbody = document.createElement('tbody');
+        const headerRow = document.createElement('tr');
+        data.columns.forEach(col => {
+            const th = document.createElement('th');
+            th.textContent = escapeHtml(col);
+            headerRow.appendChild(th);
+        });
+        thead.appendChild(headerRow);
+        data.rows.forEach(rowData => {
+            const row = document.createElement('tr');
+            rowData.forEach(cellData => {
+                const td = document.createElement('td');
+                td.textContent = escapeHtml(cellData);
+                row.appendChild(td);
+            });
+            tbody.appendChild(row);
+        });
+        table.appendChild(thead);
+        table.appendChild(tbody);
+        container.appendChild(table);
+    }
+
+    function renderChart(canvas, vis, data) {
+        if (!canvas) return;
+        const xIndex = data.columns.indexOf(vis.x);
+        const yIndex = data.columns.indexOf(vis.y);
+        if (xIndex === -1 || yIndex === -1) return;
+
+        const labels = data.rows.map(row => String(row[xIndex]));
+        const rawValues = data.rows.map(row => Number(String(row[yIndex]).replace(/[, ]+/g, '')) || 0);
+
+        new Chart(canvas.getContext('2d'), {
+            type: vis.chart_type || 'bar',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: vis.y,
+                    data: rawValues,
+                    backgroundColor: rawValues.map((_, i) => `hsl(${(i * 360 / rawValues.length) % 360}, 70%, 60%)`),
+                }]
+            },
+            options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } }
+        });
+    }
+
+    async function renderGenaiFaqButtons() {
+        if (!faqButtonsContainer) return;
+        faqButtonsContainer.innerHTML = '';
+        try {
+            const resp = await fetch("{% url 'genai:faq_questions' %}");
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const questions = data.questions || [];
+            if (!questions.length) { document.getElementById('genai-faq-container').style.display = 'none'; return; }
+            questions.forEach(q => {
+                const btn = document.createElement('button');
+                btn.className = 'follow-up-btn';
+                btn.textContent = q;
+                btn.onclick = () => genaiSendMessage(q);
+                faqButtonsContainer.appendChild(btn);
+            });
+        } catch (e) { console.error('Failed to load GenAI FAQ questions:', e); }
+    }
+
+    function addThinkingIndicator() {
+        const body = genaiChatBody;
+        const thinkingElement = document.createElement('div');
+        thinkingElement.classList.add('thinking-indicator');
+        thinkingElement.id = 'thinking-indicator';
+        thinkingElement.innerHTML = `
+            <div class="rainbow-sparkle">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+                    <defs><linearGradient id="rainbow-gradient" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#ff0000;"/><stop offset="50%" style="stop-color:#00ff00;"/><stop offset="100%" style="stop-color:#0088ff;"/></linearGradient></defs>
+                    <path d="M7.657 6.247c.11-.33.576-.33.686 0l.645 1.937a2.89 2.89 0 0 0 1.829 1.828l1.936.645c.33.11.33.576 0 .686l-1.937.645a2.89 2.89 0 0 0-1.828 1.829l-.645 1.936a.361.361 0 0 1-.686 0l-.645-1.937a2.89 2.89 0 0 0-1.828-1.828l-1.937-.645a.361.361 0 0 1 0-.686l1.937-.645a2.89 2.89 0 0 0 1.828-1.828l.645-1.937zM3.794 1.148a.217.217 0 0 1 .412 0l.387 1.162c.173.518.579.924 1.097 1.097l1.162.387a.217.217 0 0 1 0 .412l-1.162.387A1.734 1.734 0 0 0 4.868 4.85l-.387 1.162a.217.217 0 0 1-.412 0L3.794 4.85A1.734 1.734 0 0 0 2.72 3.784l-1.162-.387a.217.217 0 0 1 0-.412l1.162-.387A1.734 1.734 0 0 0 3.407 2.31l.387-1.162zM10.863.099a.145.145 0 0 1 .274 0l.258.774c.115.346.386.617.732.732l.774.258a.145.145 0 0 1 0 .274l-.774.258a1.156 1.156 0 0 0-.732.732l-.258.774a.145.145 0 0 1-.274 0l-.258-.774a1.156 1.156 0 0 0-.732-.732L9.1 2.137a.145.145 0 0 1 0-.274l.774-.258c.346-.115.617-.386.732-.732L10.863.1z"/></svg>
+            </div>
+            <div class="thinking-dots"><div class="thinking-dot"></div><div class="thinking-dot"></div><div class="thinking-dot"></div></div>`;
+        body.appendChild(thinkingElement);
+        thinkingElement.scrollIntoView({ behavior: "smooth", block: "end" });
+        return thinkingElement;
+    }
+
+
+    function scrollToBottom() {
+        if (genaiChatBody) {
+            genaiChatBody.scrollTop = genaiChatBody.scrollHeight;
+        }
+    }
+
+    function scrollToBottom() {
+        if (genaiChatBody) {
+            genaiChatBody.scrollTop = genaiChatBody.scrollHeight;
+        }
+    }
+
+    function renderConfirmationButtons() {
+        const buttonsHtml = `
+            <div class="ai-message" id="confirmation-buttons-container" style="align-self: flex-start;">
+                <div style="padding: 10px; display: flex; gap: 10px;">
+                    <button id="confirm-yes" class="btn btn-success btn-sm">Yes, create a ticket</button>
+                    <button id="confirm-no" class="btn btn-danger btn-sm">No, thanks</button>
+                </div>
+            </div>
+        `;
+        genaiChatBody.insertAdjacentHTML('beforeend', buttonsHtml);
+        scrollToBottom();
+
+        document.getElementById('confirm-yes').addEventListener('click', () => {
+            document.getElementById('confirmation-buttons-container').remove();
+            // This payload will be handled by the main genai_chat view
+            genaiSendMessage(null, {
+                action: 'request_email_for_ticket',
+                question: lastUnansweredQuestion
+            });
+        });
+
+        document.getElementById('confirm-no').addEventListener('click', () => {
+            document.getElementById('confirmation-buttons-container').remove();
+            addGenaiMessage("Okay, let me know if you need anything else.", 'ai');
+        });
+    }
+
+    function renderTicketCreationForm() {
+        const formHtml = `
+            <div class="ai-message" id="ticket-creation-form-container">
+                <div style="padding: 10px;">
+                    <p>Please provide your corporate email address to create the ticket:</p>
+                    <div class="mb-2">
+                        <input type="email" id="ticket-email" class="form-control" placeholder="Your Email Address">
+                    </div>
+                    <button id="submit-ticket-creation" class="btn btn-primary w-100" style="background-color: #E2158A; border-color: #E2158A;">Create Ticket</button>
+                </div>
+            </div>
+        `;
+        genaiChatBody.insertAdjacentHTML('beforeend', formHtml);
+        scrollToBottom();
+
+        document.getElementById('submit-ticket-creation').addEventListener('click', () => {
+            const email = document.getElementById('ticket-email').value;
+            if (!email) {
+                alert('Please provide your email address.');
+                return;
+            }
+            
+            document.getElementById('ticket-creation-form-container').remove();
+            genaiSendMessage(null, {
+                action: 'create_ticket_from_docs',
+                email: email,
+                question: lastUnansweredQuestion
+            });
+        });
+    }
+
+    function renderPasswordResetForm() {
+        const formHtml = `
+            <div class="ai-message" id="password-reset-form-container">
+                <div style="padding: 10px;">
+                    <p>Please enter your details below:</p>
+                    <div class="mb-2">
+                        <input type="text" id="reset-network-id" class="form-control" placeholder="Network ID">
+                    </div>
+                    <div class="mb-2">
+                        <input type="email" id="reset-email" class="form-control" placeholder="Email Address">
+                    </div>
+                    <button id="submit-password-reset" class="btn btn-primary w-100" style="background-color: #E2158A; border-color: #E2158A;">Submit</button>
+                </div>
+            </div>
+        `;
+        genaiChatBody.insertAdjacentHTML('beforeend', formHtml);
+        scrollToBottom();
+
+        document.getElementById('submit-password-reset').addEventListener('click', () => {
+            const networkId = document.getElementById('reset-network-id').value;
+            const email = document.getElementById('reset-email').value;
+            if (!networkId || !email) {
+                alert('Please fill in both fields.');
+                return;
+            }
+            
+            // Remove the form and send the details
+            document.getElementById('password-reset-form-container').remove();
+            genaiSendMessage(null, {
+                action: 'create_password_ticket',
+                network_id: networkId,
+                email: email
+            });
+        });
+    }
+
+    async function executeRemoteCommand(command, targetHost, originalQuestion) {
+        const thinkingIndicator = addThinkingIndicator();
+        try {
+            const resp = await fetch("{% url 'genai:execute_command' %}", {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': '{{ csrf_token }}'
+                },
+                body: JSON.stringify({
+                    command: command,
+                    target_host: targetHost,
+                    original_question: originalQuestion
+                })
+            });
+
+            thinkingIndicator?.remove();
+            const data = await resp.json();
+
+            if (resp.ok) {
+                // Display the final answer from the AI
+                addGenaiMessage({ answer: `<strong>Analysis of command output:</strong><br>${data.final_answer}` }, 'ai');
+                
+                // Optionally, display the raw command output in a collapsed section for debugging
+                const details = document.createElement('details');
+                details.style.marginTop = '10px';
+                const summary = document.createElement('summary');
+                summary.textContent = 'View Raw Command Output';
+                summary.style.cursor = 'pointer';
+                summary.style.fontSize = '12px';
+                const pre = document.createElement('pre');
+                pre.style.marginTop = '5px';
+                pre.textContent = data.command_output;
+                details.appendChild(summary);
+                details.appendChild(pre);
+                
+                const lastMessage = genaiChatBody.querySelector('.ai-message:last-child');
+                if (lastMessage) {
+                    lastMessage.appendChild(details);
+                }
+
+            } else {
+                const errorMessage = data.error || 'Failed to execute command.';
+                addGenaiMessage({ answer: `Execution failed: ${errorMessage}` }, 'ai');
+            }
+
+        } catch (err) {
+            thinkingIndicator?.remove();
+            addGenaiMessage('A network error occurred while trying to execute the command.', 'ai');
+        }
+    }
+
+    async function genaiSendMessage(question, payload = {}) {
+        if (!question || question.trim() === '') return;
+
+        const welcome = document.getElementById('genai-welcome-message');
+        if (welcome) welcome.style.display = 'none';
+        const faq = document.getElementById('genai-faq-container');
+        if (faq) faq.style.display = 'none';
+        if (downloadContainer) downloadContainer.style.display = 'none';
+
+        addGenaiMessage(question, 'user');
+        genaiChatInput.value = '';
+        const thinkingIndicator = addThinkingIndicator();
+
+        let sessionId = getSessionId();
+        if (!sessionId) {
+            await initializeChatSession();
+            sessionId = getSessionId();
+        }
+        let requestBody = { question, session_id: sessionId, ...payload };
+        let endpoint = "{% url 'genai:chat' %}";
+
+        try {
+            const resp = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': '{{ csrf_token }}'
+                },
+                body: JSON.stringify(requestBody)
+            });
+            const data = await resp.json();
+            thinkingIndicator?.remove();
+            if (data.session_id) {
+                setSessionId(data.session_id);
+            }
+
+            if (resp.ok) {
+                // Pass the entire data object to the new addGenaiMessage function
+                addGenaiMessage(data, 'ai');
+
+                // Handle special actions that require changing the flow state or rendering forms
+                if (data.action === 'reset_session') {
+                    // DEFINITIVE FIX: Wait 2 seconds before resetting the chat so the user can see the final message.
+                    setTimeout(() => {
+                        resetChat();
+                    }, 5000); // 2-second delay
+                }
+
+                // Handle successful SQL for download button
+                lastSuccessfulSql = data.generated_sql || '';
+                if (lastSuccessfulSql) {
+                    downloadContainer.style.display = 'block';
+                }
+                await loadSessionList();
+
+            } else {
+                // If the server returns an error, display the 'answer' field if available,
+                // otherwise show a generic error.
+                const errorMessage = data.answer || `Error: ${data.error || 'Server returned an error.'}`;
+                addGenaiMessage({ answer: errorMessage }, 'ai');
+            }
+        } catch (err) {
+            thinkingIndicator?.remove();
+            addGenaiMessage('Sorry, a network error occurred.', 'ai');
+        }
+    }
+
+    if (downloadBtn) downloadBtn.addEventListener('click', async () => {
+        if (!lastSuccessfulSql) return;
+        try {
+            const resp = await fetch("{% url 'genai:download_excel' %}", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': '{{ csrf_token }}' },
+                body: JSON.stringify({ sql: lastSuccessfulSql })
+            });
+            if (!resp.ok) {
+                const data = await resp.json();
+                alert(`Error downloading file: ${data.error || 'unknown'}`);
+                return;
+            }
+            const blob = await resp.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'query_results.xlsx';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(url);
+        } catch (e) {
+            alert('A network error occurred while downloading the file.');
+        }
+    });
+
+    if (genaiChatSend) genaiChatSend.addEventListener('click', () => genaiSendMessage(genaiChatInput.value));
+    if (genaiChatInput) genaiChatInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') genaiSendMessage(genaiChatInput.value); });
+
+    initializeChatSession().catch(() => {});
+    renderGenaiFaqButtons();
+})();
+</script>

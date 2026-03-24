@@ -1,0 +1,76 @@
+groups:
+  - name: demo-aiops
+    rules:
+      - alert: DemoAppLatencyHigh
+        expr: histogram_quantile(0.95, sum(rate(demo_http_request_duration_seconds_bucket[5m])) by (le, service)) > 2
+        for: 30s
+        labels:
+          severity: warning
+          source: demo
+        annotations:
+          summary: "Demo service latency is above 2 seconds"
+          description: "The p95 latency for {{ $labels.service }} has exceeded 2 seconds for 2 minutes."
+
+      - alert: DemoDatabaseConnectionsHigh
+        expr: sum(pg_stat_activity_count{datname="aiops"}) > 25
+        for: 30s
+        labels:
+          severity: critical
+          source: demo
+        annotations:
+          summary: "Demo database has high active connections"
+          description: "Postgres active sessions for the aiops database are above 25."
+
+      - alert: DemoAppErrorsHigh
+        expr: sum(rate(demo_http_requests_total{status=~"5.."}[5m])) by (service) > 0.1
+        for: 30s
+        labels:
+          severity: critical
+          source: demo
+        annotations:
+          summary: "Demo application is returning elevated 5xx errors"
+          description: "{{ $labels.service }} is returning 5xx responses above the configured threshold."
+
+      - alert: DemoServiceDown
+        expr: up{job="demo-apps"} == 0
+        for: 30s
+        labels:
+          severity: critical
+          source: demo
+          service: '{{ if eq $labels.instance "app-orders:8000" }}app-orders{{ else if eq $labels.instance "app-inventory:8000" }}app-inventory{{ else if eq $labels.instance "app-billing:8000" }}app-billing{{ else }}unknown{{ end }}'
+        annotations:
+          summary: "Demo backend service target is down"
+          description: "Prometheus cannot scrape {{ $labels.instance }} for more than 30 seconds."
+
+      - alert: DemoDatabaseDown
+        expr: up{job="postgres-exporter"} == 0
+        for: 30s
+        labels:
+          severity: critical
+          source: demo
+          service: db
+        annotations:
+          summary: "Demo database exporter is down"
+          description: "Prometheus cannot scrape the postgres exporter, indicating database reachability or exporter failure."
+
+      - alert: DemoGatewayUnavailable
+        expr: nginx_up{job="demo-gateway"} == 0 or up{job="demo-gateway"} == 0
+        for: 30s
+        labels:
+          severity: critical
+          source: demo
+          service: gateway
+        annotations:
+          summary: "Demo gateway is unavailable"
+          description: "The internal Nginx gateway exporter or its status endpoint is unavailable."
+
+      - alert: DemoFrontendUnavailable
+        expr: nginx_up{job="demo-frontend"} == 0 or up{job="demo-frontend"} == 0
+        for: 30s
+        labels:
+          severity: critical
+          source: demo
+          service: frontend
+        annotations:
+          summary: "Demo frontend is unavailable"
+          description: "The frontend Nginx exporter or its status endpoint is unavailable."

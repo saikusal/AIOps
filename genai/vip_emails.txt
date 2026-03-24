@@ -1,0 +1,8 @@
+# This file contains a list of VIP email addresses, one per line.
+# Password reset requests for these emails will be blocked.
+#
+# Example:
+# ceo@astro.com.my
+# cto@astro.com.my
+
+sandeep-sai-gnana-kurra_vl@astro.com.my
