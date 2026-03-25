@@ -1,0 +1,467 @@
+version: "3.8"
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: sh /code/entrypoint.sh
+    environment:
+      DJANGO_SETTINGS_MODULE: asset_management.settings
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-aiops}
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      AIDE_API_URL: ${AIDE_API_URL:-https://aide-sdlc-backend.imagine.tech/api/v1/brownfield/chat}
+      AIDE_API_KEY: ${AIDE_API_KEY:-}
+      AIDE_API_URL_SECONDARY: ${AIDE_API_URL_SECONDARY:-https://aide-sdlc-backend.imagine.tech/api/v1/brownfield/chat}
+      AIDE_API_KEY_SECONDARY: ${AIDE_API_KEY_SECONDARY:-}
+      AIDE_TIMEOUT: ${AIDE_TIMEOUT:-120}
+      AIDE_RETRIES: ${AIDE_RETRIES:-3}
+      AIDE_VERIFY_SSL: ${AIDE_VERIFY_SSL:-false}
+      AIDE_DEBUG: ${AIDE_DEBUG:-false}
+      AIDE_CA_BUNDLE: ${AIDE_CA_BUNDLE:-}
+      ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-}
+      JAEGER_URL: ${JAEGER_URL:-http://jaeger:16686}
+      AGENT_SECRET_TOKEN: ${AGENT_SECRET_TOKEN:-aiops-demo-agent-7f3c29d1b84e4a6f}
+      AGENT_PORT: ${AGENT_PORT:-9999}
+      APP_LOG_DIR: /var/log/aiops
+      OTEL_ENABLED: ${OTEL_ENABLED:-true}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-aiops-web}
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED: "true"
+      PROMETHEUS_URL: http://prometheus:9090
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,aiops-web,web}
+      CORS_ALLOW_ALL_ORIGINS: ${CORS_ALLOW_ALL_ORIGINS:-true}
+      SESSION_COOKIE_SAMESITE: ${SESSION_COOKIE_SAMESITE:-Lax}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      SITE_ID: ${SITE_ID:-1}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-PASTE_GOOGLE_CLIENT_ID_HERE}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-PASTE_GOOGLE_CLIENT_SECRET_HERE}
+      SCHEMA_CACHE_TTL: ${SCHEMA_CACHE_TTL:-300}
+      GENAI_TABLE: ${GENAI_TABLE:-}
+    volumes:
+      - mediafiles:/code/mediafiles
+      - app_logs:/var/log/aiops
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+
+  frontend-app:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "${AIOPS_FRONTEND_PORT:-8089}:8080"
+    depends_on:
+      web:
+        condition: service_started
+    restart: unless-stopped
+
+  predictor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: /bin/sh -c "python3 manage.py migrate && python3 manage.py run_prediction_loop --interval ${PREDICTION_INTERVAL_SECONDS:-300}"
+    environment:
+      DJANGO_SETTINGS_MODULE: asset_management.settings
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      AIDE_API_URL: ${AIDE_API_URL:-https://aide-sdlc-backend.imagine.tech/api/v1/brownfield/chat}
+      AIDE_API_KEY: ${AIDE_API_KEY:-}
+      AIDE_API_URL_SECONDARY: ${AIDE_API_URL_SECONDARY:-https://aide-sdlc-backend.imagine.tech/api/v1/brownfield/chat}
+      AIDE_API_KEY_SECONDARY: ${AIDE_API_KEY_SECONDARY:-}
+      AIDE_TIMEOUT: ${AIDE_TIMEOUT:-120}
+      AIDE_RETRIES: ${AIDE_RETRIES:-3}
+      AIDE_VERIFY_SSL: ${AIDE_VERIFY_SSL:-false}
+      AIDE_DEBUG: ${AIDE_DEBUG:-false}
+      AIDE_CA_BUNDLE: ${AIDE_CA_BUNDLE:-}
+      ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-}
+      JAEGER_URL: ${JAEGER_URL:-http://jaeger:16686}
+      APP_LOG_DIR: /var/log/aiops
+      PROMETHEUS_URL: http://prometheus:9090
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,aiops-web,web}
+      SCHEMA_CACHE_TTL: ${SCHEMA_CACHE_TTL:-300}
+    volumes:
+      - mediafiles:/code/mediafiles
+      - app_logs:/var/log/aiops
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  db:
+    image: postgres:13
+    command:
+      - postgres
+      - -c
+      - max_connections=${DEMO_DB_MAX_CONNECTIONS:-40}
+      - -c
+      - log_min_duration_statement=${DEMO_DB_LOG_MIN_DURATION_MS:-500}
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-aiops}
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-aiops}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  db-agent:
+    build:
+      context: .
+      dockerfile: agent/db-agent.Dockerfile
+    environment:
+      AGENT_AUTH_TOKEN: aiops-demo-agent-7f3c29d1b84e4a6f
+      AGENT_ALLOWED_COMMANDS_FILE: /app/db_allowed_commands.json
+      AGENT_PORT: 9999
+      PGPASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-aiops}
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db-init:
+    image: postgres:13
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-password}
+    command:
+      - /bin/sh
+      - -c
+      - |
+        until pg_isready -h db -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-aiops}; do
+          sleep 2
+        done
+        psql -h db -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-aiops} -f /seed/init.sql
+    volumes:
+      - ./demo/sql/init.sql:/seed/init.sql:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.66.0
+    command:
+      - "--collector.otlp.enabled=true"
+    ports:
+      - "16686:16686"
+      - "14269:14269"
+    restart: unless-stopped
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.5.0
+    hostname: elasticsearch
+    environment:
+      discovery.type: single-node
+      ES_JAVA_OPTS: -Xms1g -Xmx1g
+      xpack.security.enabled: "false"
+      ingest.geoip.downloader.enabled: "false"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    restart: unless-stopped
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.5.0
+    user: root
+    command: ["--strict.perms=false", "-e"]
+    volumes:
+      - ./filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - app_logs:/var/log/aiops:ro
+      - demo_logs:/var/log/demo:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.87.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8889:8889"
+    depends_on:
+      - jaeger
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./demo/alerts/demo-rules.yml:/etc/prometheus/demo-rules.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - otel-collector
+      - node-exporter
+      - alertmanager
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    ports:
+      - "9093:9093"
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    ports:
+      - "9100:9100"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./Observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./Observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    ports:
+      - "8474:8474"
+      - "15432:15432"
+    restart: unless-stopped
+
+  toxiproxy-config:
+    image: curlimages/curl:8.12.1
+    command: ["/bin/sh", "/scripts/configure-toxiproxy.sh"]
+    volumes:
+      - ./demo/tools/configure-toxiproxy.sh:/scripts/configure-toxiproxy.sh:ro
+    depends_on:
+      toxiproxy:
+        condition: service_started
+      db-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.17.1
+    environment:
+      DATA_SOURCE_URI: db:5432/${POSTGRES_DB:-aiops}?sslmode=disable
+      DATA_SOURCE_USER: ${POSTGRES_USER:-user}
+      DATA_SOURCE_PASS: ${POSTGRES_PASSWORD:-password}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./demo/frontend/index.html:/usr/share/nginx/html/index.html:ro
+      - ./demo/frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - demo_logs:/var/log/demo
+    ports:
+      - "${DEMO_FRONTEND_PORT:-8088}:8080"
+    depends_on:
+      gateway:
+        condition: service_started
+    restart: unless-stopped
+
+  frontend-exporter:
+    image: nginx/nginx-prometheus-exporter:1.3.0
+    command:
+      - -nginx.scrape-uri=http://frontend:8080/nginx_status
+    depends_on:
+      frontend:
+        condition: service_started
+    restart: unless-stopped
+
+  gateway:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./demo/gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - demo_logs:/var/log/demo
+    depends_on:
+      app-orders:
+        condition: service_started
+      app-inventory:
+        condition: service_started
+      app-billing:
+        condition: service_started
+    restart: unless-stopped
+
+  gateway-exporter:
+    image: nginx/nginx-prometheus-exporter:1.3.0
+    command:
+      - -nginx.scrape-uri=http://gateway:8080/nginx_status
+    depends_on:
+      gateway:
+        condition: service_started
+    restart: unless-stopped
+
+  app-orders:
+    build:
+      context: .
+      dockerfile: demo/app/Dockerfile
+    environment:
+      APP_NAME: app-orders
+      APP_PORT: 8000
+      DEMO_DB_HOST: toxiproxy
+      DEMO_DB_PORT: 15432
+      DEMO_DB_NAME: ${POSTGRES_DB:-aiops}
+      DEMO_DB_USER: ${POSTGRES_USER:-user}
+      DEMO_DB_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      DEMO_LOG_DIR: /var/log/demo
+      OTEL_ENABLED: "true"
+      OTEL_SERVICE_NAME: app-orders
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      APP_DEFAULT_DB_SLEEP: ${ORDERS_DEFAULT_DB_SLEEP:-0}
+      AGENT_AUTH_TOKEN: aiops-demo-agent-7f3c29d1b84e4a6f
+      AGENT_ALLOWED_COMMANDS_FILE: /app/allowed_commands.json
+      AGENT_PORT: 9999
+    volumes:
+      - demo_logs:/var/log/demo
+    depends_on:
+      db:
+        condition: service_healthy
+      toxiproxy-config:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+
+  app-inventory:
+    build:
+      context: .
+      dockerfile: demo/app/Dockerfile
+    environment:
+      APP_NAME: app-inventory
+      APP_PORT: 8000
+      DEMO_DB_HOST: toxiproxy
+      DEMO_DB_PORT: 15432
+      DEMO_DB_NAME: ${POSTGRES_DB:-aiops}
+      DEMO_DB_USER: ${POSTGRES_USER:-user}
+      DEMO_DB_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      DEMO_LOG_DIR: /var/log/demo
+      OTEL_ENABLED: "true"
+      OTEL_SERVICE_NAME: app-inventory
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      APP_DEFAULT_DB_SLEEP: ${INVENTORY_DEFAULT_DB_SLEEP:-0}
+      AGENT_AUTH_TOKEN: aiops-demo-agent-7f3c29d1b84e4a6f
+      AGENT_ALLOWED_COMMANDS_FILE: /app/allowed_commands.json
+      AGENT_PORT: 9999
+    volumes:
+      - demo_logs:/var/log/demo
+    depends_on:
+      db:
+        condition: service_healthy
+      toxiproxy-config:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+
+  app-billing:
+    build:
+      context: .
+      dockerfile: demo/app/Dockerfile
+    environment:
+      APP_NAME: app-billing
+      APP_PORT: 8000
+      DEMO_DB_HOST: toxiproxy
+      DEMO_DB_PORT: 15432
+      DEMO_DB_NAME: ${POSTGRES_DB:-aiops}
+      DEMO_DB_USER: ${POSTGRES_USER:-user}
+      DEMO_DB_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      DEMO_LOG_DIR: /var/log/demo
+      OTEL_ENABLED: "true"
+      OTEL_SERVICE_NAME: app-billing
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      APP_DEFAULT_DB_SLEEP: ${BILLING_DEFAULT_DB_SLEEP:-0}
+      AGENT_AUTH_TOKEN: aiops-demo-agent-7f3c29d1b84e4a6f
+      AGENT_ALLOWED_COMMANDS_FILE: /app/allowed_commands.json
+      AGENT_PORT: 9999
+    volumes:
+      - demo_logs:/var/log/demo
+    depends_on:
+      db:
+        condition: service_healthy
+      toxiproxy-config:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  mediafiles:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
+  alertmanager_data:
+  redis_data:
+  elasticsearch_data:
+  app_logs:
+  demo_logs:
