@@ -1,6 +1,60 @@
-.env
-*.pyc
-__pycache__/
-.env.local
-/node_modules/
 .DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Django / runtime
+db.sqlite3
+*.sqlite3
+mediafiles/
+staticfiles/
+*.log
+*.log.*
+gunicorn.ctl
+*.pid
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Local data volumes
+postgres_data/
+redis_data/
+prometheus_data/
+grafana_data/
+alertmanager_data/
+elasticsearch_data/
+
+# Generated runtime logs
+app_logs/
+demo_logs/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+

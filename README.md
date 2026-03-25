@@ -1,196 +1,221 @@
 # AIOps Platform
 
-This repository contains the foundation of an AI-driven operations platform designed for SaaS and enterprise deployment.
+This repository contains an AI-driven operations platform built to support incident investigation, observability correlation, application health analysis, and guided RCA workflows.
 
-The platform is intended to help operations teams:
+The platform is being shaped as a SaaS-ready control plane with support for:
 
-- monitor applications and infrastructure
-- investigate incidents with AI assistance
-- correlate metrics, logs, traces, and alerts
-- search internal documents and runbooks
-- guide operators toward RCA and next actions
-
-Although the historical Django project name in this repository is still `asset_management`, the product direction is broader: this codebase is evolving into an AIOps control plane.
-
-## Product Vision
-
-This platform is being shaped as an AIOps SaaS offering with support for:
-
-- centralized observability
 - AI-assisted incident investigation
+- application and service health dashboards
+- correlated metrics, logs, and traces
+- alert ingestion and recommendation workflows
+- command execution through controlled agents
 - document-backed operational guidance
-- application and service health views
-- extensible integrations for alerts, telemetry, and automation
-- cloud-hosted and air-gapped deployment models
+- prediction and risk scoring
+- immersive React-based operations UI
 
-The long-term goal is a single platform that can onboard:
+## What This Platform Does
 
-- standalone applications
-- virtual machines and servers
-- containerized workloads
-- Kubernetes environments
+At a high level, the platform helps operators:
 
-## Core Capabilities
+- detect issues through observability signals
+- correlate alerts into incidents
+- inspect blast radius and dependency context
+- ask AI for RCA and next-step guidance
+- run controlled diagnostic commands
+- analyze command output with a second AI pass
+- navigate incidents, applications, predictions, and documents from one workspace
 
-- AI assistant for operational questions and RCA workflows
-- observability-aware reasoning across metrics, logs, and traces
-- document ingestion and retrieval for SOPs, policies, and runbooks
-- incident correlation and investigation support
-- application/service health monitoring integrations
-- video processing utilities for subtitle and transcript workflows
-- Docker-based local and packaged deployment
+## Current Tech Stack
 
-## Architecture Direction
-
-At a high level, the platform is moving toward this model:
-
-```text
-Users / Operators
-        |
-        v
-Frontend Experience Layer
-        |
-        v
-Django Control Plane / APIs
-        |
-        +-- AI Assistant / Investigation Layer
-        +-- Document Search / RAG Layer
-        +-- Incident / Alert / Workflow Layer
-        +-- Asset / Workflow Modules
-        |
-        v
-Observability + Data Integrations
-        |
-        +-- Prometheus / metrics
-        +-- Logs backends
-        +-- Trace backends
-        +-- Databases / workers / external services
-```
-
-## Current Repository Structure
-
-```text
-asset_management/   Django project settings, URLs, WSGI
-assets/             Existing asset and workflow application
-genai/              AI assistant and AIOps-oriented features
-doc_search/         Document ingestion, search, and retrieval
-video_processor/    Video upload, processing, and subtitle generation
-users/              User routes and user-facing features
-templates/          Shared server-rendered templates
-static/             Static assets
-mediafiles/         Uploaded and generated content
-docker-compose.yml  Local container orchestration
-Dockerfile*         App, trainer, and worker images
-requirements*.txt   Dependency sets
-```
-
-## Tech Stack
-
-### Application Layer
+### Backend
 
 - Python
 - Django
-- Django apps for modular features
-- server-rendered templates plus AI/API endpoints
-
-### Data and Storage
-
+- Django ORM
 - PostgreSQL
-- local/media-backed file storage
-- JSON-based configuration and payload storage inside Django models
+- Redis
 
-### AI and Knowledge Features
+### AI / Investigation Layer
 
-- AI assistant workflows under `genai/`
-- document retrieval and RAG support under `doc_search/`
-- prompt-driven orchestration for operational analysis
+- AiDE integration
+- prompt-based orchestration in `genai/`
+- document-backed retrieval in `doc_search/`
+- prediction workflows in `genai/predictions.py`
 
-### Observability and Operations
+### Frontend
 
-- Prometheus configuration
-- OpenTelemetry collector configuration
-- Docker / Docker Compose
-- worker and trainer container patterns
-- log and runtime artifact handling
+- React
+- TypeScript
+- Vite
+- TanStack Query
+- React Router
+- React Three Fiber / Three.js for graph views
 
-### Media / Processing
+### Observability
 
-- video processing workflows
-- subtitle / transcript generation
-- local model artifacts for speech workflows
+- Prometheus
+- Alertmanager
+- Grafana
+- OpenTelemetry Collector
+- Jaeger
+- Elasticsearch
+- Filebeat
+- node-exporter
+- postgres-exporter
+- nginx Prometheus exporters
 
-## SaaS Platform Positioning
+### Automation / Execution
 
-From a SaaS perspective, this repository supports the shape of a broader platform:
+- app-local agents
+- db-agent
+- allowlisted command execution
 
-- multi-module control plane
-- pluggable AI-assisted investigation workflows
-- extensible observability integrations
-- document-backed support operations
-- optional deployment in self-hosted or managed modes
+### Demo / Chaos
 
-A typical SaaS productization path for this platform would include:
+- Nginx frontend and gateway
+- Flask demo services
+- PostgreSQL
+- Toxiproxy for chaos testing
 
-- tenant isolation
-- SSO and enterprise authentication
-- incident and investigation workspaces
-- model-provider abstraction
-- observability connectors
-- agent-based discovery and telemetry collection
-- usage metering and admin controls
+### Packaging / Runtime
+
+- Docker
+- Docker Compose
+- Nginx
+
+## Repository Layout
+
+```text
+asset_management/   Django project settings and app wiring
+genai/              AI assistant, incidents, predictions, execution flows
+doc_search/         Document upload, processing, and retrieval
+frontend/           React frontend replacement
+demo/               Demo application, chaos tooling, dependency graph
+agent/              Secure execution agents and allowlists
+Observability/      Grafana provisioning and dashboards
+filebeat/           Log shipping configuration
+diagrams/           Architecture diagram sources
+docker-compose.yml  Full local stack orchestration
+```
+
+## Key Product Areas
+
+### 1. Assistant
+
+The assistant is the investigation workspace. It is intended to:
+
+- accept incident/application/service context
+- fetch telemetry context
+- explain RCA and blast radius
+- suggest diagnostic commands
+- analyze command output after execution
+
+### 2. Incidents
+
+Incidents are correlated from alerts and enriched with:
+
+- incident timeline
+- linked recommendation
+- graph view
+- secondary AI analysis
+
+### 3. Applications
+
+Applications are shown as service portfolios with:
+
+- component health
+- AI insight
+- prediction risk
+- graph entry points
+
+### 4. Graphs
+
+Graph views support:
+
+- application topology
+- incident blast radius
+- alert-linked graph entry
+- dependency context
+
+### 5. Predictions
+
+Prediction workflows provide:
+
+- service risk scoring
+- incident probability
+- blast radius-aware context
+
+### 6. Documents
+
+Document workflows support:
+
+- runbook upload
+- retrieval-augmented answers
+- operational guidance
 
 ## Local Development
 
-### 1. Create a Python environment
+### Prerequisites
+
+- Docker
+- Docker Compose
+
+### Environment Setup
+
+1. Copy the example env file:
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+cp .env.example .env
 ```
 
-### 2. Apply migrations
+2. Fill in the required values in `.env`, especially:
+
+- `POSTGRES_PASSWORD`
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `AIDE_API_KEY`
+- `AIDE_API_KEY_SECONDARY`
+- `AGENT_SECRET_TOKEN`
+
+### Start the Stack
 
 ```bash
-python manage.py migrate
+docker compose up -d --build
 ```
 
-### 3. Run the Django app
+Main URLs:
 
-```bash
-python manage.py runserver
-```
+- Django backend: `http://localhost:8000`
+- React frontend: `http://localhost:8089`
+- Prometheus: `http://localhost:9090`
+- Alertmanager: `http://localhost:9093`
+- Grafana: `http://localhost:3000`
+- Demo frontend: `http://localhost:8088`
 
-Open:
+## Frontend
 
-- `http://127.0.0.1:8000`
+The new user experience lives in the React app under `frontend/`.
 
-## Docker Usage
+The React frontend is deployed as a separate production-style container and proxies back to the Django backend.
 
-To run the stack with Docker Compose:
+## Chaos and Demo
 
-```bash
-docker compose up --build
-```
+Chaos tooling lives under `demo/tools/`.
 
-To run a smaller subset during development:
+See:
 
-```bash
-docker compose up --build web
-```
+- [CHAOS_RUNBOOK.md](./CHAOS_RUNBOOK.md)
+- [ARCHITECTURE.md](./ARCHITECTURE.md)
 
-## Repository Notes
+## Architecture and Roadmaps
 
-- The internal Django project/module names still reflect the earlier project structure.
-- The product direction is now broader than asset management alone.
-- Runtime artifacts, uploaded files, local model binaries, caches, and secrets should not be committed.
+- [ARCHITECTURE.md](./ARCHITECTURE.md)
+- [FRONTEND_MIGRATION_PLAN.md](./FRONTEND_MIGRATION_PLAN.md)
+- [MCP_PHASE_PLAN.md](./MCP_PHASE_PLAN.md)
 
-## Recommended Next Repo Additions
+## Notes
 
-- `.env.example`
-- deployment profiles for local, staging, and production
-- architecture diagrams and service maps
-- API documentation
-- setup guide for observability dependencies
-- contribution and release workflow docs
+- The internal Django project package is still named `asset_management`, but the product identity is AIOps.
+- `.env` is intentionally gitignored.
+- Local runtime data and generated volumes are also ignored.
 

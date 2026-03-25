@@ -809,6 +809,117 @@ def _normalize_agent_command(command_to_run: str, target_host: str) -> str:
     return command
 
 
+def _lookup_recent_alert_recommendation(alert_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not alert_id:
+        return None
+    entries = cache.get(RECENT_ALERT_CACHE_KEY) or []
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("alert_id") == alert_id:
+            return entry
+    return None
+
+
+def _shared_dependency_suspected(context: Dict[str, Any]) -> bool:
+    haystack = json.dumps(context or {}, default=str).lower()
+    dependency_graph = context.get("dependency_graph") if isinstance(context, dict) else {}
+    blast_radius = (dependency_graph or {}).get("blast_radius") or []
+    return any(token in haystack for token in ("toxiproxy", "psycopg2", "connection timed out", "timeout expired", "postgres", "database")) or len(blast_radius) > 1
+
+
+def _default_diagnostic_for_target(target_host: str) -> str:
+    if target_host == "db":
+        return (
+            f'psql -h db -U {DB_USER} -d {DB_NAME} -c '
+            '"select now() as observed_at, count(*) as total_sessions, '
+            "count(*) filter (where state = 'active') as active_sessions, "
+            "count(*) filter (where wait_event is not null) as waiting_sessions "
+            'from pg_stat_activity;"'
+        )
+    if target_host.startswith("app-"):
+        return f"tail -n 200 /var/log/demo/{target_host}.log"
+    if target_host == "gateway":
+        return "tail -n 200 /var/log/nginx/error.log"
+    return "ss -tulpn"
+
+
+def _coerce_diagnostic_plan(
+    alert_payload: Dict[str, Any],
+    context: Dict[str, Any],
+    ai_plan: Dict[str, Any],
+    fallback_target_host: Optional[str],
+) -> Dict[str, Any]:
+    target_host = _extract_target_host_from_text(ai_plan.get("target_host")) or fallback_target_host or ""
+    diagnostic_command = (ai_plan.get("diagnostic_command") or "").strip()
+    summary = ai_plan.get("summary") or "Alert investigation prepared."
+    why = ai_plan.get("why") or ""
+    target_type = "service"
+
+    service_name = context.get("service_name") or target_host
+    dependency_graph = context.get("dependency_graph") or {}
+    suspected_dependency = _shared_dependency_suspected(context)
+
+    if suspected_dependency and (service_name or "").startswith("app-") and "db" in (dependency_graph.get("depends_on") or []):
+        target_host = "db"
+        target_type = "database"
+        why = why or "Shared dependency indicators point to the database path, so the next diagnostic should pivot to the database agent."
+        if not diagnostic_command or diagnostic_command.startswith("tail ") or "/var/log/demo/" in diagnostic_command:
+            diagnostic_command = _default_diagnostic_for_target(target_host)
+
+    if target_host == "db":
+        target_type = "database"
+        if not diagnostic_command:
+            diagnostic_command = _default_diagnostic_for_target(target_host)
+    elif target_host.startswith("app-"):
+        target_type = "application_container"
+        if not diagnostic_command:
+            diagnostic_command = _default_diagnostic_for_target(target_host)
+    elif target_host in ("gateway", "frontend"):
+        target_type = "edge_proxy" if target_host == "gateway" else "edge_frontend"
+        if not diagnostic_command:
+            diagnostic_command = _default_diagnostic_for_target(target_host)
+    else:
+        if not diagnostic_command and target_host:
+            diagnostic_command = _default_diagnostic_for_target(target_host)
+
+    should_execute = _to_bool(
+        ai_plan.get("should_execute"),
+        default=bool(diagnostic_command and target_host),
+    )
+
+    return {
+        "summary": summary,
+        "why": why,
+        "target_host": target_host,
+        "target_type": target_type,
+        "diagnostic_command": diagnostic_command,
+        "should_execute": should_execute,
+    }
+
+
+def _format_analysis_sections(sections: Dict[str, Any]) -> str:
+    ordered_keys = [
+        ("root_cause", "Root Cause"),
+        ("evidence", "Evidence"),
+        ("impact", "Impact"),
+        ("resolution", "Resolution"),
+        ("remediation_steps", "Remediation"),
+        ("validation_steps", "Validation"),
+    ]
+    parts = []
+    for key, label in ordered_keys:
+        value = sections.get(key)
+        if not value:
+            continue
+        if isinstance(value, list):
+            rendered = "\n".join(f"- {item}" for item in value if item)
+        else:
+            rendered = str(value)
+        parts.append(f"{label}: {rendered}")
+    return "\n\n".join(parts).strip()
+
+
 def _normalize_alertmanager_payload(body: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
     alerts = body.get("alerts")
     if not isinstance(alerts, list) or not alerts:
@@ -1159,11 +1270,12 @@ def analyze_command_output(
     command_to_run: str,
     command_output: str,
     context: Optional[Dict[str, Any]] = None,
-) -> Tuple[bool, str]:
+) -> Tuple[bool, str, Dict[str, Any]]:
     analysis_prompt = (
         "You are an IT infrastructure expert. A diagnostic command was run on a remote server. "
-        "Analyze the output and provide a concise operational conclusion as JSON with a single key named 'answer'. "
-        "Do not ask the operator to inspect the logs manually. If the command output contains logs, extract the likely error, impact, and next action directly.\n\n"
+        "Analyze the output and provide JSON only with keys: answer, root_cause, evidence, impact, resolution, remediation_steps, validation_steps. "
+        "remediation_steps and validation_steps must be arrays of concise action items. "
+        "Do not ask the operator to inspect logs manually. If the command output contains logs, extract the likely error, impact, and concrete next action directly.\n\n"
         f"Original Question: '{original_question}'\n"
         f"Target Server: {target_host}\n"
         f"Command Run: `{command_to_run}`\n"
@@ -1172,7 +1284,7 @@ def analyze_command_output(
     )
     ok, status, body_text = query_aide_api(analysis_prompt)
     if not ok:
-        return False, "AI service failed to analyze the command output."
+        return False, "AI service failed to analyze the command output.", {}
     try:
         start_index = body_text.find('{')
         end_index = body_text.rfind('}')
@@ -1180,9 +1292,10 @@ def analyze_command_output(
             response_data = json.loads(body_text[start_index:end_index + 1])
         else:
             response_data = {"answer": body_text}
-        return True, response_data.get("answer", body_text)
+        answer = response_data.get("answer") or _format_analysis_sections(response_data) or body_text
+        return True, answer, response_data if isinstance(response_data, dict) else {}
     except json.JSONDecodeError:
-        return True, body_text
+        return True, body_text, {}
 
 
 def _extract_first_sample_value(query_result: Dict[str, Any]) -> Optional[float]:
@@ -2826,16 +2939,18 @@ def ingest_alert_view(request: HttpRequest):
     planning_prompt = (
         "You are an AIOps incident responder. Given the alert payload and telemetry context, "
         "return JSON only with keys: summary, target_host, diagnostic_command, why, should_execute.\n"
-        "- diagnostic_command must be a single Linux command suitable for a remote troubleshooting agent.\n"
+        "- diagnostic_command must be a single executable command suitable for the target troubleshooting agent.\n"
         "- should_execute must be true only if there is enough information to run the command now.\n"
         "- target_host must be the hostname or IP where the command should run.\n\n"
         "- The telemetry context already contains Prometheus metrics, Elasticsearch logs, and Jaeger traces gathered by the app.\n"
         "- If those logs are sufficient, summarize the root cause directly.\n"
-        "- If more evidence is needed, recommend one concrete diagnostic command such as docker logs, journalctl, systemctl status, ss, df, or free.\n"
+        "- If more evidence is needed, recommend one concrete diagnostic command appropriate for the execution target.\n"
         "- Do not tell the operator to inspect logs manually. The command output will be sent back to the AI for analysis.\n\n"
         "- Use the dependency graph context to estimate blast radius, upstream dependents, and the likely impacted services.\n"
         "- The agent does not support shell operators, command substitution, pipes, or semicolons.\n"
         "- For app containers, prefer file-log commands like `tail -n 200 /var/log/demo/app-orders.log`.\n"
+        f"- For the database target (`db` -> `{DB_AGENT_HOST}`), prefer `pg_isready -h db` or a `psql -h db -U {DB_USER} -d {DB_NAME} -c ...` query.\n"
+        "- If the evidence points to a shared dependency path, pivot the target to that dependency instead of staying on the symptom service.\n"
         "- Return a literal executable command only.\n\n"
         f"ALERT PAYLOAD:\n{json.dumps(alert_payload, indent=2)}\n\n"
         f"OBSERVABILITY CONTEXT:\n{json.dumps(context, indent=2)[:12000]}\n"
@@ -2857,16 +2972,19 @@ def ingest_alert_view(request: HttpRequest):
     except json.JSONDecodeError:
         plan = {}
 
-    diagnostic_command = (plan.get("diagnostic_command") or "").strip()
-    target_host = _extract_target_host_from_text(plan.get("target_host")) or target_host
-    summary = plan.get("summary") or "Alert investigation prepared."
-    why = plan.get("why") or ""
-    should_execute = _to_bool(plan.get("should_execute"), default=bool(diagnostic_command and target_host))
+    normalized_plan = _coerce_diagnostic_plan(alert_payload, context, plan, target_host)
+    diagnostic_command = normalized_plan["diagnostic_command"]
+    target_host = normalized_plan["target_host"]
+    summary = normalized_plan["summary"]
+    why = normalized_plan["why"]
+    should_execute = normalized_plan["should_execute"]
+    target_type = normalized_plan["target_type"]
 
     response_payload = {
         "summary": summary,
         "why": why,
         "target_host": target_host,
+        "target_type": target_type,
         "diagnostic_command": diagnostic_command,
         "should_execute": should_execute,
         "context": context,
@@ -2881,6 +2999,7 @@ def ingest_alert_view(request: HttpRequest):
         "alert_name": alert_payload.get("alert_name") or ((alert_payload.get("labels") or {}).get("alertname")),
         "status": alert_payload.get("status", "firing"),
         "target_host": target_host,
+        "target_type": target_type,
         "summary": summary,
         "initial_ai_diagnosis": summary,
         "why": why,
@@ -2922,7 +3041,7 @@ def ingest_alert_view(request: HttpRequest):
         return JsonResponse(response_payload, status=400)
 
     success, command_output, agent_response = delegate_command_to_agent(diagnostic_command, target_host)
-    analysis_ok, final_answer = analyze_command_output(
+    analysis_ok, final_answer, analysis_sections = analyze_command_output(
         summary,
         target_host,
         diagnostic_command,
@@ -2935,6 +3054,7 @@ def ingest_alert_view(request: HttpRequest):
         "agent_response": agent_response,
         "command_output": command_output,
         "final_answer": final_answer,
+        "analysis_sections": analysis_sections,
         "analysis_ok": analysis_ok,
     })
     IncidentTimelineEvent.objects.create(
@@ -2948,12 +3068,14 @@ def ingest_alert_view(request: HttpRequest):
             "agent_success": success,
             "command_output": command_output[:4000],
             "final_answer": final_answer,
+            "analysis_sections": analysis_sections,
         },
     )
     cache_entry.update({
         "agent_success": success,
         "analysis_ok": analysis_ok,
         "final_answer": final_answer,
+        "analysis_sections": analysis_sections,
         "post_command_ai_analysis": final_answer,
         "command_output": command_output,
         "agent_response": agent_response,
@@ -3019,12 +3141,20 @@ def execute_command_view(request: HttpRequest):
         if not all([command_to_run, original_question, target_host]):
             return JsonResponse({"error": "Missing required fields: command, original_question, and target_host are required."}, status=400)
 
+        linked_recommendation = _lookup_recent_alert_recommendation(alert_id)
+        execution_context = {
+            "linked_recommendation": linked_recommendation or {},
+            "dependency_graph": (linked_recommendation or {}).get("dependency_graph") or {},
+            "incident_key": (linked_recommendation or {}).get("incident_key"),
+            "target_type": (linked_recommendation or {}).get("target_type"),
+        }
         success, command_output, agent_response = delegate_command_to_agent(command_to_run, target_host)
-        ok, final_answer = analyze_command_output(
+        ok, final_answer, analysis_sections = analyze_command_output(
             original_question,
             target_host,
             command_to_run,
             command_output,
+            context=execution_context,
         )
         if not ok:
             return JsonResponse({"error": final_answer}, status=502)
@@ -3047,6 +3177,7 @@ def execute_command_view(request: HttpRequest):
                     "execution_status": execution_status,
                     "agent_success": success,
                     "final_answer": final_answer,
+                    "analysis_sections": analysis_sections,
                     "post_command_ai_analysis": final_answer,
                     "command_output": command_output,
                     "agent_response": agent_response,
@@ -3069,11 +3200,13 @@ def execute_command_view(request: HttpRequest):
                             "agent_success": success,
                             "command_output": command_output[:4000],
                             "final_answer": final_answer,
+                            "analysis_sections": analysis_sections,
                         },
                     )
 
         return JsonResponse({
             "final_answer": final_answer,
+            "analysis_sections": analysis_sections,
             "command_output": command_output,
             "agent_success": success,
             "agent_response": agent_response,

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { executeDiagnosticCommand, fetchIncidentTimeline, fetchRecentAlerts, fetchRecentIncidents } from "../lib/api";
 import { useRefreshInterval } from "../lib/refresh";
@@ -9,6 +9,7 @@ export function IncidentsPage() {
   const [searchParams] = useSearchParams();
   const [activeIncidentKey, setActiveIncidentKey] = useState<string | undefined>(undefined);
   const [executionState, setExecutionState] = useState<Record<string, Record<string, unknown>>>({});
+  const [autoExecuted, setAutoExecuted] = useState<Record<string, boolean>>({});
   const serviceFilter = searchParams.get("service");
   const { refreshMs } = useRefreshInterval();
   const incidentsQuery = useQuery({
@@ -47,6 +48,14 @@ export function IncidentsPage() {
     post_command_ai_analysis?: string;
     command_output?: string;
     final_answer?: string;
+    analysis_sections?: {
+      root_cause?: string;
+      evidence?: string;
+      impact?: string;
+      resolution?: string;
+      remediation_steps?: string[];
+      validation_steps?: string[];
+    };
     agent_success?: boolean;
   };
   const deepDiveEntry = useMemo(() => {
@@ -57,6 +66,7 @@ export function IncidentsPage() {
       ...executionOverlay,
       post_command_ai_analysis: executionOverlay.post_command_ai_analysis || source.post_command_ai_analysis,
       final_answer: executionOverlay.final_answer || source.final_answer,
+      analysis_sections: executionOverlay.analysis_sections || source.analysis_sections,
       command_output: executionOverlay.command_output || source.command_output,
       execution_status: executionOverlay.execution_status || source.execution_status,
       last_execution_at: executionOverlay.last_execution_at || source.last_execution_at,
@@ -94,6 +104,7 @@ export function IncidentsPage() {
           last_execution_at: payload.last_execution_at,
           post_command_ai_analysis: payload.final_answer,
           final_answer: payload.final_answer,
+          analysis_sections: payload.analysis_sections,
           command_output: payload.command_output,
           agent_success: payload.agent_success,
         },
@@ -112,6 +123,22 @@ export function IncidentsPage() {
       }));
     },
   });
+
+  useEffect(() => {
+    if (!deepDiveEntry?.should_execute || !deepDiveEntry?.diagnostic_command || !deepDiveEntry?.target_host) return;
+    if (deepDiveEntry.execution_status && deepDiveEntry.execution_status !== "pending") return;
+    if (executeMutation.isPending || autoExecuted[executionKey]) return;
+    setAutoExecuted((current) => ({ ...current, [executionKey]: true }));
+    executeMutation.mutate();
+  }, [
+    autoExecuted,
+    deepDiveEntry?.diagnostic_command,
+    deepDiveEntry?.execution_status,
+    deepDiveEntry?.should_execute,
+    deepDiveEntry?.target_host,
+    executeMutation,
+    executionKey,
+  ]);
 
   return (
     <>
@@ -197,6 +224,7 @@ export function IncidentsPage() {
                       <div className="incident-deep-dive__card">
                         <span>Target Host</span>
                         <strong>{deepDiveEntry.target_host || "Unavailable"}</strong>
+                        {deepDiveEntry.target_type ? <small>{deepDiveEntry.target_type.replace(/_/g, " ")}</small> : null}
                       </div>
                       <div className="incident-deep-dive__card">
                         <span>Status</span>
@@ -228,6 +256,32 @@ export function IncidentsPage() {
                         <strong>Post-Command AI Analysis</strong>
                         <p>{deepDiveEntry.post_command_ai_analysis || deepDiveEntry.final_answer || "No secondary AI analysis yet. Run the deep-dive command to generate it."}</p>
                       </article>
+                      {deepDiveEntry.analysis_sections?.resolution ? (
+                        <article className="incident-deep-dive__panel">
+                          <strong>Resolution</strong>
+                          <p>{deepDiveEntry.analysis_sections.resolution}</p>
+                        </article>
+                      ) : null}
+                      {(deepDiveEntry.analysis_sections?.remediation_steps || []).length ? (
+                        <article className="incident-deep-dive__panel">
+                          <strong>Remediation</strong>
+                          <ul>
+                            {deepDiveEntry.analysis_sections?.remediation_steps?.map((step, index) => (
+                              <li key={`remediation-${index}`}>{step}</li>
+                            ))}
+                          </ul>
+                        </article>
+                      ) : null}
+                      {(deepDiveEntry.analysis_sections?.validation_steps || []).length ? (
+                        <article className="incident-deep-dive__panel">
+                          <strong>Validation</strong>
+                          <ul>
+                            {deepDiveEntry.analysis_sections?.validation_steps?.map((step, index) => (
+                              <li key={`validation-${index}`}>{step}</li>
+                            ))}
+                          </ul>
+                        </article>
+                      ) : null}
                       <article className="incident-deep-dive__panel">
                         <strong>Command Output</strong>
                         <pre>{deepDiveEntry.command_output || "Command output will appear here after execution."}</pre>

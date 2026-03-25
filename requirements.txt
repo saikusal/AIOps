@@ -1,4 +1,4 @@
-Django==4.2.13
+Django==4.2.16
 psycopg2-binary
 pandas
 openpyxl
@@ -20,7 +20,7 @@ numpy<2
 redis==4.6.0
 django-redis
 python-dateutil
-django-allauth[socialaccount]
+django-allauth[socialaccount]==65.13.0
 
 opentelemetry-api
 opentelemetry-sdk

@@ -9,11 +9,20 @@ export type AlertRecommendation = {
   initial_ai_reasoning?: string;
   post_command_ai_analysis?: string;
   diagnostic_command?: string;
+  target_type?: string;
   should_execute?: boolean;
   execution_status?: string;
   last_execution_at?: string;
   command_output?: string;
   final_answer?: string;
+  analysis_sections?: {
+    root_cause?: string;
+    evidence?: string;
+    impact?: string;
+    resolution?: string;
+    remediation_steps?: string[];
+    validation_steps?: string[];
+  };
   agent_success?: boolean;
   incident_key?: string;
   incident_title?: string;
@@ -205,6 +214,14 @@ export type IncidentTimeline = IncidentSummary & {
 
 export type CommandExecutionResult = {
   final_answer: string;
+  analysis_sections?: {
+    root_cause?: string;
+    evidence?: string;
+    impact?: string;
+    resolution?: string;
+    remediation_steps?: string[];
+    validation_steps?: string[];
+  };
   command_output: string;
   agent_success: boolean;
   agent_response?: Record<string, unknown> | string;

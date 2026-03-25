@@ -41,13 +41,75 @@ function findAlertForService(alerts: AlertRecommendation[], serviceName: string,
   );
 }
 
+function serviceTone(component: ApplicationComponent) {
+  const service = component.service.toLowerCase();
+  const kind = component.kind.toLowerCase();
+
+  if (service.includes("front") || kind === "edge") return "edge";
+  if (service.includes("gateway") || kind === "gateway") return "gateway";
+  if (service.includes("db") || kind === "database") return "database";
+  if (service.includes("order")) return "orders";
+  if (service.includes("inventory")) return "inventory";
+  if (service.includes("billing")) return "billing";
+  return "default";
+}
+
+function applicationGlyph(application: string) {
+  const normalized = application.toLowerCase();
+  if (normalized.includes("customer")) return "CP";
+  if (normalized.includes("payments")) return "PH";
+  if (normalized.includes("support")) return "SD";
+  if (normalized.includes("analytics")) return "AS";
+  return normalized.slice(0, 2).toUpperCase();
+}
+
+function ServiceIcon({ component }: { component: ApplicationComponent }) {
+  const service = component.service.toLowerCase();
+  const kind = component.kind.toLowerCase();
+  const tone = serviceTone(component);
+
+  const icon =
+    service.includes("front") || kind === "edge" ? (
+      <svg viewBox="0 0 48 48" aria-hidden="true">
+        <rect x="9" y="11" width="30" height="22" rx="5" className="app-portfolio__icon-stroke" />
+        <path d="M17 37h14" className="app-portfolio__icon-stroke" />
+        <path d="M20 18h18M20 24h10" className="app-portfolio__icon-stroke app-portfolio__icon-stroke--soft" />
+      </svg>
+    ) : service.includes("gateway") || kind === "gateway" ? (
+      <svg viewBox="0 0 48 48" aria-hidden="true">
+        <path d="M24 7 38 15v18L24 41 10 33V15Z" className="app-portfolio__icon-stroke" />
+        <path d="M18 17v14M30 17v14M18 17h12M18 31h12" className="app-portfolio__icon-stroke app-portfolio__icon-stroke--soft" />
+        <path d="M14 24h-4M38 24h-4" className="app-portfolio__icon-stroke" />
+      </svg>
+    ) : service.includes("db") || kind === "database" ? (
+      <svg viewBox="0 0 48 48" aria-hidden="true">
+        <ellipse cx="24" cy="14" rx="11" ry="4.5" className="app-portfolio__icon-stroke" />
+        <path d="M13 14v16c0 2.5 4.9 4.5 11 4.5s11-2 11-4.5V14" className="app-portfolio__icon-stroke" />
+        <path d="M13 22c0 2.5 4.9 4.5 11 4.5s11-2 11-4.5M13 30c0 2.5 4.9 4.5 11 4.5s11-2 11-4.5" className="app-portfolio__icon-stroke app-portfolio__icon-stroke--soft" />
+      </svg>
+    ) : (
+      <svg viewBox="0 0 48 48" aria-hidden="true">
+        <circle cx="13" cy="24" r="4" className="app-portfolio__icon-fill" />
+        <circle cx="24" cy="14" r="4" className="app-portfolio__icon-fill" />
+        <circle cx="35" cy="24" r="4" className="app-portfolio__icon-fill" />
+        <circle cx="24" cy="34" r="4" className="app-portfolio__icon-fill" />
+        <path d="M16 22l5-6M27 16l5 6M16 26l5 6M27 32l5-6" className="app-portfolio__icon-stroke" />
+      </svg>
+    );
+
+  return <div className={`app-portfolio__service-mark app-portfolio__service-mark--${tone}`}>{icon}</div>;
+}
+
 function ComponentCard({ application, component, alert }: { application: string; component: ApplicationComponent; alert?: AlertRecommendation }) {
   return (
     <article className={`app-portfolio__component app-portfolio__component--${component.status}`}>
       <div className="app-portfolio__component-top">
-        <div>
-          <div className="eyebrow">{component.kind}</div>
-          <h3>{component.title}</h3>
+        <div className="app-portfolio__component-brand">
+          <ServiceIcon component={component} />
+          <div>
+            <div className="eyebrow">{component.kind}</div>
+            <h3>{component.title}</h3>
+          </div>
         </div>
         <span className={`app-portfolio__status app-portfolio__status--${component.status}`}>{component.status}</span>
       </div>
@@ -141,10 +203,15 @@ export function ApplicationsPage() {
           {applications.map((application) => (
             <article key={application.application} className={`app-portfolio__card app-portfolio__card--${application.status}`}>
               <div className="app-portfolio__card-head">
-                <div>
-                  <div className="eyebrow">Application</div>
-                  <h2>{application.title}</h2>
-                  <p>{application.description}</p>
+                <div className="app-portfolio__application-brand">
+                  <div className="app-portfolio__application-mark">
+                    <span>{applicationGlyph(application.application)}</span>
+                  </div>
+                  <div>
+                    <div className="eyebrow">Application</div>
+                    <h2>{application.title}</h2>
+                    <p>{application.description}</p>
+                  </div>
                 </div>
                 <div className="app-portfolio__health">
                   <span className={`app-portfolio__status app-portfolio__status--${application.status}`}>{application.status}</span>

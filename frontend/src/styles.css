@@ -275,6 +275,38 @@ a {
   align-items: flex-start;
 }
 
+.app-portfolio__application-brand {
+  display: flex;
+  align-items: flex-start;
+  gap: 18px;
+}
+
+.app-portfolio__application-mark,
+.app-portfolio__service-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 20px;
+  border: 1px solid rgba(83, 196, 255, 0.16);
+  background:
+    radial-gradient(circle at 30% 30%, rgba(141, 244, 255, 0.22), transparent 45%),
+    rgba(8, 20, 30, 0.92);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 18px 36px rgba(0, 0, 0, 0.24);
+}
+
+.app-portfolio__application-mark {
+  width: 74px;
+  height: 74px;
+}
+
+.app-portfolio__application-mark span {
+  font-size: 1.05rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--accent-2);
+}
+
 .app-portfolio__card-head h2 {
   margin: 6px 0 8px;
   font-size: clamp(1.8rem, 3vw, 2.4rem);
@@ -412,6 +444,86 @@ a {
   justify-content: space-between;
   gap: 10px;
   align-items: flex-start;
+}
+
+.app-portfolio__component-brand {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.app-portfolio__service-mark {
+  width: 48px;
+  height: 48px;
+  border-radius: 16px;
+  padding: 10px;
+}
+
+.app-portfolio__service-mark svg {
+  width: 100%;
+  height: 100%;
+}
+
+.app-portfolio__icon-stroke {
+  fill: none;
+  stroke: var(--accent-2);
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.app-portfolio__icon-stroke--soft {
+  opacity: 0.65;
+}
+
+.app-portfolio__icon-fill {
+  fill: var(--accent-2);
+}
+
+.app-portfolio__service-mark--edge {
+  border-color: rgba(108, 220, 255, 0.22);
+  background:
+    radial-gradient(circle at 30% 30%, rgba(108, 220, 255, 0.22), transparent 48%),
+    rgba(8, 20, 30, 0.92);
+}
+
+.app-portfolio__service-mark--gateway {
+  border-color: rgba(136, 243, 255, 0.22);
+  background:
+    radial-gradient(circle at 30% 30%, rgba(136, 243, 255, 0.2), transparent 48%),
+    rgba(8, 20, 30, 0.92);
+}
+
+.app-portfolio__service-mark--database {
+  border-color: rgba(118, 175, 255, 0.24);
+  background:
+    radial-gradient(circle at 30% 30%, rgba(118, 175, 255, 0.22), transparent 48%),
+    rgba(8, 20, 30, 0.92);
+}
+
+.app-portfolio__service-mark--orders {
+  border-color: rgba(135, 255, 210, 0.22);
+  background:
+    radial-gradient(circle at 30% 30%, rgba(135, 255, 210, 0.2), transparent 48%),
+    rgba(8, 20, 30, 0.92);
+}
+
+.app-portfolio__service-mark--inventory {
+  border-color: rgba(255, 214, 140, 0.22);
+  background:
+    radial-gradient(circle at 30% 30%, rgba(255, 214, 140, 0.18), transparent 48%),
+    rgba(8, 20, 30, 0.92);
+}
+
+.app-portfolio__service-mark--billing {
+  border-color: rgba(255, 167, 204, 0.24);
+  background:
+    radial-gradient(circle at 30% 30%, rgba(255, 167, 204, 0.18), transparent 48%),
+    rgba(8, 20, 30, 0.92);
+}
+
+.app-portfolio__service-mark--default {
+  border-color: rgba(83, 196, 255, 0.16);
 }
 
 .app-portfolio__component-top h3 {
@@ -751,6 +863,13 @@ a {
   display: block;
 }
 
+.incident-deep-dive__card small {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  text-transform: capitalize;
+}
+
 .incident-deep-dive__card code {
   display: block;
   white-space: pre-wrap;
@@ -781,6 +900,13 @@ a {
   color: var(--muted);
   font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
   line-height: 1.5;
+}
+
+.incident-deep-dive__panel ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  line-height: 1.6;
 }
 
 .incident-timeline-item {

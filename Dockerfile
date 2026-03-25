@@ -11,8 +11,6 @@ RUN apt-get update && \
 
 COPY requirements.txt /code/requirements.txt
 
-RUN pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org --upgrade pip setuptools wheel
-
 RUN pip install \
     --no-cache-dir \
     --trusted-host pypi.org \
