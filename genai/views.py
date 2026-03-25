@@ -913,6 +913,60 @@ def _update_recent_alert_recommendation(alert_id: str, updates: Dict[str, Any]) 
     except Exception:
         logger.exception("Failed to update recent alert recommendation for alert_id=%s", alert_id)
 
+
+def _remove_recent_alert_recommendation_by_identity(alert_name: str, target_host: Optional[str], from_alertmanager: bool) -> int:
+    """Remove cached recent alert entries matching the provided identity.
+
+    Returns the number of removed entries.
+    """
+    try:
+        existing = cache.get(RECENT_ALERT_CACHE_KEY) or []
+        if not isinstance(existing, list):
+            return 0
+        # First try strict identity match (alert_name + target_host + from_alertmanager)
+        kept = []
+        removed = 0
+        for entry in existing:
+            if not isinstance(entry, dict):
+                kept.append(entry)
+                continue
+
+            if (
+                entry.get("alert_name") == alert_name
+                and entry.get("target_host") == target_host
+                and entry.get("from_alertmanager") == from_alertmanager
+            ):
+                removed += 1
+                continue
+            kept.append(entry)
+
+        if removed:
+            cache.set(RECENT_ALERT_CACHE_KEY, kept[:MAX_RECENT_ALERTS], RECENT_ALERT_CACHE_TTL)
+            logger.info("Removed %d cached alert(s) by strict identity for %s", removed, alert_name)
+            return removed
+
+        # Fallback: be more permissive and remove by alert_name only (covers payloads
+        # that don't include Alertmanager envelope or instance labels). This helps
+        # avoid stale UI entries while still being conservative.
+        kept2 = []
+        removed2 = 0
+        for entry in existing:
+            if not isinstance(entry, dict):
+                kept2.append(entry)
+                continue
+            if entry.get("alert_name") == alert_name:
+                removed2 += 1
+                continue
+            kept2.append(entry)
+
+        if removed2:
+            cache.set(RECENT_ALERT_CACHE_KEY, kept2[:MAX_RECENT_ALERTS], RECENT_ALERT_CACHE_TTL)
+            logger.info("Removed %d cached alert(s) by alert_name fallback for %s", removed2, alert_name)
+        return removed2
+    except Exception:
+        logger.exception("Failed to remove recent alert recommendation for %s@%s", alert_name, target_host)
+        return 0
+
 def _rows_to_json_safe_lists(rows: List[Tuple]) -> List[List]:
     out = []
     for r in rows:
@@ -2845,6 +2899,16 @@ def ingest_alert_view(request: HttpRequest):
         "incident_title": incident.title,
     }
 
+    # If this alert is resolved, remove matching cached entries so the frontend
+    # will no longer show stale firing alerts. For non-executing (deferred)
+    # recommendations, store them as before.
+    if alert_payload.get("status") == "resolved":
+        removed = _remove_recent_alert_recommendation_by_identity(
+            cache_entry.get("alert_name"), cache_entry.get("target_host"), cache_entry.get("from_alertmanager")
+        )
+        logger.info("Removed %d cached alert(s) for resolved alert %s", removed, cache_entry.get("alert_name"))
+        return JsonResponse(response_payload)
+
     if not execute_immediately:
         _store_recent_alert_recommendation(cache_entry)
         return JsonResponse(response_payload)
@@ -2905,21 +2969,31 @@ def recent_alert_recommendations_view(request: HttpRequest):
     entries = cache.get(RECENT_ALERT_CACHE_KEY) or []
     if not isinstance(entries, list):
         entries = []
+    
     normalized_entries = []
     changed = False
+    firing_entries = []  # Track only firing alerts
+    
     for entry in entries:
         if not isinstance(entry, dict):
             normalized_entries.append(entry)
             continue
-        if entry.get("alert_id"):
-            normalized_entries.append(entry)
-            continue
-        changed = True
-        normalized_entries.append({**entry, "alert_id": f"alert-{uuid.uuid4().hex}"})
+        
+        # Add alert_id if missing
+        if not entry.get("alert_id"):
+            changed = True
+            entry = {**entry, "alert_id": f"alert-{uuid.uuid4().hex}"}
+        
+        normalized_entries.append(entry)
+        
+        # Only include firing alerts (filter out resolved alerts)
+        if entry.get("status") != "resolved":
+            firing_entries.append(entry)
+    
     if changed:
         cache.set(RECENT_ALERT_CACHE_KEY, normalized_entries[:MAX_RECENT_ALERTS], RECENT_ALERT_CACHE_TTL)
-        entries = normalized_entries
-    return JsonResponse({"count": len(entries), "results": entries})
+    
+    return JsonResponse({"count": len(firing_entries), "results": firing_entries})
 
 @csrf_exempt
 @login_required
