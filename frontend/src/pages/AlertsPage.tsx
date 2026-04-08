@@ -15,9 +15,9 @@ export function AlertsPage() {
     <>
       <section className="hero-card">
         <div className="eyebrow">Alert Feed</div>
-        <h2>Recent Alert Recommendations</h2>
+        <h2>Active Alert Stream</h2>
         <p>
-          Every alert now has a direct graph entry point. You no longer need to copy alert identifiers manually to open the investigation graph.
+          Review the latest alert signals, AI diagnosis, and graph entry points without leaving the main observability workflow.
         </p>
       </section>
 

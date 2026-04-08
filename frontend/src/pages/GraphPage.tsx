@@ -123,11 +123,11 @@ export function GraphPage() {
 
   return (
     <>
-      <section className="hero-card hero-card--graph">
+      <section className="hero-card hero-card--graph hero-card--topology">
         <div className="eyebrow">Immersive Graph System</div>
-        <h2>{graph ? graphTitle(graph) : "Neural Dependency Map"}</h2>
+        <h2>{graph ? graphTitle(graph) : "Topology Explorer"}</h2>
         <p>
-          This graph page now supports application topology, incident blast radius, and alert-driven graph fallback from the same React scene.
+          Explore topology, blast radius, and incident propagation from a single graph workspace built on live platform context.
         </p>
         <div className="hero-card__grid">
           <div className="hero-card__chip">Three.js</div>

@@ -19,11 +19,11 @@ export function PredictionsPage() {
 
   return (
     <>
-      <section className="hero-card">
+      <section className="hero-card hero-card--predictions">
         <div className="eyebrow">Prediction Center</div>
-        <h2>Forward Risk View</h2>
+        <h2>Risk Forecast</h2>
         <p>
-          This page uses the current prediction endpoint and presents the model output as operational risk, not just raw backend rows.
+          Track which services are most likely to degrade next and investigate predictive risk before incidents spread.
         </p>
       </section>
 
@@ -42,7 +42,7 @@ export function PredictionsPage() {
       ) : (
         <section className="prediction-grid">
           {(predictionsQuery.data || []).map((prediction) => (
-            <article key={`${prediction.application}-${prediction.service}-${prediction.created_at}`} className="prediction-card">
+            <article key={`${prediction.application}-${prediction.service}-${prediction.created_at}`} className={`prediction-card prediction-card--${scoreLabel(prediction.risk_score).toLowerCase()}`}>
               <div className="prediction-card__top">
                 <div>
                   <div className="eyebrow">{prediction.application}</div>

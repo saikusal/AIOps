@@ -153,12 +153,11 @@ export function AssistantPage() {
 
   return (
     <>
-      <section className="hero-card">
+      <section className="hero-card hero-card--assistant">
         <div className="eyebrow">Full AI Workspace</div>
-        <h2>Assistant Experience Layer</h2>
+        <h2>Investigation Copilot</h2>
         <p>
-          This page now uses the existing Django session and chat APIs directly. It becomes the main investigation workspace
-          without keeping the old template widget as the primary experience.
+          Ask for RCA, dependency impact, next diagnostics, prediction context, or runbook guidance from a single stateful investigation workspace.
         </p>
         {(pinnedApplication || pinnedService || pinnedIncident) ? (
           <div className="hero-card__grid">

@@ -24,6 +24,11 @@ function formatRate(value?: number | null) {
   return `${value.toFixed(1)}/s`;
 }
 
+function formatCurrency(value?: number | null, currency = "INR") {
+  const numeric = value ?? 0;
+  return new Intl.NumberFormat("en-US", { style: "currency", currency, maximumFractionDigits: 0 }).format(numeric);
+}
+
 function riskLabel(score?: number | null) {
   const numeric = score ?? 0;
   if (numeric >= 0.75) return "High";
@@ -102,7 +107,7 @@ function ServiceIcon({ component }: { component: ApplicationComponent }) {
 
 function ComponentCard({ application, component, alert }: { application: string; component: ApplicationComponent; alert?: AlertRecommendation }) {
   return (
-    <article className={`app-portfolio__component app-portfolio__component--${component.status}`}>
+    <article className={`app-portfolio__component app-portfolio__component--${component.status} app-portfolio__component--tone-${serviceTone(component)}`}>
       <div className="app-portfolio__component-top">
         <div className="app-portfolio__component-brand">
           <ServiceIcon component={component} />
@@ -111,9 +116,14 @@ function ComponentCard({ application, component, alert }: { application: string;
             <h3>{component.title}</h3>
           </div>
         </div>
-        <span className={`app-portfolio__status app-portfolio__status--${component.status}`}>{component.status}</span>
+        <div className="app-portfolio__component-meta">
+          <span className={`app-portfolio__status app-portfolio__status--${component.status}`}>{component.status}</span>
+          <div className="app-portfolio__component-insight-hint" role="note" aria-label="AI Insight" tabIndex={0}>
+            <span className="app-portfolio__component-insight-icon">i</span>
+            <span className="app-portfolio__component-insight-tooltip">{component.ai_insight || "No AI insight available yet."}</span>
+          </div>
+        </div>
       </div>
-      <p>{component.ai_insight || "No AI insight available yet."}</p>
       <div className="app-portfolio__metrics">
         <div>
           <span>Latency p95</span>
@@ -130,6 +140,15 @@ function ComponentCard({ application, component, alert }: { application: string;
         <div>
           <span>Risk</span>
           <strong>{riskLabel(component.prediction?.risk_score)} {component.prediction?.risk_score !== undefined && component.prediction?.risk_score !== null ? `(${Math.round(component.prediction.risk_score * 100)}%)` : ""}</strong>
+        </div>
+        <div>
+          <span>Revenue Impact</span>
+          <strong>{formatCurrency(component.business_impact?.current_day?.estimated_revenue_lost, component.business_impact?.currency || "INR")}</strong>
+          {(component.business_impact?.current_day?.failed_transactions ?? 0) > 0 && (
+            <small style={{ display: 'block', fontSize: '0.75rem', opacity: 0.7 }}>
+              {component.business_impact?.current_day?.failed_transactions} failed txns
+            </small>
+          )}
         </div>
       </div>
       <div className="page-card__meta">
@@ -171,18 +190,18 @@ export function ApplicationsPage() {
 
   return (
     <>
-      <section className="hero-card">
+      <section className="hero-card hero-card--applications">
         <div className="eyebrow">Portfolio Command Center</div>
-        <h2>Applications Experience Layer</h2>
+        <h2>Application Portfolio</h2>
         <p>
-          This page now uses the live Django overview endpoint and turns it into an immersive application portfolio.
-          It is the first real dashboard migration after the graph page.
+          Monitor application health, AI insights, service risk, and blast radius from a single portfolio view built on live platform telemetry.
         </p>
         <div className="hero-card__grid">
           <div className="hero-card__chip">Live applications data</div>
           <div className="hero-card__chip">Prediction-aware cards</div>
           <div className="hero-card__chip">Component health</div>
           <div className="hero-card__chip">AI insights</div>
+          <div className="hero-card__chip">Revenue impact (7-day)</div>
         </div>
       </section>
 
@@ -209,7 +228,14 @@ export function ApplicationsPage() {
                   </div>
                   <div>
                     <div className="eyebrow">Application</div>
-                    <h2>{application.title}</h2>
+                    <div className="app-portfolio__title-row">
+                      <h2>{application.title}</h2>
+                      <div className="app-portfolio__insight-hint" role="note" aria-label="AI Insight" tabIndex={0}>
+                        <span className="app-portfolio__insight-label">AI Insight</span>
+                        <span className="app-portfolio__insight-icon">i</span>
+                        <span className="app-portfolio__insight-tooltip">{application.ai_insight}</span>
+                      </div>
+                    </div>
                     <p>{application.description}</p>
                   </div>
                 </div>
@@ -218,11 +244,6 @@ export function ApplicationsPage() {
                   <strong>{riskLabel(application.prediction?.risk_score)} risk</strong>
                   <div>{application.prediction?.risk_score !== undefined && application.prediction?.risk_score !== null ? `${Math.round(application.prediction.risk_score * 100)}% next ${application.prediction?.predicted_window_minutes || 15}m` : "No prediction yet"}</div>
                 </div>
-              </div>
-
-              <div className="app-portfolio__headline">
-                <strong>AI Insight</strong>
-                <p>{application.ai_insight}</p>
               </div>
 
               <div className="app-portfolio__summary">
@@ -237,6 +258,24 @@ export function ApplicationsPage() {
                 <div className="app-portfolio__summary-chip">
                   <span>Components</span>
                   <strong>{application.components.length}</strong>
+                </div>
+                <div className="app-portfolio__summary-chip">
+                  <span>Revenue Impact Today</span>
+                  <strong>{formatCurrency(application.business_impact?.current_estimated_revenue_lost, application.business_impact?.currency || "INR")}</strong>
+                  {(application.business_impact?.current_day_failed_transactions ?? 0) > 0 && (
+                    <small style={{ display: 'block', fontSize: '0.75rem', opacity: 0.7 }}>
+                      {application.business_impact?.current_day_failed_transactions} failed txns
+                    </small>
+                  )}
+                </div>
+                <div className="app-portfolio__summary-chip">
+                  <span>Revenue Lost 7d</span>
+                  <strong>{formatCurrency(application.business_impact?.trailing_7d_revenue_lost, application.business_impact?.currency || "INR")}</strong>
+                  {(application.business_impact?.trailing_7d_failed_transactions ?? 0) > 0 && (
+                    <small style={{ display: 'block', fontSize: '0.75rem', opacity: 0.7 }}>
+                      {application.business_impact?.trailing_7d_failed_transactions} failed txns
+                    </small>
+                  )}
                 </div>
               </div>
 

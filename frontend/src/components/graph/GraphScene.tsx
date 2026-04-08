@@ -63,9 +63,9 @@ function buildScene(graph: GraphPayload) {
       label: node.label,
       type: "dependency",
       position: [
-        -3.8,
-        THREE.MathUtils.lerp(1.7, -1.7, progress),
-        THREE.MathUtils.lerp(-0.24, 0.24, random()),
+        -4.5,
+        THREE.MathUtils.lerp(2.5, -2.5, progress),
+        THREE.MathUtils.lerp(-0.3, 0.3, random()),
       ],
       description: node.ai_insight || `${node.label} is an upstream dependency in this graph.`,
     };
@@ -78,9 +78,9 @@ function buildScene(graph: GraphPayload) {
       label: node.label,
       type: "impacted",
       position: [
-        3.8,
-        THREE.MathUtils.lerp(1.7, -1.7, progress),
-        THREE.MathUtils.lerp(-0.24, 0.24, random()),
+        4.5,
+        THREE.MathUtils.lerp(2.5, -2.5, progress),
+        THREE.MathUtils.lerp(-0.3, 0.3, random()),
       ],
       description: node.ai_insight || `${node.label} is currently inside the blast radius.`,
     };
@@ -88,24 +88,24 @@ function buildScene(graph: GraphPayload) {
 
   const serviceNodes: SceneNode[] = neutralSources.map((node, index, list) => {
     const angle = THREE.MathUtils.lerp(-1.1, 1.1, list.length === 1 ? 0.5 : index / Math.max(list.length - 1, 1));
-    const radius = 2.6 + random() * 0.8;
+    const radius = 3.2 + random() * 1.0;
     return {
       id: node.id,
       label: node.label,
       type: "service",
-      position: [Math.cos(angle) * radius * 0.58, Math.sin(angle) * radius * 0.96, THREE.MathUtils.lerp(-0.16, 0.16, random())],
+      position: [Math.cos(angle) * radius * 0.7, Math.sin(angle) * radius * 1.0, THREE.MathUtils.lerp(-0.2, 0.2, random())],
       description: node.ai_insight || `${node.label} is part of the current graph context.`,
     };
   });
 
   const meshNodes: SceneNode[] = Array.from({ length: 28 }, (_, index) => {
     const angle = random() * Math.PI * 2;
-    const radius = 1.2 + Math.pow(random(), 0.88) * 4.2;
+    const radius = 1.5 + Math.pow(random(), 0.88) * 4.5;
     return {
       id: `mesh-${index}`,
       label: `mesh-${index}`,
       type: "mesh",
-      position: [Math.cos(angle) * radius * 1.1, Math.sin(angle) * radius * 0.92, THREE.MathUtils.lerp(-0.3, 0.3, random())],
+      position: [Math.cos(angle) * radius, Math.sin(angle) * radius * 0.85, THREE.MathUtils.lerp(-0.4, 0.4, random())],
     };
   });
 
@@ -227,7 +227,7 @@ function NodeGlow({
           ? "#ffb7b7"
           : "#8df4ff";
 
-  const scale = node.type === "root_cause" ? 0.58 : 0.34;
+  const scale = node.type === "root_cause" ? 0.42 : 0.26;
   const opacity = isDimmed ? 0.22 : isActive ? 1 : 0.86;
   const glowOpacity = isDimmed ? 0.04 : isActive ? 0.22 : 0.12;
 
@@ -286,8 +286,8 @@ function GraphSceneContent({ graph, activeNodeId, onSelectNode }: GraphSceneProp
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const highlightedNodeId = hoveredNodeId || activeNodeId || scene.rootNode.id;
   const sceneCenter = useMemo(
-    () => computeSceneCenter([...scene.visibleNodes, ...scene.meshNodes]),
-    [scene.meshNodes, scene.visibleNodes],
+    () => computeSceneCenter(scene.visibleNodes),
+    [scene.visibleNodes],
   );
   const connectedNodeIds = new Set<string>([
     highlightedNodeId,
@@ -299,14 +299,14 @@ function GraphSceneContent({ graph, activeNodeId, onSelectNode }: GraphSceneProp
   return (
     <>
       <color attach="background" args={["#02080d"]} />
-      <fog attach="fog" args={["#02080d", 8, 18]} />
+      <fog attach="fog" args={["#02080d", 8, 22]} />
       <ambientLight intensity={0.52} />
-      <pointLight position={[0, 0, 5]} intensity={16} color="#53c4ff" />
+      <pointLight position={[0, 0, 5]} intensity={18} color="#53c4ff" />
       <pointLight position={[0, 0, 3]} intensity={10} color="#ffb3b3" />
-      <Stars radius={22} depth={18} count={320} factor={2.2} saturation={0} fade speed={0.1} />
+      <Stars radius={20} depth={18} count={300} factor={2} saturation={0} fade speed={0.1} />
 
       <mesh position={[0, 0, -3]}>
-        <planeGeometry args={[22, 16]} />
+        <planeGeometry args={[24, 18]} />
         <meshBasicMaterial color="#09202a" transparent opacity={0.35} />
       </mesh>
 
@@ -335,13 +335,13 @@ function GraphSceneContent({ graph, activeNodeId, onSelectNode }: GraphSceneProp
           node={{ ...node, position: getCenteredPosition(node.position, sceneCenter) }}
           isActive={node.id === highlightedNodeId}
           isDimmed={!connectedNodeIds.has(node.id)}
-          showLabel={node.id === highlightedNodeId && Boolean(hoveredNodeId || activeNodeId)}
+          showLabel={true}
           onSelect={onSelectNode}
           onHover={(hovered) => setHoveredNodeId(hovered?.id || null)}
         />
       ))}
 
-      <OrbitControls target={[0, 0, 0]} enablePan={false} minDistance={9.5} maxDistance={14} autoRotate={false} maxPolarAngle={Math.PI / 2.02} minPolarAngle={Math.PI / 2.9} />
+      <OrbitControls target={[0, 0, 0]} enablePan={false} minDistance={4} maxDistance={16} autoRotate={false} maxPolarAngle={Math.PI / 2.02} minPolarAngle={Math.PI / 2.9} />
     </>
   );
 }
@@ -349,7 +349,7 @@ function GraphSceneContent({ graph, activeNodeId, onSelectNode }: GraphSceneProp
 export function GraphScene({ graph, activeNodeId, onSelectNode }: GraphSceneProps) {
   return (
     <div className="graph3d-shell">
-      <Canvas camera={{ position: [0, 0.1, 12.8], fov: 30 }}>
+      <Canvas camera={{ position: [0, 0, 8.5], fov: 55 }}>
         <GraphSceneContent graph={graph} activeNodeId={activeNodeId} onSelectNode={onSelectNode} />
       </Canvas>
     </div>

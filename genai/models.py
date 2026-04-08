@@ -2,6 +2,7 @@ import uuid
 
 from django.contrib.auth import get_user_model
 from django.db import models
+from django.utils import timezone
 
 
 User = get_user_model()
@@ -159,3 +160,160 @@ class ServicePrediction(models.Model):
 
     def __str__(self):
         return f"{self.application}/{self.service} risk={self.risk_score:.2f}"
+
+
+class TelemetryProfile(models.Model):
+    slug = models.SlugField(max_length=64, unique=True)
+    name = models.CharField(max_length=120)
+    summary = models.TextField(blank=True, default="")
+    default_for_target = models.CharField(max_length=32, default="linux")
+    components = models.JSONField(default=list, blank=True)
+    capabilities = models.JSONField(default=list, blank=True)
+    config_json = models.JSONField(default=dict, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class Target(models.Model):
+    STATUS_CHOICES = (
+        ("pending", "Pending"),
+        ("connected", "Connected"),
+        ("warning", "Warning"),
+        ("degraded", "Degraded"),
+        ("disconnected", "Disconnected"),
+    )
+
+    target_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    name = models.CharField(max_length=160)
+    target_type = models.CharField(max_length=32, default="linux")
+    environment = models.CharField(max_length=64, blank=True, default="production")
+    hostname = models.CharField(max_length=255, blank=True, default="")
+    ip_address = models.CharField(max_length=64, blank=True, default="")
+    os_name = models.CharField(max_length=120, blank=True, default="")
+    os_version = models.CharField(max_length=120, blank=True, default="")
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default="pending")
+    profile = models.ForeignKey(TelemetryProfile, null=True, blank=True, on_delete=models.SET_NULL, related_name="targets")
+    collector_status = models.CharField(max_length=32, default="pending")
+    metadata_json = models.JSONField(default=dict, blank=True)
+    enrolled_at = models.DateTimeField(auto_now_add=True)
+    last_heartbeat_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return self.name
+
+
+class EnrollmentToken(models.Model):
+    token = models.CharField(max_length=96, unique=True, db_index=True)
+    target_type = models.CharField(max_length=32, default="linux")
+    target_name = models.CharField(max_length=160, blank=True, default="")
+    profile = models.ForeignKey(TelemetryProfile, null=True, blank=True, on_delete=models.SET_NULL, related_name="enrollment_tokens")
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="fleet_enrollment_tokens")
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    revoked = models.BooleanField(default=False)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.target_type}:{self.token[:12]}"
+
+    @property
+    def is_valid(self) -> bool:
+        return (not self.revoked) and self.expires_at > timezone.now()
+
+
+class TargetComponent(models.Model):
+    target = models.ForeignKey(Target, on_delete=models.CASCADE, related_name="components")
+    name = models.CharField(max_length=120)
+    version = models.CharField(max_length=64, blank=True, default="")
+    status = models.CharField(max_length=32, default="pending")
+    metadata_json = models.JSONField(default=dict, blank=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]
+        unique_together = ("target", "name")
+
+    def __str__(self):
+        return f"{self.target.name}:{self.name}"
+
+
+class TargetHeartbeat(models.Model):
+    target = models.ForeignKey(Target, on_delete=models.CASCADE, related_name="heartbeats")
+    payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.target.name}:{self.created_at.isoformat()}"
+
+
+class DiscoveredService(models.Model):
+    target = models.ForeignKey(Target, on_delete=models.CASCADE, related_name="discovered_services")
+    service_name = models.CharField(max_length=160)
+    process_name = models.CharField(max_length=160, blank=True, default="")
+    port = models.PositiveIntegerField(null=True, blank=True)
+    status = models.CharField(max_length=32, default="observed")
+    metadata_json = models.JSONField(default=dict, blank=True)
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["service_name"]
+        unique_together = ("target", "service_name", "port")
+
+    def __str__(self):
+        return f"{self.target.name}:{self.service_name}"
+
+
+class TargetOnboardingRequest(models.Model):
+    STATUS_CHOICES = (
+        ("draft", "Draft"),
+        ("validated", "Validated"),
+        ("installing", "Installing"),
+        ("installed", "Installed"),
+        ("failed", "Failed"),
+    )
+
+    onboarding_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    target_type = models.CharField(max_length=32, default="linux")
+    name = models.CharField(max_length=160)
+    hostname = models.CharField(max_length=255)
+    ssh_user = models.CharField(max_length=120, default="ec2-user")
+    ssh_port = models.PositiveIntegerField(default=22)
+    profile = models.ForeignKey(TelemetryProfile, null=True, blank=True, on_delete=models.SET_NULL, related_name="onboarding_requests")
+    pem_file = models.FileField(upload_to="fleet/pem/")
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default="draft")
+    connectivity_status = models.CharField(max_length=32, default="untested")
+    connectivity_message = models.TextField(blank=True, default="")
+    last_connectivity_check_at = models.DateTimeField(null=True, blank=True)
+    last_install_at = models.DateTimeField(null=True, blank=True)
+    install_message = models.TextField(blank=True, default="")
+    target = models.ForeignKey(Target, null=True, blank=True, on_delete=models.SET_NULL, related_name="onboarding_requests")
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="fleet_onboarding_requests")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"{self.name}:{self.hostname}"

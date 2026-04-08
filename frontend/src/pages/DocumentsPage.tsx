@@ -40,12 +40,11 @@ export function DocumentsPage() {
 
   return (
     <>
-      <section className="hero-card">
+      <section className="hero-card hero-card--documents">
         <div className="eyebrow">Documents</div>
-        <h2>Runbook And Document Intelligence</h2>
+        <h2>Knowledge Base</h2>
         <p>
-          This screen is now native React. It still uses the current Django upload and delete flows behind the scenes,
-          but the user experience stays inside the new frontend instead of dropping into the old console.
+          Keep operational runbooks, troubleshooting notes, and product documentation available to the assistant without leaving the platform.
         </p>
       </section>
 

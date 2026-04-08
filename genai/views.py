@@ -7,7 +7,11 @@ import traceback
 import time
 import subprocess
 import uuid
+import hashlib
+from datetime import timedelta
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Tuple, Optional
+from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -16,9 +20,10 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from io import BytesIO
-from django.contrib.auth import logout as auth_logout
+from django.contrib.auth import authenticate, login as auth_login, logout as auth_logout
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse, HttpResponse, HttpRequest
+from django.conf import settings
 from django.shortcuts import redirect, render
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.clickjacking import xframe_options_exempt
@@ -31,11 +36,18 @@ import pandas as pd
 from .models import (
     ChatMessage,
     ChatSession,
+    DiscoveredService,
+    EnrollmentToken,
     GenAIChatHistory,
     Incident,
     IncidentAlert,
     IncidentTimelineEvent,
     ServicePrediction,
+    Target,
+    TargetComponent,
+    TargetHeartbeat,
+    TargetOnboardingRequest,
+    TelemetryProfile,
 )
 from .predictions import score_components
 from .sso import ensure_sso_user, get_sso_identity
@@ -63,6 +75,15 @@ def load_custom_profanity_words():
 # Load the words when the module is first imported
 load_custom_profanity_words()
 from .semantic_cache import simple_cache
+from .telemetry_cache import (
+    instant_cache_get_or_fetch,
+    instant_cache_batch_get,
+    instant_cache_batch_set,
+    metadata_cache_get_or_fetch,
+    get_cache_stats,
+    get_http_session,
+    purge_cache,
+)
 
 # ---------------- config ----------------
 TARGET_TABLE = os.getenv("GENAI_TABLE", "")
@@ -80,14 +101,28 @@ AIDE_DEBUG = os.getenv("AIDE_DEBUG", "false").lower() in ("true", "1", "yes")
 VERIFY_PARAM = os.getenv("AIDE_CA_BUNDLE") or AIDE_VERIFY_SSL
 AGENT_PORT = int(os.getenv("AGENT_PORT", "9999"))
 DB_AGENT_HOST = os.getenv("DB_AGENT_HOST", "db-agent")
+CONTROL_AGENT_HOST = os.getenv("CONTROL_AGENT_HOST", "control-agent")
 DB_NAME = os.getenv("POSTGRES_DB", "aiops")
 DB_USER = os.getenv("POSTGRES_USER", "user")
+AIOPS_PUBLIC_BASE_URL = os.getenv("AIOPS_PUBLIC_BASE_URL", "").strip()
+AIOPS_PUBLIC_OTLP_GRPC_ENDPOINT = os.getenv("AIOPS_PUBLIC_OTLP_GRPC_ENDPOINT", "").strip()
+AIOPS_OTELCOL_VERSION = os.getenv("AIOPS_OTELCOL_VERSION", "0.87.0")
+AIOPS_NODE_EXPORTER_VERSION = os.getenv("AIOPS_NODE_EXPORTER_VERSION", "1.8.1")
 CHAT_HISTORY_WINDOW = int(os.getenv("CHAT_HISTORY_WINDOW", "12"))
 RECENT_ALERT_CACHE_KEY = "aiops_recent_alert_recommendations"
 RECENT_ALERT_CACHE_TTL = 60 * 60 * 24
 MAX_RECENT_ALERTS = 20
 APP_OVERVIEW_CACHE_KEY = "aiops_application_overview"
 APP_OVERVIEW_CACHE_TTL = 60
+IMPACT_WINDOW_DAYS = 7
+IMPACT_BASELINE_TX_PER_DAY = int(os.getenv("AIOPS_BASELINE_TX_PER_DAY", "1000"))
+IMPACT_DEFAULT_AOV = float(os.getenv("AIOPS_DEFAULT_AOV", "1499"))
+APP_AVG_ORDER_VALUE = {
+    "customer-portal": 1299.0,
+    "payments-hub": 1899.0,
+    "support-desk": 799.0,
+    "analytics-studio": 1599.0,
+}
 APP_OVERVIEW_APPLICATIONS = [
     {
         "application": "customer-portal",
@@ -431,6 +466,86 @@ def _correlate_alert_to_incident(alert_payload: Dict[str, Any], context: Dict[st
     return incident
 
 
+def _compute_incident_revenue_impact(incident: Incident) -> Optional[Dict[str, Any]]:
+    """Estimate revenue impact for an incident based on failed orders during incident window."""
+    application_key = (incident.application or "").strip()
+    service_key = (incident.primary_service or "").strip()
+    avg_order_value = float(APP_AVG_ORDER_VALUE.get(application_key, IMPACT_DEFAULT_AOV))
+
+    ist_zone = ZoneInfo("Asia/Kolkata")
+    opened_at = incident.opened_at
+    resolved_at = incident.resolved_at or timezone.now()
+    duration_seconds = max((resolved_at - opened_at).total_seconds(), 0)
+    duration_hours = round(duration_seconds / 3600, 2)
+
+    # Try DB-backed calculation for orders-related incidents
+    normalized_service = service_key.lower()
+    orders_related = normalized_service in {"app-orders", "orders", "app-billing", "billing", "app-inventory", "inventory"}
+
+    if orders_related:
+        start_utc = opened_at.astimezone(ZoneInfo("UTC"))
+        end_utc = resolved_at.astimezone(ZoneInfo("UTC"))
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*) FROM demo_orders
+                WHERE created_at >= %s AND created_at <= %s
+                """,
+                [start_utc, end_utc],
+            )
+            total_orders = cursor.fetchone()[0] or 0
+
+            cursor.execute(
+                """
+                SELECT COUNT(DISTINCT o.order_ref)
+                FROM demo_orders o
+                LEFT JOIN demo_billing b
+                  ON o.order_ref = b.order_ref AND b.status = 'authorized'
+                WHERE o.created_at >= %s AND o.created_at <= %s
+                  AND b.order_ref IS NULL
+                """,
+                [start_utc, end_utc],
+            )
+            failed_transactions = cursor.fetchone()[0] or 0
+
+        revenue_lost = round(failed_transactions * avg_order_value, 2)
+        revenue_per_hour = round(revenue_lost / duration_hours, 2) if duration_hours > 0 else revenue_lost
+        data_source = "demo_orders+demo_billing"
+    else:
+        # Synthetic estimate for non-orders services
+        baseline_per_hour = IMPACT_BASELINE_TX_PER_DAY / 24.0
+        total_orders = round(baseline_per_hour * duration_hours)
+        # Use a severity-based error rate estimate
+        severity_error_map = {"critical": 0.25, "high": 0.15, "warning": 0.08, "low": 0.04}
+        error_rate = severity_error_map.get((incident.severity or "").lower(), 0.10)
+        failed_transactions = round(total_orders * error_rate)
+        revenue_lost = round(failed_transactions * avg_order_value, 2)
+        revenue_per_hour = round(revenue_lost / duration_hours, 2) if duration_hours > 0 else revenue_lost
+        data_source = "estimated"
+
+    impact_level = "none"
+    if revenue_lost >= 250000:
+        impact_level = "critical"
+    elif revenue_lost >= 100000:
+        impact_level = "high"
+    elif revenue_lost >= 25000:
+        impact_level = "medium"
+    elif revenue_lost > 0:
+        impact_level = "low"
+
+    return {
+        "currency": "INR",
+        "avg_order_value": avg_order_value,
+        "total_transactions": total_orders,
+        "failed_transactions": failed_transactions,
+        "revenue_lost": revenue_lost,
+        "revenue_per_hour": revenue_per_hour,
+        "duration_hours": duration_hours,
+        "impact_level": impact_level,
+        "data_source": data_source,
+    }
+
+
 def _incident_summary_payload(incident: Incident) -> Dict[str, Any]:
     alerts = list(incident.alerts.order_by("-last_seen_at")[:10])
     latest_prediction = ServicePrediction.objects.filter(
@@ -472,6 +587,7 @@ def _incident_summary_payload(incident: Incident) -> Dict[str, Any]:
             if latest_prediction
             else None
         ),
+        "business_impact": _compute_incident_revenue_impact(incident),
     }
 
 
@@ -769,10 +885,23 @@ def _extract_target_host_from_instance(instance: str) -> str:
     return str(instance).split(":", 1)[0].strip()
 
 
+RESTARTABLE_CONTAINER_NAMES = {
+    "db": "aiops-db",
+    "frontend": "aiops-frontend",
+    "gateway": "aiops-gateway",
+    "app-orders": "aiops-app-orders",
+    "app-inventory": "aiops-app-inventory",
+    "app-billing": "aiops-app-billing",
+    "toxiproxy": "aiops-toxiproxy",
+}
+
+
 def _normalize_agent_target_host(target_host: str) -> str:
     host = (target_host or "").strip()
     if host == "db":
         return DB_AGENT_HOST
+    if host in ("controller", "control", "control-agent"):
+        return CONTROL_AGENT_HOST
     return host
 
 
@@ -791,7 +920,16 @@ def _normalize_agent_command(command_to_run: str, target_host: str) -> str:
 
     if target_host == "db":
         if command.startswith("pg_isready") or command.startswith("psql "):
-            return command
+            if command.startswith("pg_isready"):
+                return "pg_isready -h db"
+            sql_match = re.search(r'-c\s+"(.*)"$', command)
+            sql = sql_match.group(1) if sql_match else (
+                "select now() as observed_at, count(*) as total_sessions, "
+                "count(*) filter (where state = 'active') as active_sessions, "
+                "count(*) filter (where wait_event is not null) as waiting_sessions "
+                "from pg_stat_activity;"
+            )
+            return f'psql -h db -U {DB_USER} -d {DB_NAME} -c "{sql}"'
         if command.startswith("docker logs") or command.startswith("tail ") or command.startswith("cat "):
             return (
                 f'psql -h db -U {DB_USER} -d {DB_NAME} -c '
@@ -918,6 +1056,53 @@ def _format_analysis_sections(sections: Dict[str, Any]) -> str:
             rendered = str(value)
         parts.append(f"{label}: {rendered}")
     return "\n\n".join(parts).strip()
+
+
+def _summarize_execution_type(execution_type: str) -> str:
+    return "remediation" if execution_type == "remediation" else "diagnostic"
+
+
+def _coerce_remediation_command(analysis_sections: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if not isinstance(analysis_sections, dict):
+        return {}
+
+    context_blob = json.dumps(context or {}, default=str).lower()
+    linked_recommendation = (context or {}).get("linked_recommendation") if isinstance(context, dict) else {}
+    dependency_graph = (context or {}).get("dependency_graph") if isinstance(context, dict) else {}
+    service_name = (
+        ((linked_recommendation or {}).get("target_host"))
+        or ((linked_recommendation or {}).get("labels") or {}).get("service")
+        or (context or {}).get("service_name")
+        or (dependency_graph or {}).get("service")
+        or ""
+    )
+    depends_on = (dependency_graph or {}).get("depends_on") or []
+
+    candidate_service = service_name
+    if "toxiproxy" in context_blob or "connection to server at \"toxiproxy\"" in context_blob:
+        candidate_service = "toxiproxy"
+    elif service_name in ("app-orders", "app-inventory", "app-billing", "gateway", "frontend"):
+        candidate_service = service_name
+    elif "db" in depends_on or "postgres" in context_blob or "database" in context_blob:
+        candidate_service = "db"
+
+    container_name = RESTARTABLE_CONTAINER_NAMES.get(candidate_service)
+    if not container_name:
+        analysis_sections["remediation_command"] = ""
+        analysis_sections["remediation_target_host"] = ""
+        analysis_sections["remediation_why"] = analysis_sections.get("remediation_why") or ""
+        analysis_sections["remediation_requires_approval"] = False
+        return analysis_sections
+
+    analysis_sections["remediation_command"] = f"docker restart {container_name}"
+    analysis_sections["remediation_target_host"] = "control-agent"
+    analysis_sections["remediation_why"] = (
+        analysis_sections.get("remediation_why")
+        or f"Restart the {candidate_service} container through the control agent to attempt recovery of the affected service path."
+    )
+    analysis_sections["remediation_service"] = candidate_service
+    analysis_sections["remediation_requires_approval"] = True
+    return analysis_sections
 
 
 def _normalize_alertmanager_payload(body: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
@@ -1116,38 +1301,39 @@ def _extract_target_host_from_payload(payload: Dict[str, Any]) -> Optional[str]:
 def _fetch_prometheus_alert(alert_name: str, target_host: Optional[str]) -> Dict[str, Any]:
     if not PROMETHEUS_URL or not alert_name:
         return {}
-    try:
-        selectors = [f'alertname="{alert_name}"']
-        if target_host:
-            selectors.append(f'instance=~"{target_host}(:.*)?"')
-        query = f'ALERTS{{{",".join(selectors)}}}'
-        response = requests.get(
+    selectors = [f'alertname="{alert_name}"']
+    if target_host:
+        selectors.append(f'instance=~"{target_host}(:.*)?"')
+    query = f'ALERTS{{{",".join(selectors)}}}'
+    cache_id = f"alert:{query}"
+
+    def _do_fetch():
+        session = get_http_session("victoriametrics")
+        response = session.get(
             f"{PROMETHEUS_URL}/api/v1/query",
             params={"query": query},
-            timeout=10,
+            timeout=(3, 10),
         )
         response.raise_for_status()
-        data = response.json()
-        return data.get("data", {})
-    except requests.RequestException as exc:
-        logger.warning("Prometheus alert lookup failed: %s", exc)
-        return {"error": str(exc)}
+        return response.json().get("data", {})
+
+    return metadata_cache_get_or_fetch("prom_alert", cache_id, _do_fetch, ttl=30, backend="victoriametrics")
 
 def _fetch_prometheus_custom_query(query: str) -> Dict[str, Any]:
     if not PROMETHEUS_URL or not query:
         return {}
-    try:
-        response = requests.get(
+
+    def _do_fetch(q: str) -> Dict[str, Any]:
+        session = get_http_session("victoriametrics")
+        response = session.get(
             f"{PROMETHEUS_URL}/api/v1/query",
-            params={"query": query},
-            timeout=10,
+            params={"query": q},
+            timeout=(3, 10),
         )
         response.raise_for_status()
-        data = response.json()
-        return data.get("data", {})
-    except requests.RequestException as exc:
-        logger.warning("Prometheus custom query failed: %s", exc)
-        return {"error": str(exc)}
+        return response.json().get("data", {})
+
+    return instant_cache_get_or_fetch(query, _do_fetch, backend="victoriametrics")
 
 def _fetch_elasticsearch_logs(target_host: Optional[str], query_text: str) -> Dict[str, Any]:
     if not ELASTICSEARCH_URL:
@@ -1163,7 +1349,10 @@ def _fetch_elasticsearch_logs(target_host: Optional[str], query_text: str) -> Di
         should.append({"match": {"message": query_text}})
     if not should:
         return {}
-    try:
+    cache_id = f"es:{target_host or ''}:{query_text or ''}"
+
+    def _do_fetch():
+        session = get_http_session("elasticsearch")
         body = {
             "size": 5,
             "sort": [{"@timestamp": {"order": "desc"}}],
@@ -1175,32 +1364,33 @@ def _fetch_elasticsearch_logs(target_host: Optional[str], query_text: str) -> Di
             },
             "_source": ["@timestamp", "message", "host.name", "host.hostname", "agent.hostname", "log.level"],
         }
-        response = requests.post(
+        response = session.post(
             f"{ELASTICSEARCH_URL.rstrip('/')}/_search",
             json=body,
-            timeout=10,
+            timeout=(3, 10),
             verify=VERIFY_PARAM,
         )
         response.raise_for_status()
         return response.json()
-    except requests.RequestException as exc:
-        logger.warning("Elasticsearch lookup failed: %s", exc)
-        return {"error": str(exc)}
+
+    return metadata_cache_get_or_fetch("es_logs", cache_id, _do_fetch, ttl=60, backend="elasticsearch")
 
 def _fetch_jaeger_traces(service_name: Optional[str]) -> Dict[str, Any]:
     if not JAEGER_URL or not service_name:
         return {}
-    try:
-        response = requests.get(
+    cache_id = f"jaeger:{service_name}"
+
+    def _do_fetch():
+        session = get_http_session("jaeger")
+        response = session.get(
             f"{JAEGER_URL.rstrip('/')}/api/traces",
             params={"service": service_name, "limit": 5, "lookback": "1h"},
-            timeout=10,
+            timeout=(3, 10),
         )
         response.raise_for_status()
         return response.json()
-    except requests.RequestException as exc:
-        logger.warning("Jaeger lookup failed: %s", exc)
-        return {"error": str(exc)}
+
+    return metadata_cache_get_or_fetch("jaeger", cache_id, _do_fetch, ttl=120, backend="jaeger")
 
 def collect_alert_context(alert_payload: Dict[str, Any]) -> Dict[str, Any]:
     labels = alert_payload.get("labels") if isinstance(alert_payload.get("labels"), dict) else {}
@@ -1273,8 +1463,11 @@ def analyze_command_output(
 ) -> Tuple[bool, str, Dict[str, Any]]:
     analysis_prompt = (
         "You are an IT infrastructure expert. A diagnostic command was run on a remote server. "
-        "Analyze the output and provide JSON only with keys: answer, root_cause, evidence, impact, resolution, remediation_steps, validation_steps. "
+        "Analyze the output and provide JSON only with keys: answer, root_cause, evidence, impact, resolution, remediation_steps, validation_steps, remediation_command, remediation_target_host, remediation_why, remediation_requires_approval. "
         "remediation_steps and validation_steps must be arrays of concise action items. "
+        "If a concrete remediation command is justified, remediation_command must be a single executable command suitable for the target troubleshooting agent. "
+        "If no safe remediation command should be proposed yet, return an empty remediation_command string. "
+        "remediation_requires_approval should be true whenever a remediation_command is returned. "
         "Do not ask the operator to inspect logs manually. If the command output contains logs, extract the likely error, impact, and concrete next action directly.\n\n"
         f"Original Question: '{original_question}'\n"
         f"Target Server: {target_host}\n"
@@ -1292,6 +1485,16 @@ def analyze_command_output(
             response_data = json.loads(body_text[start_index:end_index + 1])
         else:
             response_data = {"answer": body_text}
+        if isinstance(response_data, dict):
+            remediation_target_host = _extract_target_host_from_text(response_data.get("remediation_target_host")) or target_host
+            remediation_command = (response_data.get("remediation_command") or "").strip()
+            response_data["remediation_target_host"] = remediation_target_host if remediation_command else ""
+            response_data["remediation_command"] = remediation_command
+            response_data["remediation_requires_approval"] = _to_bool(
+                response_data.get("remediation_requires_approval"),
+                default=bool(remediation_command),
+            )
+            response_data = _coerce_remediation_command(response_data, context)
         answer = response_data.get("answer") or _format_analysis_sections(response_data) or body_text
         return True, answer, response_data if isinstance(response_data, dict) else {}
     except json.JSONDecodeError:
@@ -1358,6 +1561,308 @@ def _fallback_overview_insight(component: Dict[str, Any], metrics: Dict[str, Opt
     return f"{component['title']} is healthy. No active alert is firing and the latest telemetry snapshot looks normal."
 
 
+def _stable_noise(seed: str) -> float:
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8]
+    return int(digest, 16) / 0xFFFFFFFF
+
+
+def _estimate_error_rate_for_day(status: str, current_error_rate: float, service_key: str, day_offset: int) -> float:
+    if status == "down":
+        return 1.0
+    if day_offset == 0:
+        return max(0.0, min(1.0, current_error_rate))
+
+    if current_error_rate > 0:
+        baseline = current_error_rate
+    elif status == "degraded":
+        baseline = 0.035
+    else:
+        baseline = 0.0
+
+    jitter = (_stable_noise(f"{service_key}:error:{day_offset}") - 0.5) * 0.02
+    value = baseline + jitter
+    return max(0.0, min(0.35, value))
+
+
+def _hour_weight(hour: int) -> float:
+    if 9 <= hour < 18:
+        return 2.8
+    if 7 <= hour < 9 or 18 <= hour < 21:
+        return 1.35
+    return 0.55
+
+
+def _distribute_transactions_with_business_peak(total_transactions: int, service_key: str, day_offset: int) -> List[int]:
+    weighted: List[float] = []
+    for hour in range(24):
+        base = _hour_weight(hour)
+        jitter = 0.9 + (_stable_noise(f"{service_key}:hourly:{day_offset}:{hour}") * 0.2)
+        weighted.append(base * jitter)
+
+    total_weight = sum(weighted) or 1.0
+    raw = [(w / total_weight) * total_transactions for w in weighted]
+    distributed = [int(value) for value in raw]
+    remainder = total_transactions - sum(distributed)
+
+    if remainder > 0:
+        remainders = sorted(
+            ((index, raw[index] - distributed[index]) for index in range(24)),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        for index, _ in remainders[:remainder]:
+            distributed[index] += 1
+    return distributed
+
+
+def _build_orders_business_impact_from_db(
+    application_key: str,
+    service_key: str,
+    metrics: Dict[str, Optional[float]],
+) -> Optional[Dict[str, Any]]:
+    normalized = service_key.lower()
+    if normalized not in {"app-orders", "orders"}:
+        return None
+
+    ist_zone = ZoneInfo("Asia/Kolkata")
+    ist_now = timezone.localtime(timezone.now(), ist_zone)
+    start_date = ist_now.date() - timedelta(days=IMPACT_WINDOW_DAYS - 1)
+    start_dt_ist = timezone.datetime.combine(start_date, timezone.datetime.min.time(), tzinfo=ist_zone)
+    start_dt_utc = start_dt_ist.astimezone(ZoneInfo("UTC"))
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT order_ref, created_at
+            FROM demo_orders
+            WHERE created_at >= %s
+            ORDER BY created_at ASC
+            """,
+            [start_dt_utc],
+        )
+        order_rows = cursor.fetchall()
+
+        cursor.execute(
+            """
+            SELECT DISTINCT order_ref
+            FROM demo_billing
+            WHERE created_at >= %s
+              AND status = 'authorized'
+            """,
+            [start_dt_utc],
+        )
+        authorized_order_refs = {str(row[0]) for row in cursor.fetchall()}
+
+    if not order_rows:
+        return None
+
+    daily_map: Dict[str, Dict[str, Any]] = {}
+    for offset in range(IMPACT_WINDOW_DAYS):
+        date_value = (start_date + timedelta(days=offset)).isoformat()
+        daily_map[date_value] = {
+            "date": date_value,
+            "transactions": 0,
+            "failed_transactions": 0,
+            "business_hours_window": "09:00-18:00 IST",
+            "business_hours_transactions": 0,
+            "business_hours_failed_transactions": 0,
+            "off_hours_transactions": 0,
+        }
+
+    for order_ref, created_at in order_rows:
+        if not created_at:
+            continue
+        localized = timezone.localtime(created_at, ist_zone)
+        day_key = localized.date().isoformat()
+        if day_key not in daily_map:
+            continue
+
+        bucket = daily_map[day_key]
+        bucket["transactions"] += 1
+        in_business_hours = 9 <= localized.hour < 18
+        if in_business_hours:
+            bucket["business_hours_transactions"] += 1
+        else:
+            bucket["off_hours_transactions"] += 1
+
+        if str(order_ref) not in authorized_order_refs:
+            bucket["failed_transactions"] += 1
+            if in_business_hours:
+                bucket["business_hours_failed_transactions"] += 1
+
+    avg_order_value = float(APP_AVG_ORDER_VALUE.get(application_key, IMPACT_DEFAULT_AOV))
+    daily_series: List[Dict[str, Any]] = []
+    for offset in range(IMPACT_WINDOW_DAYS):
+        day_key = (start_date + timedelta(days=offset)).isoformat()
+        bucket = daily_map[day_key]
+        tx = int(bucket["transactions"])
+        failed = int(bucket["failed_transactions"])
+        error_rate = (failed / tx) if tx else float(metrics.get("error_rate") or 0.0)
+        revenue_lost = round(failed * avg_order_value, 2)
+        daily_series.append({
+            "date": day_key,
+            "transactions": tx,
+            "error_rate": round(error_rate, 4),
+            "failed_transactions": failed,
+            "estimated_revenue_lost": revenue_lost,
+            "business_hours_window": "09:00-18:00 IST",
+            "business_hours_transactions": int(bucket["business_hours_transactions"]),
+            "business_hours_failed_transactions": int(bucket["business_hours_failed_transactions"]),
+            "off_hours_transactions": int(bucket["off_hours_transactions"]),
+        })
+
+    today = daily_series[-1]
+    trailing_revenue = round(sum(item["estimated_revenue_lost"] for item in daily_series), 2)
+    trailing_failed = sum(item["failed_transactions"] for item in daily_series)
+
+    impact_level = "none"
+    if today["estimated_revenue_lost"] >= 250000:
+        impact_level = "high"
+    elif today["estimated_revenue_lost"] >= 50000:
+        impact_level = "medium"
+    elif today["estimated_revenue_lost"] > 0:
+        impact_level = "low"
+
+    return {
+        "currency": "INR",
+        "timezone": "Asia/Kolkata",
+        "business_peak_window": "09:00-18:00 IST",
+        "avg_order_value": round(avg_order_value, 2),
+        "baseline_transactions_per_day": IMPACT_BASELINE_TX_PER_DAY,
+        "window_days": IMPACT_WINDOW_DAYS,
+        "daily": daily_series,
+        "current_day": today,
+        "trailing_7d_failed_transactions": trailing_failed,
+        "trailing_7d_revenue_lost": trailing_revenue,
+        "impact_level": impact_level,
+        "data_source": "demo_orders+demo_billing",
+    }
+
+
+def _build_component_business_impact(
+    application_key: str,
+    service_key: str,
+    status: str,
+    metrics: Dict[str, Optional[float]],
+) -> Dict[str, Any]:
+    db_derived_impact = _build_orders_business_impact_from_db(application_key, service_key, metrics)
+    if db_derived_impact:
+        return db_derived_impact
+
+    ist_now = timezone.localtime(timezone.now(), ZoneInfo("Asia/Kolkata"))
+    now = ist_now.date()
+    avg_order_value = float(APP_AVG_ORDER_VALUE.get(application_key, IMPACT_DEFAULT_AOV))
+    base_tx = max(100, IMPACT_BASELINE_TX_PER_DAY)
+    current_error_rate = float(metrics.get("error_rate") or 0.0)
+
+    daily_series: List[Dict[str, Any]] = []
+    for day_offset in range(IMPACT_WINDOW_DAYS - 1, -1, -1):
+        day = now - timedelta(days=day_offset)
+        tx_jitter = (_stable_noise(f"{service_key}:tx:{day_offset}") - 0.5) * 0.16
+        transactions = max(50, int(round(base_tx * (1 + tx_jitter))))
+        error_rate = _estimate_error_rate_for_day(status, current_error_rate, service_key, day_offset)
+
+        hourly_transactions = _distribute_transactions_with_business_peak(transactions, service_key, day_offset)
+        hourly_failed: List[int] = []
+        for hour, hour_transactions in enumerate(hourly_transactions):
+            hour_error_jitter = (_stable_noise(f"{service_key}:err-hourly:{day_offset}:{hour}") - 0.5) * 0.008
+            hour_error_rate = max(0.0, min(1.0, error_rate + hour_error_jitter))
+            hourly_failed.append(int(round(hour_transactions * hour_error_rate)))
+
+        failed = sum(hourly_failed)
+        revenue_lost = round(failed * avg_order_value, 2)
+        business_hours_transactions = sum(hourly_transactions[9:18])
+        business_hours_failed = sum(hourly_failed[9:18])
+        off_hours_transactions = transactions - business_hours_transactions
+
+        daily_series.append({
+            "date": day.isoformat(),
+            "transactions": transactions,
+            "error_rate": round(error_rate, 4),
+            "failed_transactions": failed,
+            "estimated_revenue_lost": revenue_lost,
+            "business_hours_window": "09:00-18:00 IST",
+            "business_hours_transactions": business_hours_transactions,
+            "business_hours_failed_transactions": business_hours_failed,
+            "off_hours_transactions": off_hours_transactions,
+        })
+
+    today = daily_series[-1] if daily_series else {
+        "date": now.isoformat(),
+        "transactions": base_tx,
+        "error_rate": current_error_rate,
+        "failed_transactions": 0,
+        "estimated_revenue_lost": 0.0,
+        "business_hours_window": "09:00-18:00 IST",
+        "business_hours_transactions": int(base_tx * 0.7),
+        "business_hours_failed_transactions": 0,
+        "off_hours_transactions": int(base_tx * 0.3),
+    }
+    trailing_revenue = round(sum(item["estimated_revenue_lost"] for item in daily_series), 2)
+    trailing_failed = sum(item["failed_transactions"] for item in daily_series)
+
+    impact_level = "none"
+    if today["estimated_revenue_lost"] >= 2500:
+        impact_level = "high"
+    elif today["estimated_revenue_lost"] >= 500:
+        impact_level = "medium"
+    elif today["estimated_revenue_lost"] > 0:
+        impact_level = "low"
+
+    return {
+        "currency": "INR",
+        "timezone": "Asia/Kolkata",
+        "business_peak_window": "09:00-18:00 IST",
+        "avg_order_value": round(avg_order_value, 2),
+        "baseline_transactions_per_day": base_tx,
+        "window_days": IMPACT_WINDOW_DAYS,
+        "daily": daily_series,
+        "current_day": today,
+        "trailing_7d_failed_transactions": trailing_failed,
+        "trailing_7d_revenue_lost": trailing_revenue,
+        "impact_level": impact_level,
+    }
+
+
+def _aggregate_application_business_impact(components: List[Dict[str, Any]]) -> Dict[str, Any]:
+    current_loss = 0.0
+    trailing_loss = 0.0
+    trailing_failed = 0
+    current_day_failed = 0
+    business_hours_transactions = 0
+    off_hours_transactions = 0
+    for component in components:
+        impact = component.get("business_impact") or {}
+        current_day = impact.get("current_day") if isinstance(impact.get("current_day"), dict) else {}
+        current_loss += float(current_day.get("estimated_revenue_lost") or 0.0)
+        trailing_loss += float(impact.get("trailing_7d_revenue_lost") or 0.0)
+        trailing_failed += int(impact.get("trailing_7d_failed_transactions") or 0)
+        current_day_failed += int(current_day.get("failed_transactions") or 0)
+        business_hours_transactions += int(current_day.get("business_hours_transactions") or 0)
+        off_hours_transactions += int(current_day.get("off_hours_transactions") or 0)
+
+    impact_level = "none"
+    if current_loss >= 6000:
+        impact_level = "high"
+    elif current_loss >= 1500:
+        impact_level = "medium"
+    elif current_loss > 0:
+        impact_level = "low"
+
+    return {
+        "currency": "INR",
+        "timezone": "Asia/Kolkata",
+        "business_peak_window": "09:00-18:00 IST",
+        "current_business_hours_transactions": business_hours_transactions,
+        "current_off_hours_transactions": off_hours_transactions,
+        "current_estimated_revenue_lost": round(current_loss, 2),
+        "current_day_failed_transactions": current_day_failed,
+        "trailing_7d_revenue_lost": round(trailing_loss, 2),
+        "trailing_7d_failed_transactions": trailing_failed,
+        "impact_level": impact_level,
+    }
+
+
 def _generate_overview_insights(components: List[Dict[str, Any]]) -> Dict[str, str]:
     prompt = (
         "You are an AIOps analyst creating a portfolio overview for multiple applications. "
@@ -1386,15 +1891,50 @@ def _build_application_overview(include_ai: bool = True, include_predictions: bo
         return cached
 
     flat_components = []
+    # --- Batch MGET: collect all PromQL queries, check cache in one pipeline ---
+    all_queries = []
+    query_map = []  # [(app_idx, comp_idx, metric_key, query_str)]
+    for app_idx, application in enumerate(APP_OVERVIEW_APPLICATIONS):
+        if application.get("mode") == "demo":
+            continue
+        for comp_idx, component in enumerate(application["components"]):
+            for metric_key, query_key in [
+                ("up", "up_query"),
+                ("request_rate", "request_query"),
+                ("latency_p95_seconds", "latency_query"),
+                ("error_rate", "error_query"),
+            ]:
+                q = component.get(query_key, "")
+                if q:
+                    all_queries.append(q)
+                    query_map.append((app_idx, comp_idx, metric_key, q))
+
+    # Pipeline cache lookup
+    cached_results = instant_cache_batch_get(all_queries)
+
+    # Fetch only cache misses
+    misses = {}
+    for _, _, _, q in query_map:
+        if q and q not in cached_results and q not in misses:
+            misses[q] = _fetch_prometheus_custom_query(q)
+
+    # Batch-store misses (the individual fetch already caches via instant_cache_get_or_fetch,
+    # but this is a no-op if the key was just set — harmless)
+    if misses:
+        instant_cache_batch_set(misses)
+
+    # Merge
+    all_results = {**cached_results, **misses}
+
     for application in APP_OVERVIEW_APPLICATIONS:
         if application.get("mode") == "demo":
             continue
         for component in application["components"]:
             metrics = {
-                "up": _extract_first_sample_value(_fetch_prometheus_custom_query(component["up_query"])),
-                "request_rate": _extract_first_sample_value(_fetch_prometheus_custom_query(component.get("request_query", ""))),
-                "latency_p95_seconds": _extract_first_sample_value(_fetch_prometheus_custom_query(component.get("latency_query", ""))),
-                "error_rate": _extract_first_sample_value(_fetch_prometheus_custom_query(component.get("error_query", ""))),
+                "up": _extract_first_sample_value(all_results.get(component.get("up_query", ""), {})),
+                "request_rate": _extract_first_sample_value(all_results.get(component.get("request_query", ""), {})),
+                "latency_p95_seconds": _extract_first_sample_value(all_results.get(component.get("latency_query", ""), {})),
+                "error_rate": _extract_first_sample_value(all_results.get(component.get("error_query", ""), {})),
             }
             alerts = _recent_alerts_for_service(component["service"], component["target_host"])
             status = _derive_overview_status(component, metrics, alerts)
@@ -1416,6 +1956,12 @@ def _build_application_overview(include_ai: bool = True, include_predictions: bo
                 "dependency_chain": dependency_context.get("dependency_chain", []),
                 "logs_summary": logs.get("hits", {}).get("hits", [])[:2] if isinstance(logs, dict) else [],
                 "trace_count": len(traces.get("data", [])) if isinstance(traces, dict) and isinstance(traces.get("data"), list) else 0,
+                "business_impact": _build_component_business_impact(
+                    application["application"],
+                    component["service"],
+                    status,
+                    metrics,
+                ),
             })
 
     insights = _generate_overview_insights(flat_components) if include_ai else {}
@@ -1443,6 +1989,12 @@ def _build_application_overview(include_ai: bool = True, include_predictions: bo
                     "depends_on": dependency_context.get("depends_on", []),
                     "blast_radius": dependency_context.get("blast_radius", []),
                     "dependency_chain": dependency_context.get("dependency_chain", []),
+                    "business_impact": _build_component_business_impact(
+                        application["application"],
+                        component.get("service", ""),
+                        component.get("status", "healthy"),
+                        component.get("metrics") if isinstance(component.get("metrics"), dict) else {},
+                    ),
                 })
             overall_status = application.get("status", "healthy")
             active_alert_count = sum(
@@ -1479,6 +2031,7 @@ def _build_application_overview(include_ai: bool = True, include_predictions: bo
             "ai_insight": headline,
             "blast_radius": sorted({node for component in components for node in component.get("blast_radius", [])}),
             "components": components,
+            "business_impact": _aggregate_application_business_impact(components),
         })
 
     all_components = []
@@ -2626,19 +3179,39 @@ def chat_session_reset_view(request: HttpRequest):
 
 def login_view(request):
     if request.user.is_authenticated:
-        return redirect(request.GET.get("next") or "/genai/applications/dashboard/")
-    next_url = request.GET.get("next") or "/genai/applications/dashboard/"
+        return redirect(request.POST.get("next") or request.GET.get("next") or "/genai/applications/dashboard/")
+    next_url = request.POST.get("next") or request.GET.get("next") or "/genai/applications/dashboard/"
+    google_configured = (
+        os.getenv("GOOGLE_CLIENT_ID", "").strip() not in ("", "PASTE_GOOGLE_CLIENT_ID_HERE")
+        and os.getenv("GOOGLE_CLIENT_SECRET", "").strip() not in ("", "PASTE_GOOGLE_CLIENT_SECRET_HERE")
+    )
+    if request.method == "POST" and not getattr(settings, "SSO_ENABLED", True):
+        username = str(request.POST.get("username") or "").strip()
+        password = request.POST.get("password") or ""
+        user = authenticate(request, username=username, password=password)
+        if user is not None:
+            auth_login(request, user)
+            return redirect(next_url)
+        return render(request, "genai/login.html", {
+            "next_url": next_url,
+            "sso_enabled": False,
+            "google_oauth_configured": google_configured,
+            "redirect_uri": f"{request.scheme}://{request.get_host()}/accounts/google/login/callback/",
+            "login_error": "Invalid username or password.",
+            "username": username,
+        })
     return render(request, "genai/login.html", {
         "next_url": next_url,
-        "google_oauth_configured": (
-            os.getenv("GOOGLE_CLIENT_ID", "").strip() not in ("", "PASTE_GOOGLE_CLIENT_ID_HERE")
-            and os.getenv("GOOGLE_CLIENT_SECRET", "").strip() not in ("", "PASTE_GOOGLE_CLIENT_SECRET_HERE")
-        ),
+        "sso_enabled": getattr(settings, "SSO_ENABLED", True),
+        "google_oauth_configured": google_configured,
+        "redirect_uri": f"{request.scheme}://{request.get_host()}/accounts/google/login/callback/",
     })
 
 
 def sso_login_view(request):
     next_url = request.GET.get("next") or "/genai/applications/dashboard/"
+    if not getattr(settings, "SSO_ENABLED", True):
+        return redirect(f"/genai/login/?next={next_url}")
     return redirect(f"/accounts/google/login/?process=login&next={next_url}")
 
 
@@ -2698,6 +3271,29 @@ def applications_dashboard_view(request):
 @login_required
 def applications_overview_view(request: HttpRequest):
     return JsonResponse(_build_application_overview())
+
+
+@login_required
+def cache_stats_view(request: HttpRequest):
+    """Return telemetry cache observability stats."""
+    return JsonResponse({"status": "ok", "data": get_cache_stats()})
+
+
+@login_required
+def cache_purge_view(request: HttpRequest):
+    """
+    POST /genai/cache/purge/
+    Body (optional): {"prefix": "iq"} or {"prefix": "meta"} or omit for full flush.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except json.JSONDecodeError:
+        body = {}
+    prefix = body.get("prefix")  # None → flush all
+    result = purge_cache(prefix)
+    return JsonResponse({"status": "ok", **result})
 
 
 def _graph_node_status_from_component(component: Dict[str, Any]) -> str:
@@ -3076,6 +3672,10 @@ def ingest_alert_view(request: HttpRequest):
         "analysis_ok": analysis_ok,
         "final_answer": final_answer,
         "analysis_sections": analysis_sections,
+        "remediation_command": analysis_sections.get("remediation_command") or "",
+        "remediation_target_host": analysis_sections.get("remediation_target_host") or "",
+        "remediation_why": analysis_sections.get("remediation_why") or "",
+        "remediation_requires_approval": _to_bool(analysis_sections.get("remediation_requires_approval"), default=bool(analysis_sections.get("remediation_command"))),
         "post_command_ai_analysis": final_answer,
         "command_output": command_output,
         "agent_response": agent_response,
@@ -3137,6 +3737,7 @@ def execute_command_view(request: HttpRequest):
         command_to_run = body.get("command")
         original_question = body.get("original_question")
         target_host = body.get("target_host") # The IP or hostname of the server to run the command on.
+        execution_type = _summarize_execution_type(str(body.get("execution_type") or "diagnostic").strip().lower())
 
         if not all([command_to_run, original_question, target_host]):
             return JsonResponse({"error": "Missing required fields: command, original_question, and target_host are required."}, status=400)
@@ -3161,6 +3762,12 @@ def execute_command_view(request: HttpRequest):
 
         execution_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         execution_status = "completed" if success else "failed"
+        command_output_key = "remediation_output" if execution_type == "remediation" else "command_output"
+        answer_key = "post_remediation_ai_analysis" if execution_type == "remediation" else "post_command_ai_analysis"
+        execution_status_key = "remediation_execution_status" if execution_type == "remediation" else "execution_status"
+        execution_time_key = "remediation_last_execution_at" if execution_type == "remediation" else "last_execution_at"
+        timeline_event_type = "remediation_command_executed" if execution_type == "remediation" else "manual_command_executed"
+        timeline_title = f"Manual {execution_type} command executed against {target_host}"
 
         if alert_id:
             incident_key = None
@@ -3173,13 +3780,20 @@ def execute_command_view(request: HttpRequest):
             _update_recent_alert_recommendation(
                 alert_id,
                 {
-                    "last_execution_at": execution_time,
-                    "execution_status": execution_status,
+                    execution_time_key: execution_time,
+                    execution_status_key: execution_status,
                     "agent_success": success,
                     "final_answer": final_answer,
                     "analysis_sections": analysis_sections,
-                    "post_command_ai_analysis": final_answer,
-                    "command_output": command_output,
+                    answer_key: final_answer,
+                    command_output_key: command_output,
+                    "remediation_command": analysis_sections.get("remediation_command") or ((linked_recommendation or {}).get("remediation_command")) or "",
+                    "remediation_target_host": analysis_sections.get("remediation_target_host") or ((linked_recommendation or {}).get("remediation_target_host")) or "",
+                    "remediation_why": analysis_sections.get("remediation_why") or ((linked_recommendation or {}).get("remediation_why")) or "",
+                    "remediation_requires_approval": _to_bool(
+                        analysis_sections.get("remediation_requires_approval"),
+                        default=_to_bool((linked_recommendation or {}).get("remediation_requires_approval"), default=False),
+                    ),
                     "agent_response": agent_response,
                 },
             )
@@ -3191,10 +3805,11 @@ def execute_command_view(request: HttpRequest):
                     incident.save(update_fields=["status", "summary", "updated_at"])
                     IncidentTimelineEvent.objects.create(
                         incident=incident,
-                        event_type="manual_command_executed",
-                        title=f"Manual command executed against {target_host}",
+                        event_type=timeline_event_type,
+                        title=timeline_title,
                         detail=command_to_run,
                         payload={
+                            "execution_type": execution_type,
                             "command": command_to_run,
                             "target_host": target_host,
                             "agent_success": success,
@@ -3205,6 +3820,7 @@ def execute_command_view(request: HttpRequest):
                     )
 
         return JsonResponse({
+            "execution_type": execution_type,
             "final_answer": final_answer,
             "analysis_sections": analysis_sections,
             "command_output": command_output,
@@ -3217,3 +3833,851 @@ def execute_command_view(request: HttpRequest):
     except Exception as e:
         logger.exception("execute_command_view error: %s", e)
         return JsonResponse({"error": "An unexpected error occurred.", "detail": str(e)}, status=500)
+
+FLEET_PROFILE_SEED = [
+    {
+        "slug": "infra-observability",
+        "name": "Infra + Logs + Traces",
+        "summary": "Recommended Linux profile with collector, node exporter, log shipping, and discovery enabled.",
+        "default_for_target": "linux",
+        "components": [
+            "AIOps Supervisor",
+            "OpenTelemetry Collector",
+            "node_exporter",
+            "log shipper",
+            "discovery helper",
+        ],
+        "capabilities": ["metrics", "logs", "traces", "discovery", "heartbeat"],
+        "config_json": {"logs_enabled": True, "traces_enabled": True, "discovery_enabled": True},
+    },
+    {
+        "slug": "infra-logs",
+        "name": "Infra + Logs",
+        "summary": "Host metrics, service discovery, and centralized logs without application trace forwarding.",
+        "default_for_target": "linux",
+        "components": [
+            "AIOps Supervisor",
+            "OpenTelemetry Collector",
+            "node_exporter",
+            "log shipper",
+        ],
+        "capabilities": ["metrics", "logs", "discovery", "heartbeat"],
+        "config_json": {"logs_enabled": True, "traces_enabled": False, "discovery_enabled": True},
+    },
+    {
+        "slug": "infra-only",
+        "name": "Infra Only",
+        "summary": "Smallest Linux bundle for host metrics, heartbeat, and base control-plane enrollment.",
+        "default_for_target": "linux",
+        "components": [
+            "AIOps Supervisor",
+            "OpenTelemetry Collector",
+            "node_exporter",
+        ],
+        "capabilities": ["metrics", "heartbeat"],
+        "config_json": {"logs_enabled": False, "traces_enabled": False, "discovery_enabled": False},
+    },
+]
+
+
+def _ensure_fleet_profiles() -> List[TelemetryProfile]:
+    profiles: List[TelemetryProfile] = []
+    for seed in FLEET_PROFILE_SEED:
+        profile, _ = TelemetryProfile.objects.get_or_create(
+            slug=seed["slug"],
+            defaults={
+                "name": seed["name"],
+                "summary": seed["summary"],
+                "default_for_target": seed["default_for_target"],
+                "components": seed["components"],
+                "capabilities": seed["capabilities"],
+                "config_json": seed.get("config_json", {}),
+                "is_active": True,
+            },
+        )
+        changed = False
+        for field in ("name", "summary", "default_for_target", "components", "capabilities", "config_json"):
+            new_value = seed.get(field)
+            if getattr(profile, field) != new_value:
+                setattr(profile, field, new_value)
+                changed = True
+        if not profile.is_active:
+            profile.is_active = True
+            changed = True
+        if changed:
+            profile.save()
+        profiles.append(profile)
+    return profiles
+
+
+def _serialize_profile(profile: TelemetryProfile) -> Dict[str, Any]:
+    return {
+        "slug": profile.slug,
+        "name": profile.name,
+        "summary": profile.summary,
+        "default_for_target": profile.default_for_target,
+        "components": profile.components or [],
+        "capabilities": profile.capabilities or [],
+    }
+
+
+def _serialize_target(target: Target) -> Dict[str, Any]:
+    components = list(target.components.all().order_by("name"))
+    discovered_count = target.discovered_services.count()
+    if not discovered_count:
+        discovered_count = int(target.metadata_json.get("discovered_service_count") or 0)
+    return {
+        "target_id": target.target_id,
+        "name": target.name,
+        "target_type": target.target_type,
+        "environment": target.environment,
+        "hostname": target.hostname,
+        "status": target.status,
+        "last_heartbeat": target.last_heartbeat_at.isoformat() if target.last_heartbeat_at else "not connected yet",
+        "profile_name": target.profile.name if target.profile else "Unassigned",
+        "collector_status": target.collector_status,
+        "discovered_service_count": discovered_count,
+        "components": [
+            {"name": component.name, "status": component.status}
+            for component in components
+        ],
+    }
+
+
+def _get_profile_by_slug(slug: str) -> TelemetryProfile:
+    _ensure_fleet_profiles()
+    return TelemetryProfile.objects.filter(slug=slug).first() or TelemetryProfile.objects.order_by("name").first()
+
+
+@login_required
+def fleet_targets_view(request: HttpRequest):
+    _ensure_fleet_profiles()
+    targets = Target.objects.select_related("profile").prefetch_related("components", "discovered_services").all()
+    return JsonResponse({"count": targets.count(), "results": [_serialize_target(target) for target in targets]})
+
+
+@login_required
+def fleet_profiles_view(request: HttpRequest):
+    profiles = _ensure_fleet_profiles()
+    return JsonResponse({"count": len(profiles), "results": [_serialize_profile(profile) for profile in profiles]})
+
+
+@login_required
+def fleet_enroll_blueprint_view(request: HttpRequest):
+    target_type = (request.GET.get("target_type") or "linux").strip().lower()
+    profile_slug = (request.GET.get("profile") or "infra-observability").strip()
+    profile = _get_profile_by_slug(profile_slug)
+    token_value = f"lnx_{uuid.uuid4().hex[:24]}"
+    expires_at = timezone.now() + timezone.timedelta(hours=24)
+    token = EnrollmentToken.objects.create(
+        token=token_value,
+        target_type=target_type,
+        profile=profile,
+        created_by=request.user,
+        expires_at=expires_at,
+    )
+    control_plane = _public_control_plane_base_url(request)
+    install_command = (
+        f"curl -fsSL {control_plane}/genai/fleet/install/linux/ | "
+        f"sudo bash -s -- --control-plane {control_plane} --token {token.token} --profile {profile.slug}"
+    )
+    next_steps = [
+        "Create an aiops-agent user and install the supervisor service.",
+        "Install OpenTelemetry Collector and the selected host exporters locally.",
+        "Enroll back into the control plane and start heartbeat reporting.",
+        "Begin discovery so services can populate Fleet, Applications, and Graphs.",
+    ]
+    return JsonResponse(
+        {
+            "target_type": target_type,
+            "install_mode": "generated_shell_bootstrap" if target_type == "linux" else "planned",
+            "token_preview": token.token[:16] + "...",
+            "install_command": install_command,
+            "components": profile.components or [],
+            "next_steps": next_steps,
+        }
+    )
+
+
+@csrf_exempt
+def fleet_enroll_view(request: HttpRequest):
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    try:
+        body = json.loads(request.body or "{}")
+        token_value = str(body.get("token") or "").strip()
+        if not token_value:
+            return JsonResponse({"error": "Missing enrollment token"}, status=400)
+        token = EnrollmentToken.objects.select_related("profile").filter(token=token_value, revoked=False).first()
+        if not token or not token.is_valid:
+            return JsonResponse({"error": "Invalid or expired enrollment token"}, status=403)
+        target_name = str(body.get("name") or token.target_name or body.get("hostname") or "linux-target").strip()
+        target_id = str(body.get("target_id") or uuid.uuid4()).strip()
+        hostname = str(body.get("hostname") or "").strip()
+        target, _ = Target.objects.update_or_create(
+            target_id=target_id,
+            defaults={
+                "name": target_name,
+                "target_type": token.target_type,
+                "environment": str(body.get("environment") or "production").strip(),
+                "hostname": hostname,
+                "ip_address": str(body.get("ip_address") or "").strip(),
+                "os_name": str(body.get("os_name") or "Linux").strip(),
+                "os_version": str(body.get("os_version") or "").strip(),
+                "status": "connected",
+                "profile": token.profile,
+                "collector_status": str(body.get("collector_status") or "healthy").strip(),
+                "metadata_json": body.get("metadata_json") or {},
+                "last_heartbeat_at": timezone.now(),
+            },
+        )
+        token.used_at = token.used_at or timezone.now()
+        token.target_name = token.target_name or target.name
+        token.save(update_fields=["used_at", "target_name"])
+        for component_name in (body.get("components") or (token.profile.components if token.profile else [])):
+            if not component_name:
+                continue
+            TargetComponent.objects.update_or_create(
+                target=target,
+                name=str(component_name),
+                defaults={"status": "healthy"},
+            )
+        return JsonResponse({"target": _serialize_target(target), "profile": _serialize_profile(target.profile) if target.profile else None})
+    except Exception as exc:
+        logger.exception("fleet_enroll_view error: %s", exc)
+        return JsonResponse({"error": "Unable to enroll target", "detail": str(exc)}, status=500)
+
+
+@csrf_exempt
+def fleet_heartbeat_view(request: HttpRequest, target_id: str):
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    try:
+        body = json.loads(request.body or "{}")
+        target = Target.objects.select_related("profile").filter(target_id=target_id).first()
+        if not target:
+            return JsonResponse({"error": "Unknown target"}, status=404)
+        target.last_heartbeat_at = timezone.now()
+        target.collector_status = str(body.get("collector_status") or target.collector_status or "healthy").strip()
+        target.status = str(body.get("status") or target.status or "connected").strip()
+        metadata = target.metadata_json or {}
+        metadata.update(body.get("metadata_json") or {})
+        target.metadata_json = metadata
+        target.save(update_fields=["last_heartbeat_at", "collector_status", "status", "metadata_json", "updated_at"])
+        TargetHeartbeat.objects.create(target=target, payload=body)
+        for component in body.get("components") or []:
+            name = str(component.get("name") or "").strip()
+            if not name:
+                continue
+            TargetComponent.objects.update_or_create(
+                target=target,
+                name=name,
+                defaults={
+                    "status": str(component.get("status") or "healthy").strip(),
+                    "version": str(component.get("version") or "").strip(),
+                    "metadata_json": component.get("metadata_json") or {},
+                },
+            )
+        for service in body.get("discovered_services") or []:
+            service_name = str(service.get("service_name") or "").strip()
+            if not service_name:
+                continue
+            port = service.get("port")
+            DiscoveredService.objects.update_or_create(
+                target=target,
+                service_name=service_name,
+                port=port,
+                defaults={
+                    "process_name": str(service.get("process_name") or "").strip(),
+                    "status": str(service.get("status") or "observed").strip(),
+                    "metadata_json": service.get("metadata_json") or {},
+                },
+            )
+        return JsonResponse({"status": "ok", "target": _serialize_target(target)})
+    except Exception as exc:
+        logger.exception("fleet_heartbeat_view error: %s", exc)
+        return JsonResponse({"error": "Unable to record heartbeat", "detail": str(exc)}, status=500)
+
+
+
+def _public_control_plane_base_url(request: HttpRequest) -> str:
+    if AIOPS_PUBLIC_BASE_URL:
+        return AIOPS_PUBLIC_BASE_URL.rstrip("/")
+    return request.build_absolute_uri("/").rstrip("/")
+
+
+def _public_otlp_grpc_endpoint(request: HttpRequest) -> str:
+    if AIOPS_PUBLIC_OTLP_GRPC_ENDPOINT:
+        return AIOPS_PUBLIC_OTLP_GRPC_ENDPOINT
+    base_url = _public_control_plane_base_url(request)
+    parsed = urlparse(base_url)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 4317
+    return f"{host}:{4317 if port in (80, 443, 8000, 8089, 5173) else port}"
+
+
+def _serialize_onboarding_request(onboarding: TargetOnboardingRequest) -> Dict[str, Any]:
+    return {
+        "onboarding_id": onboarding.onboarding_id,
+        "name": onboarding.name,
+        "hostname": onboarding.hostname,
+        "ssh_user": onboarding.ssh_user,
+        "ssh_port": onboarding.ssh_port,
+        "target_type": onboarding.target_type,
+        "profile_slug": onboarding.profile.slug if onboarding.profile else "",
+        "status": onboarding.status,
+        "connectivity_status": onboarding.connectivity_status,
+        "connectivity_message": onboarding.connectivity_message,
+        "last_connectivity_check_at": onboarding.last_connectivity_check_at.isoformat() if onboarding.last_connectivity_check_at else None,
+        "last_install_at": onboarding.last_install_at.isoformat() if onboarding.last_install_at else None,
+        "install_message": onboarding.install_message,
+        "target_id": onboarding.target.target_id if onboarding.target else None,
+        "pem_file_name": os.path.basename(onboarding.pem_file.name) if onboarding.pem_file else "",
+    }
+
+
+@login_required
+def fleet_onboarding_requests_view(request: HttpRequest):
+    if request.method == "GET":
+        requests_qs = TargetOnboardingRequest.objects.select_related("profile", "target").all()
+        return JsonResponse({"count": requests_qs.count(), "results": [_serialize_onboarding_request(item) for item in requests_qs]})
+
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+
+    try:
+        name = str(request.POST.get("name") or "").strip()
+        hostname = str(request.POST.get("hostname") or "").strip()
+        ssh_user = str(request.POST.get("ssh_user") or "ubuntu").strip()
+        ssh_port = int(request.POST.get("ssh_port") or 22)
+        target_type = str(request.POST.get("target_type") or "linux").strip().lower()
+        profile_slug = str(request.POST.get("profile") or "infra-observability").strip()
+        pem_file = request.FILES.get("pem_file")
+
+        if not all([name, hostname, pem_file]):
+            return JsonResponse({"error": "name, hostname, and pem_file are required"}, status=400)
+
+        profile = _get_profile_by_slug(profile_slug)
+        onboarding = TargetOnboardingRequest.objects.create(
+            name=name,
+            hostname=hostname,
+            ssh_user=ssh_user,
+            ssh_port=ssh_port,
+            target_type=target_type,
+            profile=profile,
+            pem_file=pem_file,
+            created_by=request.user,
+        )
+        return JsonResponse(_serialize_onboarding_request(onboarding), status=201)
+    except Exception as exc:
+        logger.exception("fleet_onboarding_requests_view error: %s", exc)
+        return JsonResponse({"error": "Unable to create onboarding request", "detail": str(exc)}, status=500)
+
+
+@login_required
+def fleet_onboarding_request_detail_view(request: HttpRequest, onboarding_id: str):
+    onboarding = TargetOnboardingRequest.objects.select_related("profile", "target").filter(onboarding_id=onboarding_id).first()
+    if not onboarding:
+        return JsonResponse({"error": "Unknown onboarding request"}, status=404)
+
+    if request.method == "GET":
+        return JsonResponse(_serialize_onboarding_request(onboarding))
+
+    if request.method == "DELETE":
+        if onboarding.pem_file:
+            onboarding.pem_file.delete(save=False)
+        onboarding.delete()
+        return JsonResponse({"status": "deleted", "onboarding_id": onboarding_id})
+
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+
+    try:
+        name = str(request.POST.get("name") or onboarding.name).strip()
+        hostname = str(request.POST.get("hostname") or onboarding.hostname).strip()
+        ssh_user = str(request.POST.get("ssh_user") or onboarding.ssh_user or "ubuntu").strip()
+        ssh_port = int(request.POST.get("ssh_port") or onboarding.ssh_port or 22)
+        target_type = str(request.POST.get("target_type") or onboarding.target_type or "linux").strip().lower()
+        profile_slug = str(request.POST.get("profile") or (onboarding.profile.slug if onboarding.profile else "infra-observability")).strip()
+        pem_file = request.FILES.get("pem_file")
+
+        profile = _get_profile_by_slug(profile_slug)
+        onboarding.name = name
+        onboarding.hostname = hostname
+        onboarding.ssh_user = ssh_user
+        onboarding.ssh_port = ssh_port
+        onboarding.target_type = target_type
+        onboarding.profile = profile
+        if pem_file:
+            if onboarding.pem_file:
+                onboarding.pem_file.delete(save=False)
+            onboarding.pem_file = pem_file
+        onboarding.connectivity_status = "untested"
+        onboarding.connectivity_message = ""
+        onboarding.status = "draft"
+        onboarding.save()
+        return JsonResponse(_serialize_onboarding_request(onboarding))
+    except Exception as exc:
+        logger.exception("fleet_onboarding_request_detail_view error: %s", exc)
+        return JsonResponse({"error": "Unable to update onboarding request", "detail": str(exc)}, status=500)
+
+
+
+def _ssh_base_command(onboarding: TargetOnboardingRequest) -> List[str]:
+    if onboarding.pem_file and os.path.exists(onboarding.pem_file.path):
+        try:
+            os.chmod(onboarding.pem_file.path, 0o600)
+        except OSError:
+            logger.warning("Unable to chmod PEM file %s", onboarding.pem_file.path)
+    return [
+        "ssh",
+        "-i", onboarding.pem_file.path,
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "BatchMode=yes",
+        "-o", "IdentitiesOnly=yes",
+        "-o", "PreferredAuthentications=publickey",
+        "-o", "ConnectTimeout=30",
+        "-p", str(onboarding.ssh_port),
+        f"{onboarding.ssh_user}@{onboarding.hostname}",
+    ]
+
+
+@csrf_exempt
+@login_required
+def fleet_onboarding_test_view(request: HttpRequest, onboarding_id: str):
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    onboarding = TargetOnboardingRequest.objects.select_related("profile", "target").filter(onboarding_id=onboarding_id).first()
+    if not onboarding:
+        return JsonResponse({"error": "Unknown onboarding request"}, status=404)
+    try:
+        tcp_check = subprocess.run(
+            ["nc", "-vz", "-w", "5", onboarding.hostname, str(onboarding.ssh_port)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        onboarding.last_connectivity_check_at = timezone.now()
+        if tcp_check.returncode != 0:
+            onboarding.connectivity_status = "failed"
+            onboarding.connectivity_message = (
+                "TCP reachability to the SSH port failed. "
+                + (tcp_check.stderr or tcp_check.stdout or "Unable to open the port.")
+            )[:2000]
+            onboarding.status = "failed"
+            onboarding.save(update_fields=["last_connectivity_check_at", "connectivity_status", "connectivity_message", "status", "updated_at"])
+            return JsonResponse(_serialize_onboarding_request(onboarding), status=502)
+
+        command = _ssh_base_command(onboarding) + ["printf aiops-connectivity-ok"]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=45)
+        if result.returncode == 0 and "aiops-connectivity-ok" in (result.stdout or ""):
+            onboarding.connectivity_status = "reachable"
+            onboarding.connectivity_message = "TCP port 22 is reachable and SSH authentication succeeded from the control plane."
+            onboarding.status = "validated"
+        else:
+            onboarding.connectivity_status = "failed"
+            onboarding.connectivity_message = (
+                "TCP port 22 is reachable, but the full SSH session from the control plane failed. "
+                + (result.stderr or result.stdout or "SSH authentication or banner exchange failed.")
+            )[:2000]
+            onboarding.status = "failed"
+        onboarding.save(update_fields=["last_connectivity_check_at", "connectivity_status", "connectivity_message", "status", "updated_at"])
+        return JsonResponse(_serialize_onboarding_request(onboarding))
+    except Exception as exc:
+        onboarding.last_connectivity_check_at = timezone.now()
+        onboarding.connectivity_status = "failed"
+        onboarding.connectivity_message = str(exc)
+        onboarding.status = "failed"
+        onboarding.save(update_fields=["last_connectivity_check_at", "connectivity_status", "connectivity_message", "status", "updated_at"])
+        return JsonResponse(_serialize_onboarding_request(onboarding), status=502)
+
+
+
+def _build_linux_install_command(control_plane: str, token_value: str, profile_slug: str, target_name: str, hostname: str) -> str:
+    safe_name = json.dumps(target_name)
+    safe_host = json.dumps(hostname)
+    return (
+        f"curl -fsSL {control_plane}/genai/fleet/install/linux/ | "
+        f"sudo bash -s -- --control-plane {control_plane} --token {token_value} --profile {profile_slug} "
+        f"--target-name {safe_name} --hostname {safe_host}"
+    )
+
+
+@csrf_exempt
+@login_required
+def fleet_onboarding_install_view(request: HttpRequest, onboarding_id: str):
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    onboarding = TargetOnboardingRequest.objects.select_related("profile", "target").filter(onboarding_id=onboarding_id).first()
+    if not onboarding:
+        return JsonResponse({"error": "Unknown onboarding request"}, status=404)
+    if onboarding.connectivity_status != "reachable":
+        return JsonResponse({"error": "Connectivity must be validated before install"}, status=400)
+    try:
+        token_value = f"lnx_{uuid.uuid4().hex[:24]}"
+        token = EnrollmentToken.objects.create(
+            token=token_value,
+            target_type=onboarding.target_type,
+            target_name=onboarding.name,
+            profile=onboarding.profile,
+            created_by=request.user,
+            expires_at=timezone.now() + timezone.timedelta(hours=24),
+        )
+        control_plane = _public_control_plane_base_url(request)
+        install_command = _build_linux_install_command(
+            control_plane,
+            token.token,
+            onboarding.profile.slug if onboarding.profile else "infra-observability",
+            onboarding.name,
+            onboarding.hostname,
+        )
+        remote_command = _ssh_base_command(onboarding) + [install_command]
+        onboarding.status = "installing"
+        onboarding.install_message = "Running remote bootstrap command..."
+        onboarding.save(update_fields=["status", "install_message", "updated_at"])
+        result = subprocess.run(remote_command, capture_output=True, text=True, timeout=600)
+        onboarding.last_install_at = timezone.now()
+        if result.returncode == 0:
+            onboarding.status = "installed"
+            onboarding.install_message = (result.stdout or "Remote bootstrap command completed.")[:4000]
+        else:
+            onboarding.status = "failed"
+            onboarding.install_message = (result.stderr or result.stdout or "Remote bootstrap command failed.")[:4000]
+        onboarding.save(update_fields=["status", "last_install_at", "install_message", "updated_at"])
+        payload = _serialize_onboarding_request(onboarding)
+        payload["install_command"] = install_command
+        return JsonResponse(payload)
+    except Exception as exc:
+        onboarding.status = "failed"
+        onboarding.last_install_at = timezone.now()
+        onboarding.install_message = str(exc)
+        onboarding.save(update_fields=["status", "last_install_at", "install_message", "updated_at"])
+        payload = _serialize_onboarding_request(onboarding)
+        return JsonResponse(payload, status=502)
+
+
+@csrf_exempt
+@xframe_options_exempt
+def fleet_linux_install_script_view(request: HttpRequest):
+    otlp_endpoint = _public_otlp_grpc_endpoint(request)
+    script = f"""#!/usr/bin/env bash
+set -euo pipefail
+
+CONTROL_PLANE=""
+TOKEN=""
+PROFILE="infra-observability"
+TARGET_NAME=""
+TARGET_HOSTNAME=""
+OTLP_ENDPOINT="{otlp_endpoint}"
+OTELCOL_VERSION="{AIOPS_OTELCOL_VERSION}"
+NODE_EXPORTER_VERSION="{AIOPS_NODE_EXPORTER_VERSION}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --control-plane)
+      CONTROL_PLANE="$2"
+      shift 2
+      ;;
+    --token)
+      TOKEN="$2"
+      shift 2
+      ;;
+    --profile)
+      PROFILE="$2"
+      shift 2
+      ;;
+    --target-name)
+      TARGET_NAME="$2"
+      shift 2
+      ;;
+    --hostname)
+      TARGET_HOSTNAME="$2"
+      shift 2
+      ;;
+    --otlp-endpoint)
+      OTLP_ENDPOINT="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$CONTROL_PLANE" || -z "$TOKEN" || -z "$OTLP_ENDPOINT" ]]; then
+  echo "Missing --control-plane, --token, or --otlp-endpoint" >&2
+  exit 1
+fi
+
+install_prereqs() {{
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y curl tar ca-certificates python3
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y curl tar ca-certificates python3 shadow-utils
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y curl tar ca-certificates python3 shadow-utils
+  else
+    echo "Unsupported package manager. Install curl, tar, ca-certificates, and python3 manually." >&2
+    exit 1
+  fi
+}}
+
+detect_arch() {{
+  case "$(uname -m)" in
+    x86_64|amd64)
+      ARCH_NODE=amd64
+      ARCH_OTEL=amd64
+      ;;
+    aarch64|arm64)
+      ARCH_NODE=arm64
+      ARCH_OTEL=arm64
+      ;;
+    *)
+      echo "Unsupported architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+}}
+
+install_node_exporter() {{
+  local url="https://github.com/prometheus/node_exporter/releases/download/v${{NODE_EXPORTER_VERSION}}/node_exporter-${{NODE_EXPORTER_VERSION}}.linux-${{ARCH_NODE}}.tar.gz"
+  rm -rf /tmp/node_exporter-install
+  mkdir -p /tmp/node_exporter-install
+  curl -fsSL "$url" -o /tmp/node_exporter.tgz
+  tar -xzf /tmp/node_exporter.tgz -C /tmp/node_exporter-install
+  install -m 0755 /tmp/node_exporter-install/node_exporter-${{NODE_EXPORTER_VERSION}}.linux-${{ARCH_NODE}}/node_exporter /usr/local/bin/node_exporter
+}}
+
+install_otelcol() {{
+  local url="https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${{OTELCOL_VERSION}}/otelcol-contrib_${{OTELCOL_VERSION}}_linux_${{ARCH_OTEL}}.tar.gz"
+  rm -rf /tmp/otelcol-install
+  mkdir -p /tmp/otelcol-install
+  curl -fsSL "$url" -o /tmp/otelcol.tgz
+  tar -xzf /tmp/otelcol.tgz -C /tmp/otelcol-install
+  install -m 0755 /tmp/otelcol-install/otelcol-contrib /usr/local/bin/otelcol-contrib
+}}
+
+write_configs() {{
+  id -u aiops-agent >/dev/null 2>&1 || useradd --system --create-home --shell /bin/bash aiops-agent
+  mkdir -p /opt/aiops-agent /etc/aiops-agent /var/log/aiops-agent /etc/otelcol-contrib
+  cat > /etc/aiops-agent/enrollment.env <<ENV
+CONTROL_PLANE=$CONTROL_PLANE
+TOKEN=$TOKEN
+PROFILE=$PROFILE
+OTLP_ENDPOINT=$OTLP_ENDPOINT
+ENV
+  chmod 600 /etc/aiops-agent/enrollment.env
+
+  cat > /etc/otelcol-contrib/config.yaml <<COLLECTOR
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu: {{}}
+      memory: {{}}
+      disk: {{}}
+      filesystem: {{}}
+      load: {{}}
+      network: {{}}
+      paging: {{}}
+      process: {{}}
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: linux-node-exporter
+          scrape_interval: 30s
+          static_configs:
+            - targets: ["127.0.0.1:9100"]
+processors:
+  batch: {{}}
+exporters:
+  otlp:
+    endpoint: $OTLP_ENDPOINT
+    tls:
+      insecure: true
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp]
+    metrics:
+      receivers: [hostmetrics, prometheus]
+      processors: [batch]
+      exporters: [otlp]
+COLLECTOR
+
+  cat > /etc/systemd/system/node_exporter.service <<NODE
+[Unit]
+Description=Prometheus Node Exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=aiops-agent
+Group=aiops-agent
+ExecStart=/usr/local/bin/node_exporter --web.listen-address=:9100
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+NODE
+
+  cat > /etc/systemd/system/otelcol-contrib.service <<OTEL
+[Unit]
+Description=OpenTelemetry Collector Contrib
+After=network-online.target node_exporter.service
+Wants=network-online.target
+
+[Service]
+User=root
+Group=root
+EnvironmentFile=/etc/aiops-agent/enrollment.env
+ExecStart=/usr/local/bin/otelcol-contrib --config=/etc/otelcol-contrib/config.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+OTEL
+}}
+
+enroll_target() {{
+  HOSTNAME_VALUE="${{TARGET_HOSTNAME:-$(hostname)}}"
+  TARGET_LABEL="${{TARGET_NAME:-$HOSTNAME_VALUE}}"
+  PRIMARY_IP="$(hostname -I 2>/dev/null | awk '{{print $1}}')"
+  OS_NAME=linux
+  OS_VERSION=unknown
+  if [[ -f /etc/os-release ]]; then
+    . /etc/os-release
+    OS_NAME="${{NAME:-linux}}"
+    OS_VERSION="${{VERSION_ID:-unknown}}"
+  fi
+
+  ENROLL_PAYLOAD=$(cat <<JSON
+{{
+  "token": "$TOKEN",
+  "name": "$TARGET_LABEL",
+  "target_id": "$HOSTNAME_VALUE",
+  "hostname": "$HOSTNAME_VALUE",
+  "environment": "production",
+  "ip_address": "$PRIMARY_IP",
+  "os_name": "$OS_NAME",
+  "os_version": "$OS_VERSION",
+  "collector_status": "installing",
+  "components": [
+    "AIOps Supervisor",
+    "OpenTelemetry Collector",
+    "node_exporter"
+  ],
+  "metadata_json": {{
+    "profile": "$PROFILE",
+    "bootstrap_mode": "phase3"
+  }}
+}}
+JSON
+)
+
+  curl -fsS -X POST "$CONTROL_PLANE/genai/fleet/enroll/" \
+    -H "Content-Type: application/json" \
+    -d "$ENROLL_PAYLOAD" >/tmp/aiops-enroll.json
+
+  TARGET_ID=$(python3 - <<'PYTHON'
+import json
+with open('/tmp/aiops-enroll.json') as handle:
+    payload = json.load(handle)
+print((payload.get('target') or {{}}).get('target_id', ''))
+PYTHON
+)
+
+  cat > /usr/local/bin/aiops-heartbeat.sh <<HEARTBEAT
+#!/usr/bin/env bash
+set -euo pipefail
+source /etc/aiops-agent/enrollment.env
+TARGET_ID="$TARGET_ID"
+HOSTNAME_VALUE="${{TARGET_HOSTNAME:-$(hostname)}}"
+PRIMARY_IP="$(hostname -I 2>/dev/null | awk '{{print $1}}')"
+NODE_STATUS=$(systemctl is-active node_exporter 2>/dev/null || echo unknown)
+OTEL_STATUS=$(systemctl is-active otelcol-contrib 2>/dev/null || echo unknown)
+PAYLOAD=$(cat <<JSON
+{{
+  "status": "connected",
+  "collector_status": "$OTEL_STATUS",
+  "components": [
+    {{"name": "AIOps Supervisor", "status": "healthy", "version": "phase3"}},
+    {{"name": "OpenTelemetry Collector", "status": "$OTEL_STATUS", "version": "$OTELCOL_VERSION"}},
+    {{"name": "node_exporter", "status": "$NODE_STATUS", "version": "$NODE_EXPORTER_VERSION"}}
+  ],
+  "discovered_services": [
+    {{"service_name": "node_exporter", "process_name": "node_exporter", "port": 9100, "status": "observed"}},
+    {{"service_name": "otelcol-contrib", "process_name": "otelcol-contrib", "port": 4317, "status": "observed"}}
+  ],
+  "metadata_json": {{
+    "profile": "$PROFILE",
+    "host": "$HOSTNAME_VALUE",
+    "ip": "$PRIMARY_IP"
+  }}
+}}
+JSON
+)
+
+curl -fsS -X POST "$CONTROL_PLANE/genai/fleet/targets/$TARGET_ID/heartbeat/" \
+  -H "Content-Type: application/json" \
+  -d "$PAYLOAD" >/tmp/aiops-heartbeat.json
+HEARTBEAT
+  chmod +x /usr/local/bin/aiops-heartbeat.sh
+
+  cat > /etc/systemd/system/aiops-heartbeat.service <<HB
+[Unit]
+Description=AIOps Target Heartbeat
+After=network-online.target otelcol-contrib.service node_exporter.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/aiops-heartbeat.sh
+HB
+
+  cat > /etc/systemd/system/aiops-heartbeat.timer <<TIMER
+[Unit]
+Description=Run AIOps heartbeat every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+Unit=aiops-heartbeat.service
+
+[Install]
+WantedBy=timers.target
+TIMER
+}}
+
+start_services() {{
+  systemctl daemon-reload
+  systemctl enable --now node_exporter.service
+  systemctl enable --now otelcol-contrib.service
+  systemctl enable --now aiops-heartbeat.timer
+  /usr/local/bin/aiops-heartbeat.sh || true
+}}
+
+install_prereqs
+detect_arch
+install_node_exporter
+install_otelcol
+write_configs
+enroll_target
+start_services
+
+echo "Installed node_exporter and otelcol-contrib, wrote systemd services, enrolled the host, and enabled heartbeat."
+"""
+    return HttpResponse(script, content_type="text/plain")

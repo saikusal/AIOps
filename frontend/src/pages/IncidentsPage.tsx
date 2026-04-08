@@ -4,6 +4,25 @@ import { Link, useSearchParams } from "react-router-dom";
 import { executeDiagnosticCommand, fetchIncidentTimeline, fetchRecentAlerts, fetchRecentIncidents } from "../lib/api";
 import { useRefreshInterval } from "../lib/refresh";
 
+function formatCurrency(value?: number | null, currency = "INR") {
+  if (value === undefined || value === null) return "—";
+  try {
+    return new Intl.NumberFormat("en-IN", { style: "currency", currency, maximumFractionDigits: 0 }).format(value);
+  } catch {
+    return `₹${Math.round(value).toLocaleString("en-IN")}`;
+  }
+}
+
+function impactLevelColor(level?: string): string {
+  switch (level) {
+    case "critical": return "var(--color-danger, #ef4444)";
+    case "high": return "var(--color-warning, #f59e0b)";
+    case "medium": return "var(--color-caution, #eab308)";
+    case "low": return "var(--color-info, #3b82f6)";
+    default: return "var(--color-muted, #6b7280)";
+  }
+}
+
 export function IncidentsPage() {
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
@@ -47,6 +66,14 @@ export function IncidentsPage() {
     last_execution_at?: string;
     post_command_ai_analysis?: string;
     command_output?: string;
+    remediation_execution_status?: string;
+    remediation_last_execution_at?: string;
+    post_remediation_ai_analysis?: string;
+    remediation_output?: string;
+    remediation_command?: string;
+    remediation_target_host?: string;
+    remediation_why?: string;
+    remediation_requires_approval?: boolean;
     final_answer?: string;
     analysis_sections?: {
       root_cause?: string;
@@ -55,6 +82,10 @@ export function IncidentsPage() {
       resolution?: string;
       remediation_steps?: string[];
       validation_steps?: string[];
+      remediation_command?: string;
+      remediation_target_host?: string;
+      remediation_why?: string;
+      remediation_requires_approval?: boolean;
     };
     agent_success?: boolean;
   };
@@ -70,6 +101,33 @@ export function IncidentsPage() {
       command_output: executionOverlay.command_output || source.command_output,
       execution_status: executionOverlay.execution_status || source.execution_status,
       last_execution_at: executionOverlay.last_execution_at || source.last_execution_at,
+      remediation_command:
+        executionOverlay.remediation_command ||
+        executionOverlay.analysis_sections?.remediation_command ||
+        source.remediation_command ||
+        source.analysis_sections?.remediation_command,
+      remediation_target_host:
+        executionOverlay.remediation_target_host ||
+        executionOverlay.analysis_sections?.remediation_target_host ||
+        source.remediation_target_host ||
+        source.analysis_sections?.remediation_target_host,
+      remediation_why:
+        executionOverlay.remediation_why ||
+        executionOverlay.analysis_sections?.remediation_why ||
+        source.remediation_why ||
+        source.analysis_sections?.remediation_why,
+      remediation_requires_approval:
+        executionOverlay.remediation_requires_approval ??
+        executionOverlay.analysis_sections?.remediation_requires_approval ??
+        source.remediation_requires_approval ??
+        source.analysis_sections?.remediation_requires_approval,
+      remediation_execution_status:
+        executionOverlay.remediation_execution_status || source.remediation_execution_status,
+      remediation_last_execution_at:
+        executionOverlay.remediation_last_execution_at || source.remediation_last_execution_at,
+      remediation_output: executionOverlay.remediation_output || source.remediation_output,
+      post_remediation_ai_analysis:
+        executionOverlay.post_remediation_ai_analysis || source.post_remediation_ai_analysis,
       agent_success: typeof executionOverlay.agent_success === "boolean" ? executionOverlay.agent_success : source.agent_success,
     };
   }, [executionOverlay, linkedRecommendation, selectedAlert]);
@@ -124,6 +182,57 @@ export function IncidentsPage() {
     },
   });
 
+  const remediationMutation = useMutation({
+    mutationFn: async () => {
+      if (!deepDiveEntry?.remediation_command || !deepDiveEntry?.remediation_target_host || !timelineQuery.data) {
+        throw new Error("No remediation command is available for this incident yet.");
+      }
+      return executeDiagnosticCommand({
+        alert_id: deepDiveEntry.alert_id,
+        command: deepDiveEntry.remediation_command,
+        original_question: `Apply remediation for ${timelineQuery.data.title}`,
+        target_host: deepDiveEntry.remediation_target_host,
+        execution_type: "remediation",
+      });
+    },
+    onMutate: () => {
+      setExecutionState((current) => ({
+        ...current,
+        [executionKey]: {
+          ...(current[executionKey] || {}),
+          remediation_execution_status: "running",
+        },
+      }));
+    },
+    onSuccess: async (payload) => {
+      setExecutionState((current) => ({
+        ...current,
+        [executionKey]: {
+          ...(current[executionKey] || {}),
+          remediation_execution_status: payload.execution_status,
+          remediation_last_execution_at: payload.last_execution_at,
+          post_remediation_ai_analysis: payload.final_answer,
+          remediation_output: payload.command_output,
+          analysis_sections: payload.analysis_sections,
+          remediation_command: payload.analysis_sections?.remediation_command || (current[executionKey] as Record<string, unknown> | undefined)?.remediation_command,
+          remediation_target_host: payload.analysis_sections?.remediation_target_host || (current[executionKey] as Record<string, unknown> | undefined)?.remediation_target_host,
+        },
+      }));
+      await queryClient.invalidateQueries({ queryKey: ["recent-alerts"] });
+      await queryClient.invalidateQueries({ queryKey: ["incident-timeline", selectedKey] });
+    },
+    onError: (error) => {
+      setExecutionState((current) => ({
+        ...current,
+        [executionKey]: {
+          ...(current[executionKey] || {}),
+          remediation_execution_status: "failed",
+          post_remediation_ai_analysis: error instanceof Error ? error.message : "Remediation execution failed.",
+        },
+      }));
+    },
+  });
+
   useEffect(() => {
     if (!deepDiveEntry?.should_execute || !deepDiveEntry?.diagnostic_command || !deepDiveEntry?.target_host) return;
     if (deepDiveEntry.execution_status && deepDiveEntry.execution_status !== "pending") return;
@@ -142,7 +251,7 @@ export function IncidentsPage() {
 
   return (
     <>
-      <section className="hero-card">
+      <section className="hero-card hero-card--incidents">
         <div className="eyebrow">Incident Intelligence</div>
         <h2>Correlated Incident Workspace</h2>
         <p>
@@ -160,12 +269,20 @@ export function IncidentsPage() {
           {(incidentList || []).map((incident) => (
             <article
               key={incident.incident_key}
-              className={`incident-summary${selectedKey === incident.incident_key ? " is-active" : ""}`}
+              className={`incident-summary incident-summary--${String(incident.severity || "medium").toLowerCase().replace(/_/g, "-")}${selectedKey === incident.incident_key ? " is-active" : ""}`}
             >
               <button className="incident-summary__body" onClick={() => setActiveIncidentKey(incident.incident_key)}>
                 <div className="eyebrow">{incident.severity}</div>
                 <strong>{incident.title}</strong>
                 <span>{incident.summary}</span>
+                {incident.business_impact && (incident.business_impact.revenue_lost ?? 0) > 0 && (
+                  <div className="incident-summary__impact" style={{ marginTop: '0.35rem', fontSize: '0.78rem', color: impactLevelColor(incident.business_impact.impact_level) }}>
+                    <span style={{ fontWeight: 600 }}>{formatCurrency(incident.business_impact.revenue_lost)}</span>
+                    <span style={{ opacity: 0.7, marginLeft: '0.35rem' }}>
+                      ({incident.business_impact.failed_transactions} failed txns)
+                    </span>
+                  </div>
+                )}
               </button>
               <div className="page-card__meta">
                 <Link className="shell__link shell__link--small" to={`/graph/incident/${encodeURIComponent(incident.incident_key)}`}>
@@ -205,11 +322,29 @@ export function IncidentsPage() {
                       </Link>
                     ) : null}
                   </div>
-                </div>
-                <div className="incident-detail__stats">
-                  <div><span>Status</span><strong>{timelineQuery.data.status}</strong></div>
-                  <div><span>Service</span><strong>{timelineQuery.data.primary_service}</strong></div>
-                  <div><span>Blast Radius</span><strong>{timelineQuery.data.blast_radius?.length || 0}</strong></div>
+                  <div className="incident-detail__stats">
+                    <div><span>Status</span><strong>{timelineQuery.data.status}</strong></div>
+                    <div><span>Service</span><strong>{timelineQuery.data.primary_service}</strong></div>
+                    <div><span>Blast Radius</span><strong>{timelineQuery.data.blast_radius?.length || 0}</strong></div>
+                    {timelineQuery.data.business_impact && (timelineQuery.data.business_impact.revenue_lost ?? 0) > 0 && (
+                      <>
+                        <div>
+                          <span>Revenue Impact</span>
+                          <strong style={{ color: impactLevelColor(timelineQuery.data.business_impact.impact_level) }}>
+                            {formatCurrency(timelineQuery.data.business_impact.revenue_lost)}
+                          </strong>
+                        </div>
+                        <div>
+                          <span>Failed Txns</span>
+                          <strong>{timelineQuery.data.business_impact.failed_transactions}</strong>
+                        </div>
+                        <div>
+                          <span>Impact/Hour</span>
+                          <strong>{formatCurrency(timelineQuery.data.business_impact.revenue_per_hour)}</strong>
+                        </div>
+                      </>
+                    )}
+                  </div>
                 </div>
               </div>
               <div className="incident-timeline-list">
@@ -270,6 +405,48 @@ export function IncidentsPage() {
                               <li key={`remediation-${index}`}>{step}</li>
                             ))}
                           </ul>
+                        </article>
+                      ) : null}
+                      {deepDiveEntry.remediation_command ? (
+                        <article className="incident-deep-dive__panel">
+                          <strong>Remediation Command</strong>
+                          <p>{deepDiveEntry.remediation_why || "Apply the recommended fix once you are ready."}</p>
+                          <code>{deepDiveEntry.remediation_command}</code>
+                          <div className="page-card__meta">
+                            <span>Target: {deepDiveEntry.remediation_target_host || deepDiveEntry.target_host || "Unavailable"}</span>
+                            {deepDiveEntry.remediation_requires_approval ? <span>Approval gate ready</span> : null}
+                          </div>
+                          <div className="page-card__meta">
+                            <button
+                              className="assistant-button assistant-button--secondary"
+                              onClick={() => remediationMutation.mutate()}
+                              disabled={
+                                remediationMutation.isPending ||
+                                !deepDiveEntry.remediation_command ||
+                                !deepDiveEntry.remediation_target_host
+                              }
+                            >
+                              {remediationMutation.isPending || deepDiveEntry.remediation_execution_status === "running"
+                                ? "Running Remediation..."
+                                : "Run Remediation"}
+                            </button>
+                            <span>Status: {deepDiveEntry.remediation_execution_status || "pending"}</span>
+                            {deepDiveEntry.remediation_last_execution_at ? (
+                              <code>last-run:{new Date(deepDiveEntry.remediation_last_execution_at).toLocaleString()}</code>
+                            ) : null}
+                          </div>
+                        </article>
+                      ) : null}
+                      {deepDiveEntry.post_remediation_ai_analysis ? (
+                        <article className="incident-deep-dive__panel">
+                          <strong>Post-Remediation AI Analysis</strong>
+                          <p>{deepDiveEntry.post_remediation_ai_analysis}</p>
+                        </article>
+                      ) : null}
+                      {deepDiveEntry.remediation_output ? (
+                        <article className="incident-deep-dive__panel">
+                          <strong>Remediation Output</strong>
+                          <pre>{deepDiveEntry.remediation_output}</pre>
                         </article>
                       ) : null}
                       {(deepDiveEntry.analysis_sections?.validation_steps || []).length ? (

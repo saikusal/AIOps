@@ -6,7 +6,7 @@ WORKDIR /code
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      build-essential libgomp1 netcat-openbsd libreoffice catdoc \
+      build-essential libgomp1 netcat-openbsd libreoffice catdoc openssh-client \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /code/requirements.txt

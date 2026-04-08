@@ -1,0 +1,11 @@
+{
+  "allowed_prefixes": [
+    ["docker", "restart", "aiops-db"],
+    ["docker", "restart", "aiops-frontend"],
+    ["docker", "restart", "aiops-gateway"],
+    ["docker", "restart", "aiops-app-orders"],
+    ["docker", "restart", "aiops-app-inventory"],
+    ["docker", "restart", "aiops-app-billing"],
+    ["docker", "restart", "aiops-toxiproxy"]
+  ]
+}

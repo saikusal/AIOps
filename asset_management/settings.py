@@ -163,6 +163,14 @@ LANGUAGE_CODE = 'en-us'
 # in an iframe on another domain.
 SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
 SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "DJANGO_CSRF_TRUSTED_ORIGINS",
+        "http://localhost:8000,http://127.0.0.1:8000,http://localhost:8089,http://127.0.0.1:8089,http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if origin.strip()
+]
 LOGIN_URL = "/genai/login/"
 LOGIN_REDIRECT_URL = "/genai/applications/dashboard/"
 LOGOUT_REDIRECT_URL = "/genai/login/"

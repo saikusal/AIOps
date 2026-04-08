@@ -44,6 +44,9 @@ services:
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-PASTE_GOOGLE_CLIENT_SECRET_HERE}
       SCHEMA_CACHE_TTL: ${SCHEMA_CACHE_TTL:-300}
       GENAI_TABLE: ${GENAI_TABLE:-}
+      AIOPS_PUBLIC_BASE_URL: ${AIOPS_PUBLIC_BASE_URL:-}
+      AIOPS_PUBLIC_OTLP_GRPC_ENDPOINT: ${AIOPS_PUBLIC_OTLP_GRPC_ENDPOINT:-}
+      SSO_ENABLED: ${SSO_ENABLED:-true}
     volumes:
       - mediafiles:/code/mediafiles
       - app_logs:/var/log/aiops
@@ -53,7 +56,7 @@ services:
       db:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
       otel-collector:
         condition: service_started
     restart: unless-stopped
@@ -73,7 +76,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: /bin/sh -c "python3 manage.py migrate && python3 manage.py run_prediction_loop --interval ${PREDICTION_INTERVAL_SECONDS:-300}"
+    command: /bin/sh -c "python3 manage.py run_prediction_loop --interval ${PREDICTION_INTERVAL_SECONDS:-300}"
     environment:
       DJANGO_SETTINGS_MODULE: asset_management.settings
       POSTGRES_HOST: db
@@ -102,20 +105,27 @@ services:
       db:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
       prometheus:
         condition: service_started
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
-    command: redis-server --appendonly yes
+    image: valkey/valkey:8-alpine
+    command: valkey-server --appendonly yes
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
     restart: unless-stopped
 
   db:
     image: postgres:13
+    container_name: aiops-db
     command:
       - postgres
       - -c
@@ -140,7 +150,7 @@ services:
       context: .
       dockerfile: agent/db-agent.Dockerfile
     environment:
-      AGENT_AUTH_TOKEN: aiops-demo-agent-7f3c29d1b84e4a6f
+      AGENT_AUTH_TOKEN: ${AGENT_SECRET_TOKEN:-aiops-demo-agent-7f3c29d1b84e4a6f}
       AGENT_ALLOWED_COMMANDS_FILE: /app/db_allowed_commands.json
       AGENT_PORT: 9999
       PGPASSWORD: ${POSTGRES_PASSWORD:-password}
@@ -152,6 +162,19 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    restart: unless-stopped
+
+  control-agent:
+    build:
+      context: .
+      dockerfile: agent/control-agent.Dockerfile
+    container_name: aiops-control-agent
+    environment:
+      AGENT_AUTH_TOKEN: ${AGENT_SECRET_TOKEN:-aiops-demo-agent-7f3c29d1b84e4a6f}
+      AGENT_ALLOWED_COMMANDS_FILE: /app/control_allowed_commands.json
+      AGENT_PORT: 9999
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
   db-init:
@@ -229,19 +252,41 @@ services:
     restart: unless-stopped
 
   prometheus:
-    image: prom/prometheus:latest
+    # VictoriaMetrics single-node — drop-in Prometheus replacement
+    image: victoriametrics/victoria-metrics:v1.106.1
     command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
+      - "-promscrape.config=/etc/prometheus/prometheus.yml"
+      - "-storageDataPath=/victoria-metrics-data"
+      - "-httpListenAddr=:9090"
+      - "-retentionPeriod=30d"
+      - "-search.latencyOffset=0s"
+      - "-search.maxUniqueTimeseries=300000"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./demo/alerts/demo-rules.yml:/etc/prometheus/demo-rules.yml:ro
-      - prometheus_data:/prometheus
+      - prometheus_data:/victoria-metrics-data
     ports:
       - "9090:9090"
     depends_on:
       - otel-collector
       - node-exporter
+    restart: unless-stopped
+
+  vmalert:
+    # Evaluates alerting/recording rules, sends to alertmanager
+    image: victoriametrics/vmalert:v1.106.1
+    command:
+      - "-rule=/etc/rules/demo-rules.yml"
+      - "-datasource.url=http://prometheus:9090"
+      - "-notifier.url=http://alertmanager:9093"
+      - "-remoteRead.url=http://prometheus:9090"
+      - "-remoteWrite.url=http://prometheus:9090"
+      - "-evaluationInterval=15s"
+    volumes:
+      - ./demo/alerts/demo-rules.yml:/etc/rules/demo-rules.yml:ro
+    ports:
+      - "8880:8880"
+    depends_on:
+      - prometheus
       - alertmanager
     restart: unless-stopped
 
@@ -289,6 +334,7 @@ services:
 
   toxiproxy:
     image: ghcr.io/shopify/toxiproxy:2.12.0
+    container_name: aiops-toxiproxy
     ports:
       - "8474:8474"
       - "15432:15432"
@@ -319,6 +365,7 @@ services:
 
   frontend:
     image: nginx:1.27-alpine
+    container_name: aiops-frontend
     volumes:
       - ./demo/frontend/index.html:/usr/share/nginx/html/index.html:ro
       - ./demo/frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
@@ -341,6 +388,7 @@ services:
 
   gateway:
     image: nginx:1.27-alpine
+    container_name: aiops-gateway
     volumes:
       - ./demo/gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - demo_logs:/var/log/demo
@@ -366,6 +414,7 @@ services:
     build:
       context: .
       dockerfile: demo/app/Dockerfile
+    container_name: aiops-app-orders
     environment:
       APP_NAME: app-orders
       APP_PORT: 8000
@@ -379,7 +428,7 @@ services:
       OTEL_SERVICE_NAME: app-orders
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       APP_DEFAULT_DB_SLEEP: ${ORDERS_DEFAULT_DB_SLEEP:-0}
-      AGENT_AUTH_TOKEN: aiops-demo-agent-7f3c29d1b84e4a6f
+      AGENT_AUTH_TOKEN: ${AGENT_SECRET_TOKEN:-aiops-demo-agent-7f3c29d1b84e4a6f}
       AGENT_ALLOWED_COMMANDS_FILE: /app/allowed_commands.json
       AGENT_PORT: 9999
     volumes:
@@ -397,6 +446,7 @@ services:
     build:
       context: .
       dockerfile: demo/app/Dockerfile
+    container_name: aiops-app-inventory
     environment:
       APP_NAME: app-inventory
       APP_PORT: 8000
@@ -410,7 +460,7 @@ services:
       OTEL_SERVICE_NAME: app-inventory
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       APP_DEFAULT_DB_SLEEP: ${INVENTORY_DEFAULT_DB_SLEEP:-0}
-      AGENT_AUTH_TOKEN: aiops-demo-agent-7f3c29d1b84e4a6f
+      AGENT_AUTH_TOKEN: ${AGENT_SECRET_TOKEN:-aiops-demo-agent-7f3c29d1b84e4a6f}
       AGENT_ALLOWED_COMMANDS_FILE: /app/allowed_commands.json
       AGENT_PORT: 9999
     volumes:
@@ -428,6 +478,7 @@ services:
     build:
       context: .
       dockerfile: demo/app/Dockerfile
+    container_name: aiops-app-billing
     environment:
       APP_NAME: app-billing
       APP_PORT: 8000
@@ -441,7 +492,7 @@ services:
       OTEL_SERVICE_NAME: app-billing
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       APP_DEFAULT_DB_SLEEP: ${BILLING_DEFAULT_DB_SLEEP:-0}
-      AGENT_AUTH_TOKEN: aiops-demo-agent-7f3c29d1b84e4a6f
+      AGENT_AUTH_TOKEN: ${AGENT_SECRET_TOKEN:-aiops-demo-agent-7f3c29d1b84e4a6f}
       AGENT_ALLOWED_COMMANDS_FILE: /app/allowed_commands.json
       AGENT_PORT: 9999
     volumes:

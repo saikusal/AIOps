@@ -22,7 +22,19 @@ export type AlertRecommendation = {
     resolution?: string;
     remediation_steps?: string[];
     validation_steps?: string[];
+    remediation_command?: string;
+    remediation_target_host?: string;
+    remediation_why?: string;
+    remediation_requires_approval?: boolean;
   };
+  remediation_command?: string;
+  remediation_target_host?: string;
+  remediation_why?: string;
+  remediation_requires_approval?: boolean;
+  remediation_execution_status?: string;
+  remediation_last_execution_at?: string;
+  remediation_output?: string;
+  post_remediation_ai_analysis?: string;
   agent_success?: boolean;
   incident_key?: string;
   incident_title?: string;
@@ -92,6 +104,39 @@ export type ApplicationComponent = {
     prediction_status?: string;
     predicted_window_minutes?: number;
   };
+  business_impact?: {
+    currency?: string;
+    timezone?: string;
+    business_peak_window?: string;
+    avg_order_value?: number;
+    baseline_transactions_per_day?: number;
+    window_days?: number;
+    daily?: Array<{
+      date: string;
+      transactions: number;
+      error_rate: number;
+      failed_transactions: number;
+      estimated_revenue_lost: number;
+      business_hours_window?: string;
+      business_hours_transactions?: number;
+      business_hours_failed_transactions?: number;
+      off_hours_transactions?: number;
+    }>;
+    current_day?: {
+      date: string;
+      transactions: number;
+      error_rate: number;
+      failed_transactions: number;
+      estimated_revenue_lost: number;
+      business_hours_window?: string;
+      business_hours_transactions?: number;
+      business_hours_failed_transactions?: number;
+      off_hours_transactions?: number;
+    };
+    trailing_7d_failed_transactions?: number;
+    trailing_7d_revenue_lost?: number;
+    impact_level?: string;
+  };
 };
 
 export type ApplicationOverview = {
@@ -107,6 +152,18 @@ export type ApplicationOverview = {
     risk_score?: number | null;
     prediction_status?: string;
     predicted_window_minutes?: number;
+  };
+  business_impact?: {
+    currency?: string;
+    timezone?: string;
+    business_peak_window?: string;
+    current_business_hours_transactions?: number;
+    current_off_hours_transactions?: number;
+    current_estimated_revenue_lost?: number;
+    current_day_failed_transactions?: number;
+    trailing_7d_revenue_lost?: number;
+    trailing_7d_failed_transactions?: number;
+    impact_level?: string;
   };
 };
 
@@ -199,6 +256,17 @@ export type IncidentSummary = {
     predicted_window_minutes: number;
     explanation: string;
   } | null;
+  business_impact?: {
+    currency?: string;
+    avg_order_value?: number;
+    total_transactions?: number;
+    failed_transactions?: number;
+    revenue_lost?: number;
+    revenue_per_hour?: number;
+    duration_hours?: number;
+    impact_level?: string;
+    data_source?: string;
+  } | null;
 };
 
 export type IncidentTimeline = IncidentSummary & {
@@ -213,6 +281,7 @@ export type IncidentTimeline = IncidentSummary & {
 };
 
 export type CommandExecutionResult = {
+  execution_type?: string;
   final_answer: string;
   analysis_sections?: {
     root_cause?: string;
@@ -221,6 +290,10 @@ export type CommandExecutionResult = {
     resolution?: string;
     remediation_steps?: string[];
     validation_steps?: string[];
+    remediation_command?: string;
+    remediation_target_host?: string;
+    remediation_why?: string;
+    remediation_requires_approval?: boolean;
   };
   command_output: string;
   agent_success: boolean;
@@ -486,6 +559,7 @@ export async function executeDiagnosticCommand(payload: {
   command: string;
   original_question: string;
   target_host: string;
+  execution_type?: "diagnostic" | "remediation";
 }): Promise<CommandExecutionResult> {
   const response = await fetch("/genai/execute_command/", {
     method: "POST",
@@ -504,4 +578,238 @@ export async function executeDiagnosticCommand(payload: {
   }
 
   return body;
+}
+
+export type FleetComponentStatus = {
+  name: string;
+  status: string;
+};
+
+export type FleetTarget = {
+  target_id: string;
+  name: string;
+  target_type: string;
+  environment: string;
+  hostname: string;
+  status: string;
+  last_heartbeat: string;
+  profile_name: string;
+  collector_status: string;
+  discovered_service_count: number;
+  components: FleetComponentStatus[];
+};
+
+export type TelemetryProfile = {
+  slug: string;
+  name: string;
+  summary: string;
+  default_for_target: string;
+  components: string[];
+  capabilities: string[];
+};
+
+export type EnrollmentBlueprint = {
+  target_type: string;
+  install_mode: string;
+  token_preview: string;
+  install_command: string;
+  components: string[];
+  next_steps: string[];
+};
+
+export type OnboardingRequest = {
+  onboarding_id: string;
+  name: string;
+  hostname: string;
+  ssh_user: string;
+  ssh_port: number;
+  target_type: string;
+  profile_slug: string;
+  status: string;
+  connectivity_status: string;
+  connectivity_message: string;
+  last_connectivity_check_at?: string | null;
+  last_install_at?: string | null;
+  install_message: string;
+  target_id?: string | null;
+  pem_file_name?: string;
+};
+
+type FleetTargetsResponse = {
+  count: number;
+  results: FleetTarget[];
+};
+
+type FleetProfilesResponse = {
+  count: number;
+  results: TelemetryProfile[];
+};
+
+type FleetOnboardingResponse = {
+  count: number;
+  results: OnboardingRequest[];
+};
+
+export async function fetchFleetTargets(): Promise<FleetTarget[]> {
+  const payload = await fetchJson<FleetTargetsResponse>("/genai/fleet/targets/");
+  return payload.results || [];
+}
+
+export async function fetchTelemetryProfiles(): Promise<TelemetryProfile[]> {
+  const payload = await fetchJson<FleetProfilesResponse>("/genai/fleet/profiles/");
+  return payload.results || [];
+}
+
+export async function fetchEnrollmentBlueprint(targetType: string, profileName: string): Promise<EnrollmentBlueprint> {
+  const query = new URLSearchParams({ target_type: targetType, profile: profileName }).toString();
+  return fetchJson<EnrollmentBlueprint>(`/genai/fleet/enroll-blueprint/?${query}`);
+}
+
+export async function fetchOnboardingRequests(): Promise<OnboardingRequest[]> {
+  const payload = await fetchJson<FleetOnboardingResponse>("/genai/fleet/onboarding/");
+  return payload.results || [];
+}
+
+export async function createOnboardingRequest(payload: {
+  name: string;
+  hostname: string;
+  ssh_user: string;
+  ssh_port: number;
+  target_type: string;
+  profile: string;
+  pem_file: File;
+}): Promise<OnboardingRequest> {
+  const formData = new FormData();
+  formData.append("name", payload.name);
+  formData.append("hostname", payload.hostname);
+  formData.append("ssh_user", payload.ssh_user);
+  formData.append("ssh_port", String(payload.ssh_port));
+  formData.append("target_type", payload.target_type);
+  formData.append("profile", payload.profile);
+  formData.append("pem_file", payload.pem_file);
+
+  const response = await fetch("/genai/fleet/onboarding/", {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+      "X-CSRFToken": getCsrfToken(),
+    },
+    body: formData,
+  });
+
+  const body = (await response.json()) as OnboardingRequest & { error?: string; detail?: string };
+  if (!response.ok) {
+    throw new Error(body.detail || body.error || `Onboarding request failed: ${response.status}`);
+  }
+
+  return body;
+}
+
+export async function testOnboardingConnectivity(onboardingId: string): Promise<OnboardingRequest> {
+  const response = await fetch(`/genai/fleet/onboarding/${onboardingId}/test-connectivity/`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+      "X-CSRFToken": getCsrfToken(),
+    },
+  });
+
+  const body = (await response.json()) as OnboardingRequest & { error?: string; detail?: string };
+  if (!response.ok) {
+    throw new Error(body.detail || body.error || `Connectivity test failed: ${response.status}`);
+  }
+
+  return body;
+}
+
+export async function installOnboardingTarget(onboardingId: string): Promise<OnboardingRequest & { install_command?: string }> {
+  const response = await fetch(`/genai/fleet/onboarding/${onboardingId}/install/`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+      "X-CSRFToken": getCsrfToken(),
+    },
+  });
+
+  const body = (await response.json()) as OnboardingRequest & { install_command?: string; error?: string; detail?: string };
+  if (!response.ok) {
+    throw new Error(body.detail || body.error || `Remote install failed: ${response.status}`);
+  }
+
+  return body;
+}
+
+export async function updateOnboardingRequest(onboardingId: string, payload: {
+  name: string;
+  hostname: string;
+  ssh_user: string;
+  ssh_port: number;
+  target_type: string;
+  profile: string;
+  pem_file?: File | null;
+}): Promise<OnboardingRequest> {
+  const formData = new FormData();
+  formData.append("name", payload.name);
+  formData.append("hostname", payload.hostname);
+  formData.append("ssh_user", payload.ssh_user);
+  formData.append("ssh_port", String(payload.ssh_port));
+  formData.append("target_type", payload.target_type);
+  formData.append("profile", payload.profile);
+  if (payload.pem_file) {
+    formData.append("pem_file", payload.pem_file);
+  }
+
+  const response = await fetch(`/genai/fleet/onboarding/${onboardingId}/`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+      "X-CSRFToken": getCsrfToken(),
+    },
+    body: formData,
+  });
+
+  const body = (await response.json()) as OnboardingRequest & { error?: string; detail?: string };
+  if (!response.ok) {
+    throw new Error(body.detail || body.error || `Update failed: ${response.status}`);
+  }
+  return body;
+}
+
+export async function deleteOnboardingRequest(onboardingId: string): Promise<void> {
+  const response = await fetch(`/genai/fleet/onboarding/${onboardingId}/`, {
+    method: "DELETE",
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+      "X-CSRFToken": getCsrfToken(),
+    },
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.detail || body.error || `Delete failed: ${response.status}`);
+  }
+}
+
+export async function fetchCacheStats(): Promise<Record<string, any>> {
+  const payload = await fetchJson<{ status: string; data: Record<string, any> }>("/genai/cache/stats/");
+  return payload.data;
+}
+
+export async function purgeCache(prefix?: string): Promise<{ deleted: number }> {
+  const response = await fetch("/genai/cache/purge/", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+    credentials: "include",
+    body: JSON.stringify(prefix ? { prefix } : {}),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error || `Purge failed: ${response.status}`);
+  }
+  return response.json();
 }
