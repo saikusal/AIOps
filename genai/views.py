@@ -1443,7 +1443,22 @@ def delegate_command_to_agent(command_to_run: str, target_host: str) -> Tuple[bo
     try:
         logger.info("Delegating command '%s' to agent at %s", command_to_run, agent_url)
         response = requests.post(agent_url, headers=headers, json=payload, timeout=70)
-        response.raise_for_status()
+        if not response.ok:
+            # Capture the response body to surface the real error from the agent
+            try:
+                agent_err = response.json()
+            except Exception:
+                agent_err = {"raw": response.text[:500]}
+            logger.error(
+                "Agent at %s returned HTTP %s for command '%s': %s",
+                agent_url, response.status_code, command_to_run, agent_err
+            )
+            detail = agent_err.get("detail") or agent_err.get("error") or agent_err.get("raw") or str(agent_err)
+            output = (
+                f"Error: Agent on {requested_target_host} returned {response.status_code}. "
+                f"Detail: {detail}"
+            )
+            return False, output, agent_err
         agent_response = response.json()
         agent_response["requested_target_host"] = requested_target_host
         agent_response["agent_target_host"] = target_host
@@ -2086,118 +2101,11 @@ def recent_predictions_view(request: HttpRequest):
     )
     return JsonResponse({"count": len(rows), "results": rows})
 
-# ---------------- AIDE API ----------------
-def _make_aide_call(session, url, headers, payload, call_id):
-    """Helper to make a single API call and handle exceptions."""
-    try:
-        prompt_preview = ""
-        try:
-            prompt_preview = json.dumps(payload, ensure_ascii=True)[:1200]
-        except Exception:
-            prompt_preview = "<payload_preview_unavailable>"
-        logger.info("AIDE request call_id=%s url=%s payload_preview=%s", call_id, url, prompt_preview)
-        resp = session.post(url, headers=headers, json=payload, timeout=AIDE_TIMEOUT, verify=VERIFY_PARAM)
-        logger.info("AIDE response call_id=%s url=%s status=%s body_preview=%.800s", call_id, url, resp.status_code, resp.text)
-        return resp
-    except requests.exceptions.RequestException as e:
-        logger.exception("AIDE request exception call_id=%s for URL %s: %s", call_id, url, e)
-        return None # Indicate a connection-level error
-
-def query_aide_api(prompt: str) -> Tuple[bool, int, str]:
-    """
-    Calls the primary AiDE API and falls back to a secondary API on failure.
-    The fallback is triggered for any status code other than 200 and 504.
-    Returns (ok, status_code, text_or_raw)
-    """
-    if not AIDE_API_KEY or not AIDE_API_URL:
-        return (False, 0, "Primary AIDE API not configured")
-
-    # --- Setup Session with Retries for Primary API ---
-    primary_session = requests.Session()
-    # Retry on transient server errors and rate limiting.
-    retry_strategy = Retry(
-        total=AIDE_RETRIES,
-        status_forcelist=[429, 500, 502, 503], # Note: 504 is NOT retried here
-        allowed_methods=["POST"],
-        backoff_factor=0.6,
-        raise_on_status=False
-    )
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    primary_session.mount("https://", adapter)
-    primary_session.mount("http://", adapter)
-
-    headers = {"Authorization": f"Bearer {AIDE_API_KEY}", "Content-Type": "application/json", "User-Agent":"asset_management-genai/1.0"}
-    payload = {"messages":[{"role":"user","content":prompt}]}
-    call_id = f"aide-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
-
-    # --- Try Primary API ---
-    logger.info("Attempting to call Primary AIDE API call_id=%s", call_id)
-    primary_resp = _make_aide_call(primary_session, AIDE_API_URL, headers, payload, call_id)
-
-    # --- Fallback Logic ---
-    # Fallback if the primary call resulted in an error, but not a 200 or 504.
-    primary_status = primary_resp.status_code if primary_resp is not None else -1 # -1 for connection error
-    should_fallback = primary_status not in [200, 504]
-
-    if should_fallback:
-        logger.warning(f"Primary AIDE API failed with status {primary_status}. Attempting fallback to secondary API. call_id={call_id}")
-        
-        if not AIDE_API_URL_SECONDARY or not AIDE_API_KEY_SECONDARY:
-            logger.error("Secondary AIDE API not configured. Cannot fallback.")
-            if primary_resp is not None:
-                return (False, primary_resp.status_code, primary_resp.text if AIDE_DEBUG else f"AIDE HTTP {primary_resp.status_code}")
-            else:
-                return (False, 0, "Primary AIDE API connection failed and secondary is not configured.")
-
-        # --- Try Secondary API (no retries for simplicity) ---
-        secondary_session = requests.Session()
-        secondary_headers = headers.copy()
-        secondary_headers["Authorization"] = f"Bearer {AIDE_API_KEY_SECONDARY}"
-        
-        secondary_resp = _make_aide_call(secondary_session, AIDE_API_URL_SECONDARY, secondary_headers, payload, call_id)
-        secondary_status = secondary_resp.status_code if secondary_resp is not None else -1
-
-        if secondary_status == 200:
-            logger.info("Fallback to secondary AIDE API was successful.")
-            resp = secondary_resp  # Success! Use the secondary response.
-        else:
-            logger.error(f"Secondary AIDE API also failed with status {secondary_status}. Returning original error from primary.")
-            if primary_resp is not None:
-                return (False, primary_resp.status_code, primary_resp.text if AIDE_DEBUG else f"AIDE HTTP {primary_resp.status_code}")
-            else:
-                return (False, 0, "Primary AIDE API connection failed and secondary also failed.")
-    else:
-        # Primary call was successful (200) OR it was a 504 error, which we don't fall back from.
-        resp = primary_resp
-
-    # --- Process the response ---
-    if resp is None:
-        return (False, 0, "An unexpected error occurred where the response object is None.")
-        
-    if resp.status_code != 200:
-        # This path is now only taken for non-successful codes we don't fall back from (i.e., 504).
-        return (False, resp.status_code, resp.text if AIDE_DEBUG else f"AIDE HTTP {resp.status_code}")
-
-    # --- Parse successful response (status 200) ---
-    try:
-        data = resp.json()
-    except Exception:
-        return (True, resp.status_code, resp.text.strip())
-    
-    # Common response shapes:
-    if isinstance(data, dict):
-        if "choices" in data and data["choices"]:
-            ch = data["choices"][0]
-            if isinstance(ch, dict) and "message" in ch and isinstance(ch["message"], dict) and "content" in ch["message"]:
-                return (True, resp.status_code, ch["message"]["content"].strip())
-            if isinstance(ch, dict) and "text" in ch and isinstance(ch["text"], str):
-                return (True, resp.status_code, ch["text"].strip())
-        if "message" in data and isinstance(data["message"], dict) and "content" in data["message"]:
-            return (True, resp.status_code, data["message"]["content"].strip())
-        for k in ("sql", "output", "result", "response", "text"):
-            if k in data and isinstance(data[k], str):
-                return (True, resp.status_code, data[k].strip())
-    return (True, resp.status_code, json.dumps(data)[:3000])
+# ---------------- LLM API (delegated to genai.llm_backend) ----------------
+# Backward-compatible: query_aide_api is now imported from llm_backend.
+# The original inline implementation has been moved to genai/llm_backend.py
+# which supports both AIDE and vLLM (Qwen) backends via LLM_BACKEND env var.
+from genai.llm_backend import query_aide_api  # noqa: E402
 
 # ---------------- schema helpers ----------------
 def get_full_schema_for_prompt(target_table: str = TARGET_TABLE, max_tables: int = 6, sample_rows_limit: int = 2, max_total_chars: int = 6000) -> str:
@@ -2878,11 +2786,23 @@ def genai_chat(request: HttpRequest):
     if route == "investigation":
         try:
             investigation_context = build_investigation_context(question, body)
+
+            # Extract server-computed business impact so it's always in the response
+            incident_data = investigation_context.get("incident") or {}
+            business_impact = incident_data.get("business_impact") or {}
+            if not business_impact and investigation_context.get("scope"):
+                # Try computing from the incident directly
+                scope = investigation_context["scope"]
+                inc = _find_investigation_incident(scope)
+                if inc:
+                    business_impact = _compute_incident_revenue_impact(inc) or {}
+
             prompt = (
                 "You are an AIOps incident investigation assistant. "
                 "Use the incident context, metrics, logs, traces, and dependency graph to answer the user's question. "
                 "Provide a concise RCA-oriented answer as JSON with two keys: 'answer' and 'follow_up_questions'.\n"
                 "- 'answer' must explain the likely root cause, blast radius, strongest evidence, and the next best diagnostic step.\n"
+                "- ALWAYS include the estimated revenue/business impact if available in the context (failed transactions, revenue lost, impact level).\n"
                 "- If a linked recommendation or diagnostic command exists, mention it directly.\n"
                 "- Do not answer with raw PromQL unless the user explicitly asked for a Prometheus query.\n\n"
                 f"RECENT CONVERSATION:\n{conversation_history or 'No prior conversation.'}\n\n"
@@ -2911,6 +2831,7 @@ def genai_chat(request: HttpRequest):
                 "follow_up_questions": parsed.get("follow_up_questions") or [],
                 "suggested_command": ((investigation_context.get("linked_recommendation") or {}).get("diagnostic_command")),
                 "target_host": investigation_context.get("target_host"),
+                "business_impact": business_impact,
                 "cached": False,
             }
             return _chat_json_response(chat_session, response_data)

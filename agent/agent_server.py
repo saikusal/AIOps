@@ -1,9 +1,16 @@
 import json
+import logging
 import os
 import shlex
 import subprocess
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger("agent")
 
 
 HOST = os.getenv("AGENT_BIND", "0.0.0.0")
@@ -75,9 +82,11 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._json_response(400, {"error": "command_required"})
             return
         if not is_command_allowed(command):
+            logger.warning("Rejected command (not in allow-list): %s", command)
             self._json_response(403, {"error": "command_not_allowed", "command": command})
             return
 
+        logger.info("Executing command: %s", command)
         try:
             tokens = shlex.split(command)
             proc = subprocess.run(
@@ -98,12 +107,14 @@ class AgentHandler(BaseHTTPRequestHandler):
                 },
             )
         except subprocess.TimeoutExpired:
+            logger.error("Command timed out: %s", command)
             self._json_response(504, {"error": "command_timeout", "command": command})
         except Exception as exc:
+            logger.exception("Command raised exception: %s", command)
             self._json_response(500, {"error": "command_failed", "detail": str(exc), "command": command})
 
     def log_message(self, format, *args):
-        return
+        logger.info(format, *args)
 
 
 def main():
