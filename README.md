@@ -23,24 +23,14 @@ The AI engine runs on your own hardware using **[Qwen2.5-7B-Instruct-AWQ](https:
 
 ## Dual-LLM Architecture: Local-First with Optional Fallback
 
-The platform ships with a backend-agnostic LLM abstraction layer controlled by a single environment variable:
-
-```
-LLM_BACKEND=vllm    # Air-gapped mode: Qwen via vLLM (default for production)
-LLM_BACKEND=aide    # Connected mode: AIDE external API (optional fallback)
-```
+All AI calls go through vLLM — a self-hosted, air-gapped inference server running Qwen2.5 on your GPU. No external API keys required, no data leaves the server.
 
 | Mode | LLM | Internet Required | Data Leaves Server | GPU Required |
 |---|---|---|---|---|
-| `vllm` (recommended) | Qwen2.5-7B-Instruct-AWQ | ❌ No | ❌ Never | ✅ Yes (A10G / similar) |
-| `aide` (fallback) | AIDE cloud API | ✅ Yes | ✅ Yes | ❌ No |
+| `vllm` | Qwen2.5-7B-Instruct-AWQ | ❌ No | ❌ Never | ✅ Yes (A10G / similar) |
 
-### How the fallback works
-
-- In `vllm` mode, all AI calls go to the local Qwen model running in a vLLM container on your GPU server. No network egress.
-- In `aide` mode (fallback for environments without a GPU), the platform calls the AIDE external API. This mode is intended only for development or as a contingency.
-- Both modes use the **exact same prompts, context structures, and response handling** — swapping backends requires no code changes.
-- The same call path (`query_aide_api()` → `query_llm()`) is used across all features: investigation, RCA, command analysis, remediation planning, post-mortem generation.
+- All AI calls go to the local Qwen model running in a vLLM container on your GPU server. No network egress.
+- The same call path (`query_llm()`) is used across all features: investigation, RCA, command analysis, remediation planning, post-mortem generation.
 
 ---
 
@@ -104,9 +94,6 @@ Operators get a single workspace for the entire incident lifecycle:
 - AWQ 4-bit quantization — ~4–5 GB VRAM for weights, enabling 16K+ context on modest GPU hardware
 - OpenAI-compatible API via vLLM — zero application-layer changes needed to switch models
 
-### AI / Inference Layer (Fallback)
-- AIDE cloud API (optional; only used when `LLM_BACKEND=aide`)
-
 ### Investigation & Orchestration
 - Prompt-based orchestration in `genai/`
 - Document-backed retrieval in `doc_search/`
@@ -142,7 +129,7 @@ Operators get a single workspace for the entire incident lifecycle:
 ```text
 aiops_platform/     Django project settings and app wiring
 genai/              AI assistant, incidents, predictions, execution flows
-  llm_backend.py    LLM abstraction layer (vLLM ↔ AIDE toggle)
+  llm_backend.py    LLM abstraction layer (vLLM / Qwen)
 doc_search/         Document upload, processing, and retrieval
 frontend/           React frontend (Vite + TypeScript)
 demo/               Demo application, chaos tooling, dependency graph
@@ -220,15 +207,11 @@ cp .env.example .env
 **Minimum required values in `.env`:**
 
 ```bash
-# --- Air-gapped LLM (primary) ---
-LLM_BACKEND=vllm
+# --- LLM (vLLM / Qwen, air-gapped) ---
 VLLM_API_URL=http://172.17.0.1:8001/v1/chat/completions   # Docker bridge IP → host vLLM
 VLLM_MODEL_NAME=qwen32b
 VLLM_MAX_TOKENS=4096
 VLLM_MAX_MODEL_LEN=16384
-
-# --- Fallback (only needed if LLM_BACKEND=aide) ---
-AIDE_API_KEY=your_key_here
 
 # --- Core ---
 POSTGRES_PASSWORD=your_secure_password
@@ -261,20 +244,9 @@ docker compose up -d --build
 
 ---
 
-## Switching LLM Backends
+## Changing the vLLM Model
 
-To use the air-gapped Qwen model:
-```bash
-LLM_BACKEND=vllm
-```
-
-To fall back to the AIDE cloud API (e.g., on a machine without a GPU):
-```bash
-LLM_BACKEND=aide
-AIDE_API_KEY=your_key
-```
-
-No rebuild required — restart the `web` container:
+Update `VLLM_MODEL_NAME` and `VLLM_API_URL` in `.env` to point at a different model served by vLLM, then restart the `web` container — no rebuild required:
 ```bash
 docker compose up -d --no-deps web
 ```
