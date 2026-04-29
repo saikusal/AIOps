@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { GraphScene, type SceneNode } from "../components/graph/GraphScene";
 import { fetchApplicationGraph, fetchIncidentGraph, fetchRecentAlerts, type GraphPayload } from "../lib/api";
-import { useRefreshInterval } from "../lib/refresh";
+import { useRefreshQueryOptions } from "../lib/refresh";
 
 function graphTitle(graph: GraphPayload) {
   if (graph.graph_type === "application") return "Application Topology";
@@ -14,26 +14,26 @@ function graphTitle(graph: GraphPayload) {
 export function GraphPage() {
   const { alertId, incidentKey, applicationKey } = useParams();
   const [selectedNode, setSelectedNode] = useState<SceneNode | null>(null);
-  const { refreshMs } = useRefreshInterval();
+  const refreshQueryOptions = useRefreshQueryOptions();
 
   const alertQuery = useQuery({
     queryKey: ["recent-alerts"],
     queryFn: fetchRecentAlerts,
-    refetchInterval: refreshMs,
+    ...refreshQueryOptions,
     enabled: Boolean(alertId) || (!incidentKey && !applicationKey),
   });
 
   const incidentGraphQuery = useQuery({
     queryKey: ["incident-graph", incidentKey],
     queryFn: () => fetchIncidentGraph(incidentKey!),
-    refetchInterval: refreshMs,
+    ...refreshQueryOptions,
     enabled: Boolean(incidentKey),
   });
 
   const applicationGraphQuery = useQuery({
     queryKey: ["application-graph", applicationKey],
     queryFn: () => fetchApplicationGraph(applicationKey!),
-    refetchInterval: refreshMs,
+    ...refreshQueryOptions,
     enabled: Boolean(applicationKey),
   });
 
@@ -157,7 +157,7 @@ export function GraphPage() {
               <h2>{graph.title}</h2>
               <p>{graph.summary}</p>
               <div className="page-card__meta">
-                <Link className="shell__link shell__link--small" to={graph.graph_type === "application" ? `/assistant?application=${encodeURIComponent(graph.key)}` : `/assistant?incident=${encodeURIComponent(graph.key)}`}>
+                <Link className="shell__link shell__link--small" to={graph.graph_type === "application" ? `/genai?application=${encodeURIComponent(graph.key)}` : `/genai?incident=${encodeURIComponent(graph.key)}`}>
                   Investigate In Assistant
                 </Link>
                 <Link className="shell__link shell__link--small" to="/incidents">

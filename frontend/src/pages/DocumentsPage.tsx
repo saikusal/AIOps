@@ -1,18 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { deleteDocument, fetchDocuments, uploadDocument } from "../lib/api";
-import { useRefreshInterval } from "../lib/refresh";
+import { useRefreshQueryOptions } from "../lib/refresh";
 
 export function DocumentsPage() {
   const queryClient = useQueryClient();
-  const { refreshMs } = useRefreshInterval();
+  const refreshQueryOptions = useRefreshQueryOptions();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
   const documentsQuery = useQuery({
     queryKey: ["documents"],
     queryFn: fetchDocuments,
-    refetchInterval: refreshMs,
+    ...refreshQueryOptions,
   });
 
   const uploadMutation = useMutation({

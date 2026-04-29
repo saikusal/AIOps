@@ -8,7 +8,63 @@ import {
   sendChatMessage,
   type ChatMessage,
 } from "../lib/api";
-import { useRefreshInterval } from "../lib/refresh";
+import { useRefreshQueryOptions } from "../lib/refresh";
+
+type RcaMeta = {
+  confidence?: string;
+  confidence_reason?: string;
+  decision_policy?: string;
+  hard_evidence?: string[];
+  missing_evidence?: string[];
+  supporting_evidence?: string[];
+  contradicting_evidence?: string[];
+  next_verification_step?: string;
+};
+
+function RcaPanel({ meta }: { meta: RcaMeta }) {
+  const level = meta.confidence ?? "medium";
+  const decisionPolicy = meta.decision_policy ?? "diagnose";
+  const confidenceReason = meta.confidence_reason ?? "";
+  const hardEvidence = meta.hard_evidence ?? [];
+  const missingEvidence = meta.missing_evidence ?? [];
+  const supporting = meta.supporting_evidence ?? [];
+  const contradicting = meta.contradicting_evidence ?? [];
+  const nextStep = meta.next_verification_step ?? "";
+  return (
+    <div className={`rca-confidence rca-confidence--${level}`}>
+      <div className="rca-confidence__header">
+        <span className="rca-confidence__badge">{level.toUpperCase()} CONFIDENCE</span>
+        <span className={`decision-policy decision-policy--${decisionPolicy}`}>{decisionPolicy.toUpperCase()}</span>
+        {nextStep && <span className="rca-confidence__next">Next: {nextStep}</span>}
+      </div>
+      {confidenceReason && <div className="rca-confidence__reason">{confidenceReason}</div>}
+      {hardEvidence.length > 0 && (
+        <div className="rca-evidence rca-evidence--hard">
+          <span className="rca-evidence__label">Hard Evidence</span>
+          <ul>{hardEvidence.map((item, i) => <li key={`hard-${i}`}>{item}</li>)}</ul>
+        </div>
+      )}
+      {missingEvidence.length > 0 && (
+        <div className="rca-evidence rca-evidence--missing">
+          <span className="rca-evidence__label">Missing Evidence</span>
+          <ul>{missingEvidence.map((item, i) => <li key={`missing-${i}`}>{item}</li>)}</ul>
+        </div>
+      )}
+      {supporting.length > 0 && (
+        <div className="rca-evidence rca-evidence--supporting">
+          <span className="rca-evidence__label">Supporting</span>
+          <ul>{supporting.map((item, i) => <li key={i}>{item}</li>)}</ul>
+        </div>
+      )}
+      {contradicting.length > 0 && (
+        <div className="rca-evidence rca-evidence--contradicting">
+          <span className="rca-evidence__label">Contradicting</span>
+          <ul>{contradicting.map((item, i) => <li key={i}>{item}</li>)}</ul>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function renderMessageContent(content: string) {
   const blocks = content.split("\n").map((line) => line.trim()).filter(Boolean);
@@ -34,7 +90,7 @@ function renderMessageContent(content: string) {
 export function AssistantPage() {
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
-  const { refreshMs } = useRefreshInterval();
+  const refreshQueryOptions = useRefreshQueryOptions();
   const [activeSessionId, setActiveSessionId] = useState<string | undefined>(undefined);
   const [draft, setDraft] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -47,7 +103,7 @@ export function AssistantPage() {
   const sessionsQuery = useQuery({
     queryKey: ["chat-sessions"],
     queryFn: fetchChatSessions,
-    refetchInterval: refreshMs,
+    ...refreshQueryOptions,
   });
 
   const sessionInitQuery = useQuery({
@@ -104,7 +160,17 @@ export function AssistantPage() {
           role: "assistant",
           content: payload.answer || "No answer returned.",
           created_at: new Date().toISOString(),
-          metadata: {},
+          metadata: {
+            follow_up_questions: payload.follow_up_questions,
+            confidence: payload.confidence,
+            confidence_reason: payload.confidence_reason,
+            decision_policy: payload.decision_policy,
+            hard_evidence: payload.hard_evidence,
+            missing_evidence: payload.missing_evidence,
+            supporting_evidence: payload.supporting_evidence,
+            contradicting_evidence: payload.contradicting_evidence,
+            next_verification_step: payload.next_verification_step,
+          },
         },
       ]);
       if (payload.session_id) {
@@ -144,6 +210,26 @@ export function AssistantPage() {
   const currentTitle = useMemo(() => {
     return sessionSummaries.find((item) => item.session_id === activeSessionId)?.title || sessionInitQuery.data?.title || "New Investigation";
   }, [sessionSummaries, activeSessionId, sessionInitQuery.data]);
+
+  const suggestedPrompts = useMemo(() => {
+    const latestAssistantMessage = [...messages].reverse().find((message) => message.role === "assistant");
+    const followUps = Array.isArray(latestAssistantMessage?.metadata?.follow_up_questions)
+      ? latestAssistantMessage?.metadata?.follow_up_questions
+          .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+          .slice(0, 4)
+      : [];
+
+    if (followUps.length) {
+      return followUps;
+    }
+
+    return [
+      "Give me the RCA for the active incident.",
+      "What is the blast radius if the database fails?",
+      "What command should we run next and why?",
+      "Summarize the highest-risk service in the next 15 minutes.",
+    ];
+  }, [messages]);
 
   function submitPrompt(question: string) {
     const nextQuestion = question.trim();
@@ -208,16 +294,14 @@ export function AssistantPage() {
               <article key={`${message.id}-${message.created_at}`} className={`assistant-message assistant-message--${message.role}`}>
                 <div className="assistant-message__role">{message.role}</div>
                 <div className="assistant-message__content">{renderMessageContent(message.content)}</div>
+                {message.role === "assistant" && Boolean(message.metadata?.confidence) && (
+                  <RcaPanel meta={message.metadata as RcaMeta} />
+                )}
               </article>
             ))}
           </div>
           <div className="assistant-prompts">
-            {[
-              "Give me the RCA for the active incident.",
-              "What is the blast radius if the database fails?",
-              "What command should we run next and why?",
-              "Summarize the highest-risk service in the next 15 minutes.",
-            ].map((prompt) => (
+            {suggestedPrompts.map((prompt) => (
               <button key={prompt} className="assistant-prompt-chip" onClick={() => submitPrompt(prompt)}>
                 {prompt}
               </button>

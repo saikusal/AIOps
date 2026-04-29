@@ -1,8 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { executeDiagnosticCommand, fetchIncidentTimeline, fetchRecentAlerts, fetchRecentIncidents } from "../lib/api";
-import { useRefreshInterval } from "../lib/refresh";
+import {
+  acknowledgeSla,
+  executeDiagnosticCommand,
+  fetchIncidentTimeline,
+  fetchRecentAlerts,
+  fetchRecentIncidents,
+  generateRunbook,
+  generateTimelineNarrative,
+  getRunbookDownloadUrl,
+  getTimelineNarrativeDownloadUrl,
+  type RunbookResult,
+  type TypedAction,
+} from "../lib/api";
+import { useRefreshQueryOptions } from "../lib/refresh";
 
 function formatCurrency(value?: number | null, currency = "INR") {
   if (value === undefined || value === null) return "—";
@@ -23,24 +35,98 @@ function impactLevelColor(level?: string): string {
   }
 }
 
+function slaBadgeColor(sla?: { breached: boolean; resolution_remaining_minutes: number | null } | null): string {
+  if (!sla) return "var(--color-muted, #6b7280)";
+  if (sla.breached) return "var(--color-danger, #ef4444)";
+  if (sla.resolution_remaining_minutes !== null && sla.resolution_remaining_minutes < 30) return "var(--color-warning, #f59e0b)";
+  return "var(--color-success, #22c55e)";
+}
+
+function formatSlaMinutes(minutes: number | null): string {
+  if (minutes === null) return "—";
+  if (minutes < 0) return `${Math.abs(Math.round(minutes))}m overdue`;
+  if (minutes < 60) return `${Math.round(minutes)}m left`;
+  return `${Math.round(minutes / 60)}h ${Math.round(minutes % 60)}m left`;
+}
+
+type DecisionEvidenceMeta = {
+  decision_policy?: string;
+  confidence_reason?: string;
+  hard_evidence?: string[];
+  missing_evidence?: string[];
+  evidence_assessment?: {
+    safe_action?: string;
+    confidence_reason?: string;
+    hard_evidence?: string[];
+    missing_evidence?: string[];
+    dependency_hard_evidence?: Record<string, string[]>;
+    best_dependency_target?: string;
+  };
+};
+
+function DecisionPanel({ meta }: { meta: DecisionEvidenceMeta }) {
+  const decisionPolicy = meta.decision_policy || meta.evidence_assessment?.safe_action || "diagnose";
+  const confidenceReason = meta.confidence_reason || meta.evidence_assessment?.confidence_reason || "";
+  const hardEvidence = meta.hard_evidence || meta.evidence_assessment?.hard_evidence || [];
+  const missingEvidence = meta.missing_evidence || meta.evidence_assessment?.missing_evidence || [];
+  const bestDependencyTarget = meta.evidence_assessment?.best_dependency_target || "";
+
+  if (!confidenceReason && hardEvidence.length === 0 && missingEvidence.length === 0 && !bestDependencyTarget) {
+    return null;
+  }
+
+  return (
+    <article className="incident-deep-dive__panel incident-deep-dive__panel--decision">
+      <div className="incident-decision__header">
+        <strong>Decision Policy</strong>
+        <span className={`decision-policy decision-policy--${decisionPolicy}`}>{decisionPolicy.toUpperCase()}</span>
+      </div>
+      {confidenceReason ? <p>{confidenceReason}</p> : null}
+      {bestDependencyTarget ? <p className="incident-decision__target">Preferred pivot target: {bestDependencyTarget}</p> : null}
+      {hardEvidence.length > 0 ? (
+        <div className="incident-decision__section incident-decision__section--hard">
+          <span>Hard Evidence</span>
+          <ul>
+            {hardEvidence.map((item, index) => (
+              <li key={`hard-${index}`}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {missingEvidence.length > 0 ? (
+        <div className="incident-decision__section incident-decision__section--missing">
+          <span>Missing Evidence</span>
+          <ul>
+            {missingEvidence.map((item, index) => (
+              <li key={`missing-${index}`}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
 export function IncidentsPage() {
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
   const [activeIncidentKey, setActiveIncidentKey] = useState<string | undefined>(undefined);
   const [executionState, setExecutionState] = useState<Record<string, Record<string, unknown>>>({});
   const [autoExecuted, setAutoExecuted] = useState<Record<string, boolean>>({});
+  const [runbookState, setRunbookState] = useState<Record<string, RunbookResult | null>>({});
+  const [narrativeState, setNarrativeState] = useState<Record<string, string | null>>({});
   const serviceFilter = searchParams.get("service");
-  const { refreshMs } = useRefreshInterval();
+  const refreshQueryOptions = useRefreshQueryOptions();
   const incidentsQuery = useQuery({
     queryKey: ["recent-incidents"],
     queryFn: fetchRecentIncidents,
-    refetchInterval: refreshMs,
+    ...refreshQueryOptions,
   });
 
   const alertsQuery = useQuery({
     queryKey: ["recent-alerts"],
     queryFn: fetchRecentAlerts,
-    refetchInterval: refreshMs,
+    ...refreshQueryOptions,
   });
 
   const incidentList = (incidentsQuery.data || []).filter((incident) =>
@@ -74,6 +160,20 @@ export function IncidentsPage() {
     remediation_target_host?: string;
     remediation_why?: string;
     remediation_requires_approval?: boolean;
+    diagnostic_typed_action?: TypedAction;
+    remediation_typed_action?: TypedAction;
+    decision_policy?: string;
+    confidence_reason?: string;
+    hard_evidence?: string[];
+    missing_evidence?: string[];
+    evidence_assessment?: {
+      safe_action?: string;
+      confidence_reason?: string;
+      hard_evidence?: string[];
+      missing_evidence?: string[];
+      dependency_hard_evidence?: Record<string, string[]>;
+      best_dependency_target?: string;
+    };
     final_answer?: string;
     analysis_sections?: {
       root_cause?: string;
@@ -86,6 +186,7 @@ export function IncidentsPage() {
       remediation_target_host?: string;
       remediation_why?: string;
       remediation_requires_approval?: boolean;
+      remediation_typed_action?: TypedAction;
     };
     agent_success?: boolean;
   };
@@ -121,6 +222,14 @@ export function IncidentsPage() {
         executionOverlay.analysis_sections?.remediation_requires_approval ??
         source.remediation_requires_approval ??
         source.analysis_sections?.remediation_requires_approval,
+      diagnostic_typed_action:
+        executionOverlay.diagnostic_typed_action ||
+        source.diagnostic_typed_action,
+      remediation_typed_action:
+        executionOverlay.remediation_typed_action ||
+        executionOverlay.analysis_sections?.remediation_typed_action ||
+        source.remediation_typed_action ||
+        source.analysis_sections?.remediation_typed_action,
       remediation_execution_status:
         executionOverlay.remediation_execution_status || source.remediation_execution_status,
       remediation_last_execution_at:
@@ -142,6 +251,7 @@ export function IncidentsPage() {
         command: deepDiveEntry.diagnostic_command,
         original_question: timelineQuery.data.summary || timelineQuery.data.title,
         target_host: deepDiveEntry.target_host,
+        typed_action: deepDiveEntry.diagnostic_typed_action,
       });
     },
     onMutate: () => {
@@ -165,6 +275,10 @@ export function IncidentsPage() {
           analysis_sections: payload.analysis_sections,
           command_output: payload.command_output,
           agent_success: payload.agent_success,
+          diagnostic_typed_action:
+            payload.typed_action || (current[executionKey] as Record<string, unknown> | undefined)?.diagnostic_typed_action,
+          remediation_typed_action:
+            payload.analysis_sections?.remediation_typed_action || (current[executionKey] as Record<string, unknown> | undefined)?.remediation_typed_action,
         },
       }));
       await queryClient.invalidateQueries({ queryKey: ["recent-alerts"] });
@@ -193,6 +307,7 @@ export function IncidentsPage() {
         original_question: `Apply remediation for ${timelineQuery.data.title}`,
         target_host: deepDiveEntry.remediation_target_host,
         execution_type: "remediation",
+        typed_action: deepDiveEntry.remediation_typed_action,
       });
     },
     onMutate: () => {
@@ -216,6 +331,10 @@ export function IncidentsPage() {
           analysis_sections: payload.analysis_sections,
           remediation_command: payload.analysis_sections?.remediation_command || (current[executionKey] as Record<string, unknown> | undefined)?.remediation_command,
           remediation_target_host: payload.analysis_sections?.remediation_target_host || (current[executionKey] as Record<string, unknown> | undefined)?.remediation_target_host,
+          remediation_typed_action:
+            payload.analysis_sections?.remediation_typed_action ||
+            payload.typed_action ||
+            (current[executionKey] as Record<string, unknown> | undefined)?.remediation_typed_action,
         },
       }));
       await queryClient.invalidateQueries({ queryKey: ["recent-alerts"] });
@@ -233,6 +352,25 @@ export function IncidentsPage() {
     },
   });
 
+  const runbookMutation = useMutation({
+    mutationFn: () => generateRunbook(selectedKey!),
+    onSuccess: (data) => {
+      setRunbookState((cur) => ({ ...cur, [selectedKey!]: data }));
+    },
+  });
+
+  const narrativeMutation = useMutation({
+    mutationFn: () => generateTimelineNarrative(selectedKey!),
+    onSuccess: (data) => {
+      setNarrativeState((cur) => ({ ...cur, [selectedKey!]: data.narrative }));
+    },
+  });
+
+  const slaAckMutation = useMutation({
+    mutationFn: () => acknowledgeSla(selectedKey!),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["recent-incidents"] }),
+  });
+
   useEffect(() => {
     if (!deepDiveEntry?.should_execute || !deepDiveEntry?.diagnostic_command || !deepDiveEntry?.target_host) return;
     if (deepDiveEntry.execution_status && deepDiveEntry.execution_status !== "pending") return;
@@ -248,6 +386,22 @@ export function IncidentsPage() {
     executeMutation,
     executionKey,
   ]);
+
+  useEffect(() => {
+    if (!selectedKey || !timelineQuery.data) return;
+    if (timelineQuery.data.latest_runbook) {
+      setRunbookState((current) => ({
+        ...current,
+        [selectedKey]: current[selectedKey] || timelineQuery.data!.latest_runbook || null,
+      }));
+    }
+    if (timelineQuery.data.latest_narrative?.narrative) {
+      setNarrativeState((current) => ({
+        ...current,
+        [selectedKey]: current[selectedKey] || timelineQuery.data!.latest_narrative!.narrative || null,
+      }));
+    }
+  }, [selectedKey, timelineQuery.data]);
 
   return (
     <>
@@ -290,7 +444,7 @@ export function IncidentsPage() {
                 </Link>
                 <Link
                   className="shell__link shell__link--small"
-                  to={`/assistant?incident=${encodeURIComponent(incident.incident_key)}&application=${encodeURIComponent(incident.application)}&service=${encodeURIComponent(incident.primary_service)}`}
+                  to={`/genai?incident=${encodeURIComponent(incident.incident_key)}&application=${encodeURIComponent(incident.application)}&service=${encodeURIComponent(incident.primary_service)}`}
                 >
                   Investigate
                 </Link>
@@ -309,7 +463,7 @@ export function IncidentsPage() {
                   <div className="page-card__meta">
                     <Link
                       className="shell__link shell__link--small"
-                      to={`/assistant?incident=${encodeURIComponent(timelineQuery.data.incident_key)}&application=${encodeURIComponent(timelineQuery.data.application)}&service=${encodeURIComponent(timelineQuery.data.primary_service)}`}
+                      to={`/genai?incident=${encodeURIComponent(timelineQuery.data.incident_key)}&application=${encodeURIComponent(timelineQuery.data.application)}&service=${encodeURIComponent(timelineQuery.data.primary_service)}`}
                     >
                       Investigate In Assistant
                     </Link>
@@ -321,11 +475,72 @@ export function IncidentsPage() {
                         Open Graph
                       </Link>
                     ) : null}
+                    {timelineQuery.data.sla && !timelineQuery.data.sla.response_acknowledged_at ? (
+                      <button
+                        className="shell__link shell__link--small"
+                        style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}
+                        onClick={() => slaAckMutation.mutate()}
+                        disabled={slaAckMutation.isPending}
+                      >
+                        {slaAckMutation.isPending ? "Acknowledging..." : "Acknowledge SLA"}
+                      </button>
+                    ) : null}
+                    <button
+                      className="shell__link shell__link--small"
+                      style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}
+                      onClick={() => runbookMutation.mutate()}
+                      disabled={runbookMutation.isPending || !selectedKey}
+                    >
+                      {runbookMutation.isPending ? "Generating Runbook..." : "Generate Runbook"}
+                    </button>
+                    <button
+                      className="shell__link shell__link--small"
+                      style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}
+                      onClick={() => narrativeMutation.mutate()}
+                      disabled={narrativeMutation.isPending || !selectedKey}
+                    >
+                      {narrativeMutation.isPending ? "Generating Narrative..." : "Post-Incident Narrative"}
+                    </button>
+                    {selectedKey && (timelineQuery.data.latest_runbook || runbookState[selectedKey]) ? (
+                      <a className="shell__link shell__link--small" href={getRunbookDownloadUrl(selectedKey)}>
+                        Download Runbook CSV
+                      </a>
+                    ) : null}
+                    {selectedKey && (timelineQuery.data.latest_narrative?.narrative || narrativeState[selectedKey]) ? (
+                      <a className="shell__link shell__link--small" href={getTimelineNarrativeDownloadUrl(selectedKey)}>
+                        Download Narrative CSV
+                      </a>
+                    ) : null}
                   </div>
                   <div className="incident-detail__stats">
                     <div><span>Status</span><strong>{timelineQuery.data.status}</strong></div>
                     <div><span>Service</span><strong>{timelineQuery.data.primary_service}</strong></div>
                     <div><span>Blast Radius</span><strong>{timelineQuery.data.blast_radius?.length || 0}</strong></div>
+                    {timelineQuery.data.sla ? (
+                      <>
+                        <div>
+                          <span>Priority</span>
+                          <strong style={{ color: slaBadgeColor(timelineQuery.data.sla) }}>
+                            {timelineQuery.data.sla.priority}
+                            {timelineQuery.data.sla.breached ? " ⚠ BREACHED" : ""}
+                          </strong>
+                        </div>
+                        <div>
+                          <span>Response SLA</span>
+                          <strong style={{ color: slaBadgeColor(timelineQuery.data.sla) }}>
+                            {timelineQuery.data.sla.response_acknowledged_at
+                              ? "✓ Acked"
+                              : formatSlaMinutes(timelineQuery.data.sla.response_remaining_minutes)}
+                          </strong>
+                        </div>
+                        <div>
+                          <span>Resolution SLA</span>
+                          <strong style={{ color: slaBadgeColor(timelineQuery.data.sla) }}>
+                            {formatSlaMinutes(timelineQuery.data.sla.resolution_remaining_minutes)}
+                          </strong>
+                        </div>
+                      </>
+                    ) : null}
                     {timelineQuery.data.business_impact && (timelineQuery.data.business_impact.revenue_lost ?? 0) > 0 && (
                       <>
                         <div>
@@ -337,10 +552,6 @@ export function IncidentsPage() {
                         <div>
                           <span>Failed Txns</span>
                           <strong>{timelineQuery.data.business_impact.failed_transactions}</strong>
-                        </div>
-                        <div>
-                          <span>Impact/Hour</span>
-                          <strong>{formatCurrency(timelineQuery.data.business_impact.revenue_per_hour)}</strong>
                         </div>
                       </>
                     )}
@@ -383,6 +594,7 @@ export function IncidentsPage() {
                       ) : null}
                     </div>
                     <div className="incident-deep-dive__evidence">
+                      <DecisionPanel meta={deepDiveEntry} />
                       <article className="incident-deep-dive__panel">
                         <strong>Initial Recommendation</strong>
                         <p>{deepDiveEntry.initial_ai_reasoning || deepDiveEntry.initial_ai_diagnosis || deepDiveEntry.summary || "No initial recommendation available."}</p>
@@ -475,6 +687,37 @@ export function IncidentsPage() {
                     </div>
                   </article>
                 ))}
+
+                {/* M4 — Post-Incident Narrative */}
+                {selectedKey && narrativeState[selectedKey] ? (
+                  <article className="incident-deep-dive">
+                    <div className="eyebrow">Post-Incident Review</div>
+                    <h3>Timeline Narrative</h3>
+                    <div className="incident-deep-dive__evidence">
+                      <article className="incident-deep-dive__panel">
+                        <strong>Chronological Summary</strong>
+                        <p style={{ whiteSpace: "pre-wrap" }}>{narrativeState[selectedKey]}</p>
+                      </article>
+                    </div>
+                  </article>
+                ) : null}
+
+                {/* M6 — Runbook */}
+                {selectedKey && runbookState[selectedKey] ? (
+                  <article className="incident-deep-dive">
+                    <div className="eyebrow">Knowledge Base</div>
+                    <h3>{runbookState[selectedKey]!.title}</h3>
+                    <p style={{ fontSize: "0.8rem", color: "var(--color-muted)" }}>
+                      Saved to Knowledge Base (id: {runbookState[selectedKey]!.runbook_id})
+                    </p>
+                    <div className="incident-deep-dive__evidence">
+                      <article className="incident-deep-dive__panel">
+                        <strong>Runbook Content</strong>
+                        <pre style={{ whiteSpace: "pre-wrap", fontSize: "0.82rem" }}>{runbookState[selectedKey]!.content}</pre>
+                      </article>
+                    </div>
+                  </article>
+                ) : null}
               </div>
             </>
           ) : (

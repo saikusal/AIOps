@@ -1,0 +1,285 @@
+<mxfile host="app.diagrams.net" modified="2026-04-28T13:00:00.000Z" agent="Codex" version="24.7.17">
+  <diagram id="overview" name="01 Big Picture">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="t1" value="AIOps Platform: Simple End-to-End Story" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=26;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="520" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="s1" value="1. Something goes wrong&#xa;An alert, outage, anomaly, or operator report enters the platform." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="70" y="220" width="220" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="s2" value="2. The platform understands the situation&#xa;It connects the issue to the right application, service, and timeline." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="360" y="220" width="220" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="s3" value="3. AI investigates with evidence&#xa;It looks at health signals, logs, traces, dependencies, and past runbooks." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="650" y="220" width="240" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="s4" value="4. The platform decides what is safe&#xa;Policies check whether the recommendation is allowed, blocked, or needs approval." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="960" y="220" width="240" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="s5" value="5. Action is taken carefully&#xa;The system can suggest, simulate, approve, execute, and verify a fix." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="1270" y="220" width="220" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="s6" value="6. The platform learns&#xa;Every result improves future recommendations, rankings, and safety decisions." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="670" y="470" width="240" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="s7" value="People see the story in dashboards&#xa;Alerts, incidents, investigations, predictions, and operations all stay visible." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="980" y="470" width="320" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="s1" target="s2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="s2" target="s3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="s3" target="s4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="s4" target="s5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="s5" target="s6"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="s6" target="s3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="s5" target="s7"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="incident" name="02 How An Incident Starts">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="it1" value="How An Incident Starts" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=26;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="360" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="it2" value="Problem signal appears&#xa;Examples: service down, error spike, slow response, failed deployment" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="70" y="220" width="250" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="it3" value="Platform receives the signal&#xa;The alert is captured and stored." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="400" y="220" width="220" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="it4" value="Platform cleans and understands it&#xa;It extracts service name, severity, environment, timing, and labels." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="700" y="220" width="260" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="it5" value="Is this part of an existing incident?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=16" vertex="1" parent="1">
+          <mxGeometry x="1040" y="230" width="170" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="it6" value="Yes: update the current incident&#xa;Add a fresh timeline event and refresh its state." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="1290" y="120" width="240" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="it7" value="No: create a new incident&#xa;Open a new case with the first evidence snapshot." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="1290" y="310" width="240" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="it8" value="Next step&#xa;The incident is ready for AI investigation, human review, and safe action planning." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="670" y="500" width="300" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="ie1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="it2" target="it3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ie2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="it3" target="it4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ie3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="it4" target="it5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ie4" value="Yes" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="it5" target="it6"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ie5" value="No" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="it5" target="it7"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ie6" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="it6" target="it8"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ie7" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="it7" target="it8"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="ai-investigation" name="03 How AI Investigates">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="ai1" value="How AI Investigates an Incident" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=26;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="440" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="lane1" value="Question" style="swimlane;html=1;startSize=30;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;fontSize=16" vertex="1" parent="1">
+          <mxGeometry x="50" y="120" width="220" height="520" as="geometry"/>
+        </mxCell>
+        <mxCell id="lane2" value="Evidence Gathering" style="swimlane;html=1;startSize=30;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;fontSize=16" vertex="1" parent="1">
+          <mxGeometry x="310" y="120" width="310" height="520" as="geometry"/>
+        </mxCell>
+        <mxCell id="lane3" value="AI Reasoning" style="swimlane;html=1;startSize=30;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;fontSize=16" vertex="1" parent="1">
+          <mxGeometry x="660" y="120" width="310" height="520" as="geometry"/>
+        </mxCell>
+        <mxCell id="lane4" value="Answer" style="swimlane;html=1;startSize=30;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;fontSize=16" vertex="1" parent="1">
+          <mxGeometry x="1010" y="120" width="310" height="520" as="geometry"/>
+        </mxCell>
+        <mxCell id="a2" value="Operator asks&#xa;What happened?&#xa;What is impacted?&#xa;What should we verify next?" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=15;spacing=8" vertex="1" parent="lane1">
+          <mxGeometry x="20" y="80" width="180" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="a3" value="Platform collects evidence&#xa;Incident timeline&#xa;Service map&#xa;Health metrics&#xa;Logs&#xa;Traces&#xa;Runbooks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=15;spacing=8" vertex="1" parent="lane2">
+          <mxGeometry x="30" y="70" width="240" height="190" as="geometry"/>
+        </mxCell>
+        <mxCell id="a4" value="Evidence is cleaned and summarized&#xa;Only the most useful signals are passed forward." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=15;spacing=8" vertex="1" parent="lane2">
+          <mxGeometry x="30" y="310" width="240" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="a5" value="AI compares signals&#xa;What supports the theory?&#xa;What contradicts it?&#xa;Which system is the likely target?" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=15;spacing=8" vertex="1" parent="lane3">
+          <mxGeometry x="30" y="80" width="240" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="a6" value="AI builds a grounded answer&#xa;It must stay tied to evidence and suggest the next verification step." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=15;spacing=8" vertex="1" parent="lane3">
+          <mxGeometry x="30" y="310" width="240" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="a7" value="Operator receives&#xa;Plain-language summary&#xa;Confidence level&#xa;Supporting evidence&#xa;Conflicting evidence&#xa;Next step" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#b85450;fontSize=15;spacing=8" vertex="1" parent="lane4">
+          <mxGeometry x="30" y="170" width="240" height="190" as="geometry"/>
+        </mxCell>
+        <mxCell id="ae1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="a2" target="a3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="a3" target="a4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="a4" target="a5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="a5" target="a6"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae5" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="a6" target="a7"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="llm-payload" name="04 What We Send To AI">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="lp1" value="What We Send To AI" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=26;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="320" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="lp2" value="We do not send raw noise.&#xa;The platform first prepares a clean evidence pack." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=18;spacing=10;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="70" y="110" width="520" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="lp3" value="What goes in" style="swimlane;html=1;startSize=30;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;fontSize=16" vertex="1" parent="1">
+          <mxGeometry x="70" y="240" width="350" height="430" as="geometry"/>
+        </mxCell>
+        <mxCell id="lp4" value="Question from the operator" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=15" vertex="1" parent="lp3">
+          <mxGeometry x="30" y="50" width="280" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="lp5" value="Incident or service scope&#xa;Which application, service, host, or case are we talking about?" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=15;spacing=8" vertex="1" parent="lp3">
+          <mxGeometry x="30" y="130" width="280" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="lp6" value="Compact evidence&#xa;Timeline highlights, health metrics, logs, traces, dependencies, runbooks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=15;spacing=8" vertex="1" parent="lp3">
+          <mxGeometry x="30" y="240" width="280" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="lp7" value="Instructions to stay safe&#xa;Use only evidence, mention uncertainty, avoid guessing, return structured output" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=15;spacing=8" vertex="1" parent="lp3">
+          <mxGeometry x="30" y="360" width="280" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="lp8" value="What comes back" style="swimlane;html=1;startSize=30;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;fontSize=16" vertex="1" parent="1">
+          <mxGeometry x="500" y="240" width="380" height="430" as="geometry"/>
+        </mxCell>
+        <mxCell id="lp9" value="Plain-language answer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=15" vertex="1" parent="lp8">
+          <mxGeometry x="40" y="60" width="290" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="lp10" value="Confidence level&#xa;How certain the AI is" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=15" vertex="1" parent="lp8">
+          <mxGeometry x="40" y="140" width="290" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="lp11" value="Supporting and conflicting evidence&#xa;Why the answer may be right, and what still looks inconsistent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=15;spacing=8" vertex="1" parent="lp8">
+          <mxGeometry x="40" y="230" width="290" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="lp12" value="Suggested next step&#xa;What should be checked or done next" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=15" vertex="1" parent="lp8">
+          <mxGeometry x="40" y="350" width="290" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="lp13" value="Why this matters for business stakeholders&#xa;The platform turns complex telemetry into one auditable, explainable answer." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=18;spacing=10;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="980" y="310" width="460" height="170" as="geometry"/>
+        </mxCell>
+        <mxCell id="lpe1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="lp3" target="lp8"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="lpe2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="lp8" target="lp13"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="safe-action" name="05 How Safe Action Happens">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="sa1" value="How Safe Action Happens" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=26;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="380" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="sa2" value="AI or operator proposes an action&#xa;Examples: restart a service, collect diagnostics, or run a fix" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="70" y="230" width="240" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="sa3" value="The platform converts it into a clear action type&#xa;Who, what, where, and why are made explicit." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="380" y="230" width="250" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="sa4" value="Safety policy checks it&#xa;Allowed?&#xa;Blocked?&#xa;Needs approval?" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="710" y="230" width="220" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="sa5" value="Does it pass safety?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=16" vertex="1" parent="1">
+          <mxGeometry x="1000" y="245" width="150" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="sa6" value="No or not yet&#xa;The platform stops, asks for approval, or explains why it is blocked." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="1220" y="120" width="250" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="sa7" value="Yes&#xa;The platform executes carefully and records the action." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="1220" y="320" width="250" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="sa8" value="Verification happens after execution&#xa;Did the action help?&#xa;Did the system recover?&#xa;Should we rollback or escalate?" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="760" y="500" width="340" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="sa9" value="Everything is auditable&#xa;Who approved it, what ran, what changed, and what the outcome was." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="1170" y="520" width="300" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="sae1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="sa2" target="sa3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="sae2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="sa3" target="sa4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="sae3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="sa4" target="sa5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="sae4" value="No" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="sa5" target="sa6"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="sae5" value="Yes" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="sa5" target="sa7"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="sae6" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="sa7" target="sa8"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="sae7" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="sa8" target="sa9"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="learning" name="06 How The Platform Learns">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="le1" value="How The Platform Learns Over Time" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=26;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="470" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="le2" value="Every investigation and action creates history" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=18;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="70" y="120" width="430" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="le3" value="1. Results are captured&#xa;Was the recommendation used?&#xa;Did the action help?&#xa;Was approval needed?&#xa;Did the system recover?" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="70" y="260" width="250" height="170" as="geometry"/>
+        </mxCell>
+        <mxCell id="le4" value="2. Actions are ranked&#xa;The platform learns which actions tend to work best for which situations." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="390" y="260" width="250" height="170" as="geometry"/>
+        </mxCell>
+        <mxCell id="le5" value="3. Scenarios are replayed&#xa;Past incidents can be re-evaluated to see whether new behavior is better or worse." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="710" y="260" width="260" height="170" as="geometry"/>
+        </mxCell>
+        <mxCell id="le6" value="4. Human feedback matters&#xa;Operators can reinforce what was useful and flag what was risky or noisy." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="1040" y="260" width="260" height="170" as="geometry"/>
+        </mxCell>
+        <mxCell id="le7" value="5. Future recommendations improve&#xa;Better ranking, safer automation, stronger explanations, and clearer operator trust." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=16;spacing=8" vertex="1" parent="1">
+          <mxGeometry x="1370" y="250" width="250" height="190" as="geometry"/>
+        </mxCell>
+        <mxCell id="lee1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="le3" target="le4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="lee2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="le4" target="le5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="lee3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="le5" target="le6"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="lee4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=3" edge="1" parent="1" source="le6" target="le7"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="dashboards" name="07 What Users See">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="d1" value="What Different Users See" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=26;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="360" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="d2" value="Operations Team" style="swimlane;html=1;startSize=30;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;fontSize=16" vertex="1" parent="1">
+          <mxGeometry x="70" y="130" width="280" height="520" as="geometry"/>
+        </mxCell>
+        <mxCell id="d3" value="Live alerts&#xa;Open incidents&#xa;Investigation answers&#xa;Approved or blocked actions" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=15;spacing=8" vertex="1" parent="d2">
+          <mxGeometry x="30" y="80" width="220" height="170" as="geometry"/>
+        </mxCell>
+        <mxCell id="d4" value="Engineering Team" style="swimlane;html=1;startSize=30;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;fontSize=16" vertex="1" parent="1">
+          <mxGeometry x="410" y="130" width="280" height="520" as="geometry"/>
+        </mxCell>
+        <mxCell id="d5" value="Dependency maps&#xa;Metrics, logs, traces&#xa;Root-cause reasoning&#xa;Suggested remediation steps" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=15;spacing=8" vertex="1" parent="d4">
+          <mxGeometry x="30" y="80" width="220" height="170" as="geometry"/>
+        </mxCell>
+        <mxCell id="d6" value="Leaders / Stakeholders" style="swimlane;html=1;startSize=30;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;fontSize=16" vertex="1" parent="1">
+          <mxGeometry x="750" y="130" width="320" height="520" as="geometry"/>
+        </mxCell>
+        <mxCell id="d7" value="Business-friendly view&#xa;What broke&#xa;What is impacted&#xa;What was done&#xa;Was it safe&#xa;Did service recover" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=15;spacing=8" vertex="1" parent="d6">
+          <mxGeometry x="40" y="80" width="240" height="190" as="geometry"/>
+        </mxCell>
+        <mxCell id="d8" value="Governance / Audit" style="swimlane;html=1;startSize=30;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;fontSize=16" vertex="1" parent="1">
+          <mxGeometry x="1130" y="130" width="320" height="520" as="geometry"/>
+        </mxCell>
+        <mxCell id="d9" value="Who approved actions&#xa;Which policies applied&#xa;What evidence was used&#xa;What outcomes were recorded" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#b85450;fontSize=15;spacing=8" vertex="1" parent="d8">
+          <mxGeometry x="40" y="80" width="240" height="180" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

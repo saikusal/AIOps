@@ -22,8 +22,8 @@ groups:
           description: "Postgres active sessions for the aiops database are above 25."
 
       - alert: DemoAppErrorsHigh
-        expr: sum(rate(demo_http_requests_total{status=~"5.."}[5m])) by (service) > 0.1
-        for: 30s
+        expr: sum(rate(demo_http_requests_total{status=~"5.."}[2m])) by (service) > 0.1
+        for: 15s
         labels:
           severity: critical
           source: demo

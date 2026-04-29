@@ -1,9 +1,41 @@
+export type TypedAction = {
+  action: string;
+  target?: string;
+  target_host?: string;
+  service?: string;
+  reason?: string;
+  requires_approval?: boolean;
+  command?: string;
+  validation_plan?: string[];
+  metadata?: Record<string, unknown>;
+};
+
+export type WorkflowStage = {
+  stage: string;
+  status: string;
+  summary: string;
+  details?: Record<string, unknown>;
+};
+
 export type AlertRecommendation = {
   alert_id: string;
   alert_name: string;
   status: string;
   created_at?: string;
   target_host?: string;
+  decision_policy?: string;
+  confidence_reason?: string;
+  hard_evidence?: string[];
+  missing_evidence?: string[];
+  evidence_assessment?: {
+    safe_action?: string;
+    confidence_reason?: string;
+    hard_evidence?: string[];
+    missing_evidence?: string[];
+    dependency_hard_evidence?: Record<string, string[]>;
+    best_dependency_target?: string;
+  };
+  labels?: Record<string, string>;
   summary?: string;
   initial_ai_diagnosis?: string;
   initial_ai_reasoning?: string;
@@ -15,6 +47,8 @@ export type AlertRecommendation = {
   last_execution_at?: string;
   command_output?: string;
   final_answer?: string;
+  diagnostic_typed_action?: TypedAction;
+  remediation_typed_action?: TypedAction;
   analysis_sections?: {
     root_cause?: string;
     evidence?: string;
@@ -26,6 +60,7 @@ export type AlertRecommendation = {
     remediation_target_host?: string;
     remediation_why?: string;
     remediation_requires_approval?: boolean;
+    remediation_typed_action?: TypedAction;
   };
   remediation_command?: string;
   remediation_target_host?: string;
@@ -195,7 +230,16 @@ export type ChatReply = {
   session_id?: string;
   question?: string;
   answer?: string;
+  confidence?: "high" | "medium" | "low";
+  confidence_reason?: string;
+  hard_evidence?: string[];
+  missing_evidence?: string[];
+  decision_policy?: string;
+  supporting_evidence?: string[];
+  contradicting_evidence?: string[];
+  next_verification_step?: string;
   follow_up_questions?: string[];
+  workflow?: WorkflowStage[];
   suggested_command?: string;
   target_host?: string;
   is_destructive?: boolean;
@@ -234,6 +278,7 @@ export type IncidentSummary = {
   title: string;
   status: string;
   severity: string;
+  priority: string;
   primary_service: string;
   target_host: string;
   summary: string;
@@ -267,10 +312,23 @@ export type IncidentSummary = {
     impact_level?: string;
     data_source?: string;
   } | null;
+  sla?: {
+    priority: string;
+    response_due_at: string | null;
+    resolution_due_at: string | null;
+    response_acknowledged_at: string | null;
+    response_remaining_minutes: number | null;
+    resolution_remaining_minutes: number | null;
+    response_breached: boolean;
+    resolution_breached: boolean;
+    breached: boolean;
+  } | null;
 };
 
 export type IncidentTimeline = IncidentSummary & {
   linked_recommendation?: AlertRecommendation | null;
+  latest_runbook?: RunbookResult & { created_at: string } | null;
+  latest_narrative?: { narrative: string; created_at: string | null } | null;
   timeline: Array<{
     event_type: string;
     title: string;
@@ -283,6 +341,15 @@ export type IncidentTimeline = IncidentSummary & {
 export type CommandExecutionResult = {
   execution_type?: string;
   final_answer: string;
+  typed_action?: TypedAction;
+  typed_action_summary?: string;
+  workflow?: WorkflowStage[];
+  ranking?: Record<string, unknown>;
+  behavior_version?: Record<string, unknown>;
+  execution_intent_id?: string;
+  idempotency_key?: string;
+  rollback_metadata?: Record<string, unknown>;
+  replay_scores?: Record<string, unknown>;
   analysis_sections?: {
     root_cause?: string;
     evidence?: string;
@@ -294,6 +361,7 @@ export type CommandExecutionResult = {
     remediation_target_host?: string;
     remediation_why?: string;
     remediation_requires_approval?: boolean;
+    remediation_typed_action?: TypedAction;
   };
   command_output: string;
   agent_success: boolean;
@@ -556,23 +624,41 @@ export async function deleteDocument(deletePath: string): Promise<void> {
 
 export async function executeDiagnosticCommand(payload: {
   alert_id?: string;
-  command: string;
+  command?: string;
   original_question: string;
-  target_host: string;
+  target_host?: string;
   execution_type?: "diagnostic" | "remediation";
+  typed_action?: TypedAction;
+  dry_run?: boolean;
+  approval_token?: string;
+  idempotency_key?: string;
+  rollback_metadata?: Record<string, unknown>;
 }): Promise<CommandExecutionResult> {
-  const response = await fetch("/genai/execute_command/", {
-    method: "POST",
-    credentials: "include",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "X-CSRFToken": getCsrfToken(),
-    },
-    body: JSON.stringify(payload),
-  });
+  const send = async (requestPayload: typeof payload) =>
+    fetch("/genai/execute_command/", {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "X-CSRFToken": getCsrfToken(),
+      },
+      body: JSON.stringify(requestPayload),
+    });
 
-  const body = (await response.json()) as CommandExecutionResult & { error?: string; detail?: string };
+  let response = await send(payload);
+  let body = (await response.json()) as CommandExecutionResult & {
+    error?: string;
+    detail?: string;
+    approval_required?: boolean;
+    approval_token?: string;
+  };
+
+  if (response.status === 409 && body.approval_required && body.approval_token) {
+    response = await send({ ...payload, approval_token: body.approval_token });
+    body = (await response.json()) as CommandExecutionResult & { error?: string; detail?: string };
+  }
+
   if (!response.ok) {
     throw new Error(body.detail || body.error || `Command execution failed: ${response.status}`);
   }
@@ -812,4 +898,132 @@ export async function purgeCache(prefix?: string): Promise<{ deleted: number }> 
     throw new Error(body.error || `Purge failed: ${response.status}`);
   }
   return response.json();
+}
+
+// ---------------------------------------------------------------------------
+// M6 — Runbook Generator
+// ---------------------------------------------------------------------------
+
+export type RunbookResult = {
+  runbook_id: number;
+  title: string;
+  content: string;
+};
+
+export async function generateRunbook(incidentKey: string): Promise<RunbookResult> {
+  const response = await fetch(`/genai/incidents/${encodeURIComponent(incidentKey)}/generate-runbook/`, {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json", "X-CSRFToken": getCsrfToken() },
+  });
+  const body = (await response.json()) as RunbookResult & { error?: string; detail?: string };
+  if (!response.ok) throw new Error(body.detail || body.error || `Runbook generation failed: ${response.status}`);
+  return body;
+}
+
+// ---------------------------------------------------------------------------
+// M6 — Anomaly Explainer
+// ---------------------------------------------------------------------------
+
+export type AnomalyExplanation = {
+  alert_name: string;
+  explanation: string;
+};
+
+export async function explainAnomaly(payload: {
+  alert_name: string;
+  target_host?: string;
+  labels?: Record<string, string>;
+  summary?: string;
+  incident_key?: string;
+}): Promise<AnomalyExplanation> {
+  const response = await fetch("/genai/anomaly-explain/", {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+    body: JSON.stringify(payload),
+  });
+  const body = (await response.json()) as AnomalyExplanation & { error?: string; detail?: string };
+  if (!response.ok) throw new Error(body.detail || body.error || `Anomaly explain failed: ${response.status}`);
+  return body;
+}
+
+// ---------------------------------------------------------------------------
+// M6 — Change Risk Explainer
+// ---------------------------------------------------------------------------
+
+export type ChangeRiskAnalysis = {
+  risk_score: number;
+  risk_level: string;
+  affected_services: string[];
+  recommended_window: string;
+  rollback_steps: string[];
+  risk_factors: string[];
+  mitigations: string[];
+  raw?: string;
+};
+
+export type ChangeRiskResult = {
+  service: string;
+  change_description: string;
+  planned_at: string;
+  change_type: string;
+  analysis: ChangeRiskAnalysis;
+  blast_radius: string[];
+  depends_on: string[];
+};
+
+export async function analyzeChangeRisk(payload: {
+  service: string;
+  change_description: string;
+  planned_at?: string;
+  change_type?: string;
+}): Promise<ChangeRiskResult> {
+  const response = await fetch("/genai/change-risk/", {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+    body: JSON.stringify(payload),
+  });
+  const body = (await response.json()) as ChangeRiskResult & { error?: string; detail?: string };
+  if (!response.ok) throw new Error(body.detail || body.error || `Change risk analysis failed: ${response.status}`);
+  return body;
+}
+
+// ---------------------------------------------------------------------------
+// M4 — SLA Acknowledge
+// ---------------------------------------------------------------------------
+
+export async function acknowledgeSla(incidentKey: string): Promise<{ status: string }> {
+  const response = await fetch(`/genai/incidents/${encodeURIComponent(incidentKey)}/acknowledge-sla/`, {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json", "X-CSRFToken": getCsrfToken() },
+  });
+  const body = (await response.json()) as { status: string; error?: string };
+  if (!response.ok) throw new Error(body.error || `SLA acknowledge failed: ${response.status}`);
+  return body;
+}
+
+// ---------------------------------------------------------------------------
+// M4 — Post-Incident Timeline Narrative
+// ---------------------------------------------------------------------------
+
+export async function generateTimelineNarrative(incidentKey: string): Promise<{ incident_key: string; narrative: string }> {
+  const response = await fetch(`/genai/incidents/${encodeURIComponent(incidentKey)}/timeline-narrative/`, {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json", "X-CSRFToken": getCsrfToken() },
+  });
+  const body = (await response.json()) as { incident_key: string; narrative: string; error?: string; detail?: string };
+  if (!response.ok) throw new Error(body.detail || body.error || `Narrative generation failed: ${response.status}`);
+  return body;
+}
+
+export function getRunbookDownloadUrl(incidentKey: string): string {
+  return `/genai/incidents/${encodeURIComponent(incidentKey)}/runbook/download/`;
+}
+
+export function getTimelineNarrativeDownloadUrl(incidentKey: string): string {
+  return `/genai/incidents/${encodeURIComponent(incidentKey)}/timeline-narrative/download/`;
 }

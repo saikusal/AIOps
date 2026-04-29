@@ -60,6 +60,93 @@ class ChatMessage(models.Model):
         return f"{self.session.session_id}:{self.role}:{self.created_at.isoformat()}"
 
 
+class InvestigationRun(models.Model):
+    STATUS_CHOICES = (
+        ("running", "Running"),
+        ("completed", "Completed"),
+        ("failed", "Failed"),
+    )
+
+    run_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    session = models.ForeignKey("ChatSession", null=True, blank=True, on_delete=models.SET_NULL, related_name="investigation_runs")
+    user = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="aiops_investigation_runs")
+    incident = models.ForeignKey("Incident", null=True, blank=True, on_delete=models.SET_NULL, related_name="investigation_runs")
+    route = models.CharField(max_length=32, default="investigation")
+    question = models.TextField()
+    application = models.CharField(max_length=120, blank=True, default="")
+    service = models.CharField(max_length=120, blank=True, default="")
+    target_host = models.CharField(max_length=255, blank=True, default="")
+    scope_json = models.JSONField(default=dict, blank=True)
+    evidence_summary = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="running")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"InvestigationRun<{self.run_id}>"
+
+
+class ToolInvocation(models.Model):
+    STATUS_CHOICES = (
+        ("success", "Success"),
+        ("error", "Error"),
+    )
+
+    invocation_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    investigation_run = models.ForeignKey("InvestigationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="tool_invocations")
+    session = models.ForeignKey("ChatSession", null=True, blank=True, on_delete=models.SET_NULL, related_name="tool_invocations")
+    user = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="aiops_tool_invocations")
+    incident = models.ForeignKey("Incident", null=True, blank=True, on_delete=models.SET_NULL, related_name="tool_invocations")
+    server_name = models.CharField(max_length=64)
+    tool_name = models.CharField(max_length=128)
+    request_json = models.JSONField(default=dict, blank=True)
+    response_json = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="success")
+    latency_ms = models.PositiveIntegerField(default=0)
+    error_detail = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.server_name}:{self.tool_name}:{self.invocation_id}"
+
+
+PRIORITY_CHOICES = (
+    ("P1", "P1 - Critical"),
+    ("P2", "P2 - High"),
+    ("P3", "P3 - Medium"),
+    ("P4", "P4 - Low"),
+)
+
+# Default SLA windows (minutes) used when seeding SLAPolicy
+SLA_DEFAULTS = {
+    "P1": (15, 60),
+    "P2": (30, 240),
+    "P3": (120, 480),
+    "P4": (480, 1440),
+}
+
+
+class SLAPolicy(models.Model):
+    """Configurable SLA matrix per priority tier."""
+    priority = models.CharField(max_length=4, choices=PRIORITY_CHOICES, unique=True)
+    response_minutes = models.PositiveIntegerField(default=60)
+    resolution_minutes = models.PositiveIntegerField(default=240)
+    escalation_contacts = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        ordering = ["priority"]
+
+    def __str__(self):
+        return f"SLA-{self.priority} resp={self.response_minutes}m res={self.resolution_minutes}m"
+
+
 class Incident(models.Model):
     STATUS_CHOICES = (
         ("open", "Open"),
@@ -72,6 +159,7 @@ class Incident(models.Model):
     title = models.CharField(max_length=255)
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default="open")
     severity = models.CharField(max_length=32, blank=True, default="warning")
+    priority = models.CharField(max_length=4, choices=PRIORITY_CHOICES, default="P3")
     primary_service = models.CharField(max_length=120, blank=True, default="")
     target_host = models.CharField(max_length=255, blank=True, default="")
     summary = models.TextField(blank=True, default="")
@@ -82,6 +170,10 @@ class Incident(models.Model):
     annotations = models.JSONField(default=dict, blank=True)
     opened_at = models.DateTimeField(auto_now_add=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
+    # SLA tracking
+    sla_response_due_at = models.DateTimeField(null=True, blank=True)
+    sla_resolution_due_at = models.DateTimeField(null=True, blank=True)
+    sla_response_acknowledged_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -317,3 +409,202 @@ class TargetOnboardingRequest(models.Model):
 
     def __str__(self):
         return f"{self.name}:{self.hostname}"
+
+
+class Runbook(models.Model):
+    """AI-generated runbook produced from incident RCA and remediation steps."""
+    incident = models.ForeignKey(
+        Incident, on_delete=models.CASCADE, related_name="runbooks", null=True, blank=True
+    )
+    title = models.CharField(max_length=255)
+    content = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.title
+
+
+class AgentBehaviorVersion(models.Model):
+    behavior_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    name = models.CharField(max_length=120, default="default")
+    prompt_version = models.CharField(max_length=120, default="prompt-v1")
+    policy_version = models.CharField(max_length=120, default="policy-v1")
+    model_version = models.CharField(max_length=120, default="model-v1")
+    evidence_rules_version = models.CharField(max_length=120, default="evidence-v1")
+    ranking_version = models.CharField(max_length=120, default="ranking-v1")
+    metadata_json = models.JSONField(default=dict, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"{self.name}:{self.behavior_id}"
+
+
+class ExecutionIntent(models.Model):
+    STATUS_CHOICES = (
+        ("planned", "Planned"),
+        ("approval_required", "Approval Required"),
+        ("approved", "Approved"),
+        ("dry_run", "Dry Run"),
+        ("blocked", "Blocked"),
+        ("executing", "Executing"),
+        ("completed", "Completed"),
+        ("failed", "Failed"),
+        ("expired", "Expired"),
+    )
+
+    intent_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    session = models.ForeignKey(ChatSession, null=True, blank=True, on_delete=models.SET_NULL, related_name="execution_intents")
+    user = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="aiops_execution_intents")
+    incident = models.ForeignKey(Incident, null=True, blank=True, on_delete=models.SET_NULL, related_name="execution_intents")
+    behavior_version = models.ForeignKey(AgentBehaviorVersion, null=True, blank=True, on_delete=models.SET_NULL, related_name="execution_intents")
+    execution_type = models.CharField(max_length=32, default="diagnostic")
+    action_type = models.CharField(max_length=64, blank=True, default="")
+    service = models.CharField(max_length=120, blank=True, default="")
+    environment = models.CharField(max_length=64, blank=True, default="")
+    target_host = models.CharField(max_length=255, blank=True, default="")
+    command = models.TextField(blank=True, default="")
+    action_json = models.JSONField(default=dict, blank=True)
+    action_signature = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    request_signature = models.CharField(max_length=128, blank=True, default="")
+    idempotency_key = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    requires_approval = models.BooleanField(default=False)
+    approval_token_hash = models.CharField(max_length=128, blank=True, default="")
+    approval_expires_at = models.DateTimeField(null=True, blank=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    approved_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="approved_execution_intents")
+    dry_run = models.BooleanField(default=False)
+    rollback_json = models.JSONField(default=dict, blank=True)
+    policy_decision_json = models.JSONField(default=dict, blank=True)
+    ranking_json = models.JSONField(default=dict, blank=True)
+    verification_json = models.JSONField(default=dict, blank=True)
+    response_json = models.JSONField(default=dict, blank=True)
+    context_fingerprint = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default="planned")
+    executed_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.intent_id}:{self.execution_type}:{self.status}"
+
+
+class RemediationOutcome(models.Model):
+    outcome_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    execution_intent = models.ForeignKey(ExecutionIntent, on_delete=models.CASCADE, related_name="outcomes")
+    incident = models.ForeignKey(Incident, null=True, blank=True, on_delete=models.SET_NULL, related_name="remediation_outcomes")
+    action_type = models.CharField(max_length=64, blank=True, default="")
+    service = models.CharField(max_length=120, blank=True, default="")
+    environment = models.CharField(max_length=64, blank=True, default="")
+    context_fingerprint = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    action_signature = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    success = models.BooleanField(default=False)
+    verification_status = models.CharField(max_length=64, blank=True, default="")
+    time_to_recovery_seconds = models.PositiveIntegerField(null=True, blank=True)
+    recurrence_within_minutes = models.PositiveIntegerField(null=True, blank=True)
+    blast_radius_risk = models.FloatField(null=True, blank=True)
+    operator_override = models.BooleanField(default=False)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.action_type}:{self.service}:{self.success}"
+
+
+class ReplayScenario(models.Model):
+    scenario_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    incident = models.ForeignKey(Incident, null=True, blank=True, on_delete=models.SET_NULL, related_name="replay_scenarios")
+    session = models.ForeignKey(ChatSession, null=True, blank=True, on_delete=models.SET_NULL, related_name="replay_scenarios")
+    source = models.CharField(max_length=32, default="execution")
+    title = models.CharField(max_length=255, blank=True, default="")
+    alert_payload_json = models.JSONField(default=dict, blank=True)
+    metrics_snapshot_json = models.JSONField(default=dict, blank=True)
+    logs_snapshot_json = models.JSONField(default=dict, blank=True)
+    traces_snapshot_json = models.JSONField(default=dict, blank=True)
+    dependency_context_json = models.JSONField(default=dict, blank=True)
+    prior_incident_memory_json = models.JSONField(default=dict, blank=True)
+    chosen_action_json = models.JSONField(default=dict, blank=True)
+    outcome_json = models.JSONField(default=dict, blank=True)
+    behavior_version_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.source}:{self.scenario_id}"
+
+
+class ReplayEvaluation(models.Model):
+    STATUS_CHOICES = (
+        ("completed", "Completed"),
+        ("failed", "Failed"),
+    )
+
+    evaluation_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    scenario = models.ForeignKey(ReplayScenario, on_delete=models.CASCADE, related_name="evaluations")
+    execution_intent = models.ForeignKey(ExecutionIntent, null=True, blank=True, on_delete=models.SET_NULL, related_name="replay_evaluations")
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default="completed")
+    scores_json = models.JSONField(default=dict, blank=True)
+    summary_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.evaluation_id}:{self.status}"
+
+
+class OperatorFeedback(models.Model):
+    FEEDBACK_CHOICES = (
+        ("accepted", "Accepted"),
+        ("rejected", "Rejected"),
+        ("edited", "Edited"),
+        ("manual_fix", "Manual Fix Applied"),
+    )
+
+    QUALITY_CHOICES = (
+        ("excellent", "Excellent"),
+        ("good", "Good"),
+        ("partial", "Partial"),
+        ("poor", "Poor"),
+        ("unknown", "Unknown"),
+    )
+
+    feedback_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    execution_intent = models.ForeignKey(ExecutionIntent, null=True, blank=True, on_delete=models.SET_NULL, related_name="operator_feedback")
+    incident = models.ForeignKey(Incident, null=True, blank=True, on_delete=models.SET_NULL, related_name="operator_feedback")
+    user = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="aiops_operator_feedback")
+    feedback_type = models.CharField(max_length=32, choices=FEEDBACK_CHOICES)
+    outcome_quality = models.CharField(max_length=32, choices=QUALITY_CHOICES, default="unknown")
+    service = models.CharField(max_length=120, blank=True, default="")
+    environment = models.CharField(max_length=64, blank=True, default="")
+    action_type = models.CharField(max_length=64, blank=True, default="")
+    context_fingerprint = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    original_action_json = models.JSONField(default=dict, blank=True)
+    submitted_action_json = models.JSONField(default=dict, blank=True)
+    notes = models.TextField(blank=True, default="")
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.feedback_type}:{self.service}:{self.created_at.isoformat()}"

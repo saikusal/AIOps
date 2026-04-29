@@ -18,6 +18,15 @@ const options: Array<{ label: string; value: number | false }> = [
   { label: "60s", value: 60000 },
 ];
 
+const supportedRefreshValues = new Set(options.map((option) => option.value));
+
+type RefreshQueryOptions = {
+  refetchInterval: number | false;
+  refetchOnWindowFocus: boolean;
+  refetchOnReconnect: boolean;
+  refetchOnMount: boolean;
+};
+
 export function RefreshProvider({ children }: { children: ReactNode }) {
   const [refreshMs, setRefreshMsState] = useState<number | false>(15000);
 
@@ -29,9 +38,11 @@ export function RefreshProvider({ children }: { children: ReactNode }) {
       return;
     }
     const numeric = Number(stored);
-    if (!Number.isNaN(numeric) && numeric > 0) {
+    if (!Number.isNaN(numeric) && numeric > 0 && supportedRefreshValues.has(numeric)) {
       setRefreshMsState(numeric);
+      return;
     }
+    window.localStorage.setItem(REFRESH_STORAGE_KEY, "15000");
   }, []);
 
   const setRefreshMs = (value: number | false) => {
@@ -57,4 +68,27 @@ export function useRefreshInterval() {
     throw new Error("useRefreshInterval must be used inside RefreshProvider");
   }
   return context;
+}
+
+export function buildRefreshQueryOptions(refreshMs: number | false): RefreshQueryOptions {
+  if (refreshMs === false) {
+    return {
+      refetchInterval: false,
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+      refetchOnMount: false,
+    };
+  }
+
+  return {
+    refetchInterval: refreshMs,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
+    refetchOnMount: true,
+  };
+}
+
+export function useRefreshQueryOptions() {
+  const { refreshMs } = useRefreshInterval();
+  return useMemo(() => buildRefreshQueryOptions(refreshMs), [refreshMs]);
 }

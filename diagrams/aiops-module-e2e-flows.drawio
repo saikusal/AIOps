@@ -1,0 +1,450 @@
+<mxfile host="app.diagrams.net" modified="2026-04-28T12:00:00.000Z" agent="Codex" version="24.7.17">
+  <diagram id="module-map" name="01 Module Map">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="title1" value="AIOps Module Map" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=24;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="300" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="u1" value="Alert Sources&#xa;Prometheus Alertmanager&#xa;VictoriaMetrics alerts&#xa;Manual operator events" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="60" y="130" width="220" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="u2" value="Ingest and Correlate&#xa;`ingest_alert_view`&#xa;incident creation&#xa;timeline updates" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="350" y="130" width="220" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="u3" value="Chat Router&#xa;`general`&#xa;`investigation`&#xa;`docs`&#xa;`prometheus_query`&#xa;`direct_action`" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="650" y="130" width="220" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="u4" value="Investigation Workflow&#xa;planner&#xa;evidence checker&#xa;target selector&#xa;remediation selector&#xa;post-check validator" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="950" y="110" width="260" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="u5" value="MCP Retrieval Layer&#xa;incidents&#xa;applications&#xa;metrics&#xa;logs&#xa;traces&#xa;runbooks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1260" y="120" width="220" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="u6" value="Policy and Safety Layer&#xa;typed actions&#xa;approval gates&#xa;idempotency&#xa;dry run&#xa;cooldown and retries" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="950" y="340" width="260" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="u7" value="Execution Layer&#xa;agent targets&#xa;command dispatch&#xa;verification&#xa;rollback metadata" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1260" y="350" width="220" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="u8" value="Learning Layer&#xa;remediation outcomes&#xa;replay evaluation&#xa;behavior versions&#xa;operator feedback" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="650" y="350" width="220" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="u9" value="Dashboards&#xa;alerts&#xa;incidents&#xa;applications&#xa;investigations&#xa;operations&#xa;predictions" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="350" y="350" width="220" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="u10" value="AI Utility Endpoints&#xa;generate runbook&#xa;timeline narrative&#xa;anomaly explain&#xa;change risk analysis" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="60" y="350" width="220" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="u1" target="u2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="u2" target="u3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="u3" target="u4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="u4" target="u5">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="u4" target="u6">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="u6" target="u7">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="u7" target="u8">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="u8" target="u4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="u2" target="u9">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="u3" target="u10">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="incident-trigger" name="02 Incident Trigger Flow">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="it1" value="Incident Trigger Flow" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=24;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="300" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="it2" value="Alert source&#xa;Alertmanager / metric threshold / manual event" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="70" y="180" width="220" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="it3" value="`POST /genai/alerts/ingest/`&#xa;`ingest_alert_view`" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="360" y="180" width="220" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="it4" value="Normalize payload&#xa;service, labels, severity, status, source" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="650" y="180" width="240" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="it5" value="Correlate with open incidents" style="rhombus;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="970" y="180" width="180" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="it6" value="Update existing incident&#xa;append timeline&#xa;refresh fingerprint and status" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1240" y="110" width="250" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="it7" value="Create new incident&#xa;seed timeline&#xa;store alert snapshot" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1240" y="250" width="250" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="it8" value="Collect alert context&#xa;metrics summary&#xa;logs snippets&#xa;possible traces&#xa;dependency context" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1240" y="430" width="250" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="it9" value="Decision policy + typed action suggestion&#xa;may auto-execute or await approval" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="910" y="430" width="240" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="it10" value="Timeline event + dashboards update&#xa;alerts / incidents / investigations" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="560" y="430" width="250" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="it11" value="Optional LLM analysis for remediation planning and explanation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="250" y="430" width="240" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="ite1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="it2" target="it3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ite2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="it3" target="it4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ite3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="it4" target="it5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ite4" value="yes" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="it5" target="it6"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ite5" value="no" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="it5" target="it7"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ite6" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="it6" target="it8"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ite7" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="it7" target="it8"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ite8" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="it8" target="it9"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ite9" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="it9" target="it10"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ite10" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="it9" target="it11"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="alert-llm" name="03 LLM Payload - Alert Planning">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="al1" value="What We Send to the LLM for Alert Planning" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=24;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="520" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="al2" value="Inputs collected in backend&#xa;- normalized alert&#xa;- incident history&#xa;- recent metrics&#xa;- logs snippet&#xa;- recent traces&#xa;- dependency context&#xa;- policy hints" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="70" y="170" width="280" height="200" as="geometry"/>
+        </mxCell>
+        <mxCell id="al3" value="Prompt assembly&#xa;system rules + safety framing + evidence summary" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="420" y="210" width="240" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="al4" value="LLM request asks for structured output&#xa;- probable cause&#xa;- recommended action&#xa;- risk / safety flags&#xa;- whether approval is needed&#xa;- rationale for operator" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="740" y="170" width="290" height="180" as="geometry"/>
+        </mxCell>
+        <mxCell id="al5" value="LLM response" style="rhombus;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1110" y="210" width="140" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="al6" value="Typed action inference&#xa;policy engine&#xa;approval / block / allow" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1310" y="190" width="220" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="al7" value="Persist outputs&#xa;incident timeline&#xa;execution intent&#xa;dashboards" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1310" y="390" width="220" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="ale1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="al2" target="al3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ale2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="al3" target="al4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ale3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="al4" target="al5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ale4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="al5" target="al6"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ale5" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="al6" target="al7"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="chat-routing" name="04 Assistant Chat Routing">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="cr1" value="Assistant Chat Routing" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=24;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="360" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="cr2" value="User message&#xa;optional incident key&#xa;chat session context" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="90" y="220" width="220" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="cr3" value="`genai_chat`&#xa;persist message&#xa;load prior history" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="390" y="220" width="220" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="cr4" value="Router&#xa;rule-based first&#xa;LLM fallback if ambiguous" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="690" y="220" width="220" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="cr5" value="Route?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="980" y="225" width="120" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="cr6" value="General&#xa;simple answer prompt" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1180" y="70" width="200" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="cr7" value="Investigation&#xa;multi-step + MCP" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1180" y="180" width="200" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="cr8" value="Docs&#xa;RAG / runbook search" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1180" y="290" width="200" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="cr9" value="PromQL generation&#xa;query + explain" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1180" y="400" width="200" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="cr10" value="Direct action&#xa;LLM suggests command + target" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1180" y="510" width="200" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="cre1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="cr2" target="cr3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="cre2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="cr3" target="cr4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="cre3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="cr4" target="cr5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="cre4" value="general" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="cr5" target="cr6"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="cre5" value="investigation" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="cr5" target="cr7"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="cre6" value="docs" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="cr5" target="cr8"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="cre7" value="prometheus_query" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="cr5" target="cr9"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="cre8" value="direct_action" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="cr5" target="cr10"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="investigation-workflow" name="05 Investigation + MCP Workflow">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="iw1" value="Investigation Module Flow" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=24;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="380" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="iw2" value="User asks investigation question&#xa;optional incident / service scope" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="60" y="220" width="220" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="iw3" value="Planner&#xa;derive scope, topic, targets" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="350" y="220" width="180" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="iw4" value="MCP orchestrator selects tools&#xa;timeline / graph / metrics / logs / traces / runbooks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="600" y="210" width="260" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="iw5" value="InvestigationRun + ToolInvocation audit" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="930" y="220" width="210" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="iw6" value="Evidence checker&#xa;supporting vs contradicting signals" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1210" y="220" width="220" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="iw7" value="Target selector&#xa;service / host / component focus" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1210" y="390" width="220" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="iw8" value="LLM investigation prompt&#xa;compact evidence only" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="930" y="390" width="210" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="iw9" value="Remediation selector + post-check validator" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="620" y="390" width="240" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="iw10" value="Final answer&#xa;confidence&#xa;evidence&#xa;contradictions&#xa;next verification step&#xa;workflow trace" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="320" y="390" width="240" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="iwe1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="iw2" target="iw3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="iwe2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="iw3" target="iw4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="iwe3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="iw4" target="iw5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="iwe4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="iw5" target="iw6"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="iwe5" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="iw6" target="iw7"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="iwe6" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="iw7" target="iw8"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="iwe7" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="iw8" target="iw9"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="iwe8" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="iw9" target="iw10"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="investigation-llm" name="06 LLM Payload - Investigation">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="il1" value="What We Send to the LLM for Investigation" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=24;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="560" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="il2" value="Prompt input bundle&#xa;- user question&#xa;- incident / app / service scope&#xa;- timeline summary&#xa;- dependency graph summary&#xa;- metrics evidence&#xa;- logs evidence&#xa;- traces evidence&#xa;- runbook evidence&#xa;- evidence assessment" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="70" y="160" width="310" height="240" as="geometry"/>
+        </mxCell>
+        <mxCell id="il3" value="Rules included in prompt&#xa;- stay grounded in evidence&#xa;- mention contradictions&#xa;- do not invent missing data&#xa;- give next verification step&#xa;- return JSON only" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="470" y="180" width="290" height="190" as="geometry"/>
+        </mxCell>
+        <mxCell id="il4" value="Expected LLM JSON&#xa;`answer`&#xa;`confidence`&#xa;`supporting_evidence`&#xa;`contradicting_evidence`&#xa;`next_verification_step`&#xa;`follow_up_questions`" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="850" y="180" width="280" height="190" as="geometry"/>
+        </mxCell>
+        <mxCell id="il5" value="Backend enriches final response&#xa;workflow trace&#xa;retrieval metadata&#xa;tool usage trace" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1220" y="200" width="260" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="ile1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="il2" target="il3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ile2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="il3" target="il4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ile3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="il4" target="il5"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="execution-safety" name="07 Execution + Safety + Verification">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="ex1" value="Execution Module Flow" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=24;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="360" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="ex2" value="Execution request&#xa;manual operator or auto-remediation path" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="60" y="220" width="220" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="ex3" value="Typed action resolution&#xa;service, host, action type, params" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="350" y="220" width="220" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="ex4" value="Policy engine&#xa;allow / block / require approval" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="640" y="220" width="220" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="ex5" value="Safety controls&#xa;idempotency key&#xa;approval token&#xa;dry run&#xa;cooldown and retry checks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="930" y="210" width="240" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="ex6" value="Approved?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1240" y="225" width="140" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="ex7" value="Blocked or awaiting approval&#xa;persist ExecutionIntent&#xa;return workflow trace" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1410" y="110" width="230" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="ex8" value="Dispatch to agent target&#xa;HTTP execute endpoint&#xa;or remote enrolled target" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1410" y="290" width="230" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="ex9" value="Verification&#xa;analyze command output&#xa;post-check metrics/logs state" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1130" y="430" width="250" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="ex10" value="Outcome learning&#xa;RemediationOutcome&#xa;ranking history&#xa;replay evaluation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="800" y="430" width="250" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="ex11" value="Return response&#xa;status&#xa;verification&#xa;policy decision&#xa;workflow trace" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="470" y="430" width="250" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="exe1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="ex2" target="ex3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="exe2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="ex3" target="ex4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="exe3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="ex4" target="ex5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="exe4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="ex5" target="ex6"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="exe5" value="no" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="ex6" target="ex7"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="exe6" value="yes" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="ex6" target="ex8"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="exe7" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="ex8" target="ex9"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="exe8" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="ex9" target="ex10"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="exe9" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="ex10" target="ex11"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="mcp-layer" name="08 MCP Retrieval Layer">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="mc1" value="MCP Retrieval Layer" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=24;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="340" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="mc2" value="Investigation orchestrator or HTTP MCP client" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="80" y="250" width="250" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="mc3" value="Registry&#xa;tool name&#xa;params schema&#xa;handler / endpoint metadata" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="410" y="250" width="240" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="mc4" value="Incidents MCP" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="740" y="80" width="170" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="mc5" value="Applications MCP" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="740" y="170" width="170" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="mc6" value="Metrics MCP" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="740" y="260" width="170" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="mc7" value="Logs MCP" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="740" y="350" width="170" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="mc8" value="Traces MCP" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="740" y="440" width="170" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="mc9" value="Runbooks MCP" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="740" y="530" width="170" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="mc10" value="Domain services / stores&#xa;Django models&#xa;VictoriaMetrics&#xa;log backend&#xa;trace backend&#xa;runbook data" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1010" y="220" width="260" height="240" as="geometry"/>
+        </mxCell>
+        <mxCell id="mc11" value="ToolInvocation audit + compact evidence result" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1350" y="250" width="220" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="mce1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="mc2" target="mc3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="mce2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="mc3" target="mc4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="mce3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="mc3" target="mc5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="mce4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="mc3" target="mc6"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="mce5" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="mc3" target="mc7"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="mce6" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="mc3" target="mc8"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="mce7" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="mc3" target="mc9"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="mce8" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="mc4" target="mc10"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="mce9" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="mc5" target="mc10"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="mce10" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="mc6" target="mc10"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="mce11" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="mc7" target="mc10"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="mce12" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="mc8" target="mc10"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="mce13" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="mc9" target="mc10"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="mce14" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="mc10" target="mc11"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="predictions-and-ai" name="09 Predictions + AI Utilities">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="pa1" value="Predictions and AI Utility Modules" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=24;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="460" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="pa2" value="Historical incidents&#xa;service health&#xa;telemetry trends&#xa;recent changes" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="70" y="180" width="240" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="pa3" value="Prediction engine&#xa;`ServicePrediction`&#xa;recent predictions view" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="390" y="180" width="220" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="pa4" value="Preventive recommendations&#xa;what to fix before incident" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="690" y="180" width="220" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="pa5" value="AI generation helpers&#xa;runbook generation&#xa;anomaly explanation&#xa;change risk analysis&#xa;timeline narrative" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1010" y="160" width="260" height="160" as="geometry"/>
+        </mxCell>
+        <mxCell id="pa6" value="LLM prompt per utility&#xa;structured domain payload in&#xa;structured answer out" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1360" y="180" width="220" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="pa7" value="Surfaces&#xa;predictions dashboard&#xa;incident timeline&#xa;runbook UI&#xa;change review UI" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="680" y="410" width="280" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="pae1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="pa2" target="pa3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="pae2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="pa3" target="pa4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="pae3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="pa4" target="pa7"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="pae4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="pa2" target="pa5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="pae5" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="pa5" target="pa6"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="pae6" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="pa6" target="pa7"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="fleet-learning" name="10 Fleet + Learning + Dashboards">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="fl1" value="Fleet, Learning, and Operations Dashboard Flow" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=24;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="620" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="fl2" value="Fleet enrollment&#xa;target profiles&#xa;enroll / heartbeat" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="70" y="170" width="220" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="fl3" value="Agent targets available for diagnostics and remediation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="370" y="170" width="240" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="fl4" value="ExecutionIntent&#xa;RemediationOutcome&#xa;ReplayScenario&#xa;ReplayEvaluation&#xa;AgentBehaviorVersion" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="700" y="150" width="250" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="fl5" value="Ranking + replay + operator feedback" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1030" y="170" width="230" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="fl6" value="Improves future planning&#xa;better action ranking&#xa;safer decisions&#xa;versioned behavior" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="1340" y="170" width="230" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="fl7" value="Operations dashboard&#xa;investigations dashboard&#xa;alerts / incidents / predictions" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14" vertex="1" parent="1">
+          <mxGeometry x="700" y="420" width="260" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="fle1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="fl2" target="fl3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="fle2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="fl3" target="fl4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="fle3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="fl4" target="fl5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="fle4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="fl5" target="fl6"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="fle5" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2" edge="1" parent="1" source="fl4" target="fl7"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

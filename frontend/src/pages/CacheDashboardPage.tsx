@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { fetchCacheStats, purgeCache } from "../lib/api";
-import { useRefreshInterval } from "../lib/refresh";
+import { useRefreshQueryOptions } from "../lib/refresh";
 import { useState } from "react";
 
 interface CacheCounters {
@@ -106,13 +106,13 @@ function BreakerBadge({ name, snap }: { name: string; snap: BreakerSnapshot }) {
 }
 
 export function CacheDashboardPage() {
-  const { refreshMs } = useRefreshInterval();
+  const refreshQueryOptions = useRefreshQueryOptions();
   const queryClient = useQueryClient();
   const [purging, setPurging] = useState(false);
   const statsQuery = useQuery({
     queryKey: ["cache-stats"],
     queryFn: fetchCacheStats,
-    refetchInterval: refreshMs,
+    ...refreshQueryOptions,
   });
 
   const data = statsQuery.data as CacheStats | undefined;

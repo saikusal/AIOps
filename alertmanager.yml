@@ -5,8 +5,8 @@ route:
   receiver: aiops-webhook
   group_by: ['alertname', 'service']
   group_wait: 10s
-  group_interval: 30s
-  repeat_interval: 10m
+  group_interval: 15s
+  repeat_interval: 2m
 
 receivers:
   - name: aiops-webhook

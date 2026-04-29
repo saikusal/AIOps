@@ -140,7 +140,7 @@ Operators get a single workspace for the entire incident lifecycle:
 ## Repository Layout
 
 ```text
-asset_management/   Django project settings and app wiring
+aiops_platform/     Django project settings and app wiring
 genai/              AI assistant, incidents, predictions, execution flows
   llm_backend.py    LLM abstraction layer (vLLM ↔ AIDE toggle)
 doc_search/         Document upload, processing, and retrieval
@@ -317,7 +317,7 @@ See [CHAOS_RUNBOOK.md](./CHAOS_RUNBOOK.md) for detailed scenarios.
 
 ## Notes
 
-- The internal Django project package is still named `asset_management`; the product identity is AIOps Platform.
+- The internal Django project package has been renamed to `aiops_platform` to align with the product identity.
 - `.env` is intentionally gitignored — never commit credentials.
 - `172.17.0.1` is the default Docker bridge gateway IP. If your server uses a different bridge subnet, adjust `VLLM_API_URL` accordingly (`docker network inspect bridge | grep Gateway`).
 - Local runtime data (Postgres volumes, media files, model cache) is gitignored.

@@ -1,0 +1,48 @@
+{% extends "genai/app_base.html" %}
+{% block title %}Investigation Runs{% endblock %}
+{% block topbar_title %}Investigation Runs{% endblock %}
+{% block content %}
+<section class="panel" style="padding: 24px;">
+  <div style="display:flex; justify-content:space-between; align-items:center; gap: 16px; margin-bottom: 18px;">
+    <div>
+      <div class="eyebrow">MCP Audit</div>
+      <h2 style="margin:0;">Investigation Runs</h2>
+      <p style="margin:8px 0 0; color: var(--muted);">Recent investigation executions and MCP tool calls.</p>
+    </div>
+    <a class="pill" href="/admin/genai/investigationrun/" target="_blank" rel="noreferrer">Open Admin</a>
+  </div>
+  <div id="investigation-runs" style="display:grid; gap:16px;"></div>
+</section>
+<script>
+  async function loadInvestigationRuns() {
+    const resp = await fetch("/genai/investigations/recent/");
+    const body = await resp.json();
+    const root = document.getElementById("investigation-runs");
+    if (!body.results || !body.results.length) {
+      root.innerHTML = '<div class="pill">No investigation runs found yet.</div>';
+      return;
+    }
+    root.innerHTML = body.results.map((item) => `
+      <article style="border:1px solid var(--line); border-radius:18px; padding:18px; background: rgba(255,255,255,0.65);">
+        <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+          <strong>${item.question}</strong>
+          <span class="pill">${item.status}</span>
+        </div>
+        <p style="color:var(--muted); margin:10px 0 14px;">app=${item.application || "-"} | service=${item.service || "-"} | target=${item.target_host || "-"}</p>
+        <div style="display:grid; gap:8px;">
+          ${(item.tool_calls || []).map((tool) => `
+            <div style="padding:10px 12px; border-radius:12px; background: var(--accent-soft); display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+              <span>${tool.server_name} :: ${tool.tool_name}</span>
+              <span>${tool.status} | ${tool.latency_ms}ms</span>
+            </div>
+          `).join("")}
+        </div>
+      </article>
+    `).join("");
+  }
+  loadInvestigationRuns().catch(() => {
+    const root = document.getElementById("investigation-runs");
+    root.innerHTML = '<div class="pill">Failed to load investigation runs.</div>';
+  });
+</script>
+{% endblock %}

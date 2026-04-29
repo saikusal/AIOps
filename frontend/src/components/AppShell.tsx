@@ -4,21 +4,23 @@ import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { useRefreshInterval } from "../lib/refresh";
 
 const navItems = [
-  { to: "/applications", label: "Applications", meta: "Portfolio", glyph: "AP" },
-  { to: "/assistant", label: "Assistant", meta: "AI Copilot", glyph: "AI" },
-  { to: "/alerts", label: "Alerts", meta: "Signal Feed", glyph: "AL" },
-  { to: "/incidents", label: "Incidents", meta: "Response", glyph: "IN" },
-  { to: "/predictions", label: "Predictions", meta: "Forward Risk", glyph: "PR" },
-  { to: "/documents", label: "Documents", meta: "Runbooks", glyph: "KB" },
-  { to: "/fleet", label: "Fleet", meta: "Targets", glyph: "FL" },
-  { to: "/enroll", label: "Enroll", meta: "Bootstrap", glyph: "EN" },
-  { to: "/profiles", label: "Profiles", meta: "Telemetry", glyph: "PF" },
-  { to: "/cache", label: "Cache", meta: "Observability", glyph: "CA" },
+  { to: "/domain-onboarding", label: "Domain Onboarding",        meta: "Infra · Network · Cloud" },
+  { to: "/ingestion",         label: "Unified Data Ingestion",   meta: "Agents · Kafka · Enrichment" },
+  { to: "/intelligence",      label: "AI/ML Intelligence",       meta: "Anomaly · RCA · Prediction" },
+  { to: "/alerts",            label: "Alerts",                   meta: "Signal Feed · Anomaly Explainer" },
+  { to: "/incidents",         label: "Incidents",                meta: "SLA · War Room · PIR" },
+  { to: "/topology",          label: "Topology & CMDB",          meta: "Service Graph · Blast Radius" },
+  { to: "/genai",             label: "Assistant",                meta: "RCA · AI Chat" },
+  { to: "/change-risk",       label: "Change Risk",              meta: "Deploy Risk · Maintenance Window" },
+  { to: "/automation",        label: "Knowledge Base",           meta: "Runbooks · Auto-Remediation" },
+  { to: "/analytics",         label: "Analytics & Reporting",    meta: "SLO · MTTR · Exec Views" },
 ];
 
 export function AppShell() {
   const location = useLocation();
   const { refreshMs, setRefreshMs, options } = useRefreshInterval();
+  const currentNav = navItems.find((item) => location.pathname.startsWith(item.to));
+  const pageTitle = currentNav?.label ?? "Operational Intelligence";
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     if (typeof window === "undefined") return "dark";
     const stored = window.localStorage.getItem("aiops-theme");
@@ -43,7 +45,7 @@ export function AppShell() {
         <div className="shell__sidebar-section">
           <div className="shell__sidebar-label">Workspace</div>
           <div className="shell__sidebar-blurb">
-            Unified operations across incidents, graphs, predictions, AI-guided remediation, and fleet onboarding.
+            Unified operations across Domain Onboarding, Data Ingestion, AI/ML Intelligence, Event & Incident Management, Topology, GenAI, Automation, and Analytics.
           </div>
         </div>
         <nav className="shell__nav">
@@ -53,7 +55,6 @@ export function AppShell() {
               className={({ isActive }) => `shell__nav-link${isActive ? " is-active" : ""}`}
               to={item.to}
             >
-              <span className="shell__nav-glyph">{item.glyph}</span>
               <span className="shell__nav-copy">
                 <strong>{item.label}</strong>
                 <span>{item.meta}</span>
@@ -118,10 +119,7 @@ export function AppShell() {
         <header className="shell__header">
           <div>
             <div className="eyebrow">Observability Workspace</div>
-            <h1 className="shell__title">Operational Intelligence</h1>
-            <div className="shell__subtitle">
-              Unified applications, incidents, graphs, predictions, documents, fleet onboarding, and AI investigation in one platform.
-            </div>
+            <h1 className="shell__title">{pageTitle}</h1>
           </div>
           <div className="shell__header-metrics">
             <div className="shell__header-metric">
@@ -129,8 +127,8 @@ export function AppShell() {
               <strong>Live</strong>
             </div>
             <div className="shell__header-metric">
-              <span>Views</span>
-              <strong>9</strong>
+              <span>Modules</span>
+              <strong>M1–M8</strong>
             </div>
             <div className="shell__header-metric">
               <span>Mode</span>

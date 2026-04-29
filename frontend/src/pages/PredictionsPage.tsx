@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { fetchRecentPredictions } from "../lib/api";
-import { useRefreshInterval } from "../lib/refresh";
+import { useRefreshQueryOptions } from "../lib/refresh";
 
 function scoreLabel(score: number) {
   if (score >= 0.75) return "High";
@@ -10,11 +10,11 @@ function scoreLabel(score: number) {
 }
 
 export function PredictionsPage() {
-  const { refreshMs } = useRefreshInterval();
+  const refreshQueryOptions = useRefreshQueryOptions();
   const predictionsQuery = useQuery({
     queryKey: ["recent-predictions"],
     queryFn: fetchRecentPredictions,
-    refetchInterval: refreshMs,
+    ...refreshQueryOptions,
   });
 
   return (
@@ -65,7 +65,7 @@ export function PredictionsPage() {
               <div className="page-card__meta">
                 <Link
                   className="shell__link shell__link--small"
-                  to={`/assistant?application=${encodeURIComponent(prediction.application)}&service=${encodeURIComponent(prediction.service)}`}
+                  to={`/genai?application=${encodeURIComponent(prediction.application)}&service=${encodeURIComponent(prediction.service)}`}
                 >
                   Ask Assistant Why
                 </Link>

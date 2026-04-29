@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { fetchApplicationOverview, fetchRecentAlerts, type AlertRecommendation, type ApplicationComponent } from "../lib/api";
-import { useRefreshInterval } from "../lib/refresh";
+import { useRefreshQueryOptions } from "../lib/refresh";
 
 function formatPercent(value?: number | null) {
   if (value === null || value === undefined) {
@@ -152,7 +152,7 @@ function ComponentCard({ application, component, alert }: { application: string;
         </div>
       </div>
       <div className="page-card__meta">
-        <Link className="shell__link shell__link--small" to={`/assistant?application=${encodeURIComponent(application)}&service=${encodeURIComponent(component.service)}`}>
+        <Link className="shell__link shell__link--small" to={`/genai?application=${encodeURIComponent(application)}&service=${encodeURIComponent(component.service)}`}>
           Investigate In Assistant
         </Link>
         <Link className="shell__link shell__link--small" to={`/incidents?service=${encodeURIComponent(component.service)}`}>
@@ -172,17 +172,17 @@ function ComponentCard({ application, component, alert }: { application: string;
 }
 
 export function ApplicationsPage() {
-  const { refreshMs } = useRefreshInterval();
+  const refreshQueryOptions = useRefreshQueryOptions();
   const overviewQuery = useQuery({
     queryKey: ["applications-overview"],
     queryFn: fetchApplicationOverview,
-    refetchInterval: refreshMs,
+    ...refreshQueryOptions,
   });
 
   const alertsQuery = useQuery({
     queryKey: ["recent-alerts"],
     queryFn: fetchRecentAlerts,
-    refetchInterval: refreshMs,
+    ...refreshQueryOptions,
   });
 
   const applications = overviewQuery.data || [];
@@ -280,7 +280,7 @@ export function ApplicationsPage() {
               </div>
 
               <div className="page-card__meta">
-                <Link className="shell__link shell__link--small" to={`/assistant?application=${encodeURIComponent(application.application)}`}>
+                <Link className="shell__link shell__link--small" to={`/genai?application=${encodeURIComponent(application.application)}`}>
                   Open In Assistant
                 </Link>
                 <Link className="shell__link shell__link--small" to="/incidents">

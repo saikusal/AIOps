@@ -9,7 +9,7 @@ echo "Database is ready."
 
 # Apply database migrations
 echo "Applying database migrations..."
-python3 manage.py migrate
+python3 manage.py migrate --noinput
  
 # Create a superuser if one does not exist
 echo "Creating superuser..."
@@ -25,4 +25,4 @@ EOF
  
 # Start the Gunicorn server
 echo "Starting Gunicorn server..."
-exec gunicorn --workers 2 --bind 0.0.0.0:8000 --timeout 120 asset_management.wsgi:application
+exec gunicorn --workers 2 --bind 0.0.0.0:8000 --timeout 120 aiops_platform.wsgi:application

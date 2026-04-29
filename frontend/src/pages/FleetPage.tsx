@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { fetchFleetTargets } from "../lib/api";
-import { useRefreshInterval } from "../lib/refresh";
+import { useRefreshQueryOptions } from "../lib/refresh";
 
 function healthTone(status: string) {
   const normalized = status.toLowerCase();
@@ -11,11 +11,11 @@ function healthTone(status: string) {
 }
 
 export function FleetPage() {
-  const { refreshMs } = useRefreshInterval();
+  const refreshQueryOptions = useRefreshQueryOptions();
   const fleetQuery = useQuery({
     queryKey: ["fleet-targets"],
     queryFn: fetchFleetTargets,
-    refetchInterval: refreshMs,
+    ...refreshQueryOptions,
   });
 
   const targets = fleetQuery.data || [];

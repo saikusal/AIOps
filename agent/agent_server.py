@@ -15,7 +15,7 @@ logger = logging.getLogger("agent")
 
 HOST = os.getenv("AGENT_BIND", "0.0.0.0")
 PORT = int(os.getenv("AGENT_PORT", "9999"))
-AUTH_TOKEN = os.getenv("AGENT_AUTH_TOKEN", "aiops-demo-agent-7f3c29d1b84e4a6f")
+AUTH_TOKEN = os.getenv("AGENT_AUTH_TOKEN", "")
 REQUEST_TIMEOUT = int(os.getenv("AGENT_REQUEST_TIMEOUT", "60"))
 ALLOWED_COMMANDS_FILE = Path(
     os.getenv("AGENT_ALLOWED_COMMANDS_FILE", Path(__file__).with_name("allowed_commands.json"))

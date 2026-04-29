@@ -33,7 +33,7 @@ Responsibilities:
 - fetch application graph
 - fetch component health and predictions
 
-### 3. `prometheus-mcp`
+### 3. `metrics-mcp`
 Responsibilities:
 - execute allowlisted metric queries
 - fetch current series and aggregates
@@ -91,7 +91,7 @@ Everything else should be tool-derived on demand.
 
 1. `incidents-mcp`
 2. `applications-mcp`
-3. `prometheus-mcp`
+3. `metrics-mcp`
 4. `logs-mcp`
 5. `traces-mcp`
 6. `runbooks-mcp`

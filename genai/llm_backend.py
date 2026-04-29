@@ -48,9 +48,9 @@ VLLM_API_URL = os.getenv("VLLM_API_URL", "http://localhost:8001/v1/chat/completi
 VLLM_API_KEY = os.getenv("VLLM_API_KEY", "")  # vLLM accepts any key or none
 VLLM_MODEL_NAME = os.getenv("VLLM_MODEL_NAME", "qwen32b")
 VLLM_TIMEOUT = int(os.getenv("VLLM_TIMEOUT", "120"))
-VLLM_MAX_TOKENS = int(os.getenv("VLLM_MAX_TOKENS", "4096"))
-VLLM_MAX_MODEL_LEN = int(os.getenv("VLLM_MAX_MODEL_LEN", "16384"))
-VLLM_TEMPERATURE = float(os.getenv("VLLM_TEMPERATURE", "0.1"))
+VLLM_MAX_TOKENS = int(os.getenv("VLLM_MAX_TOKENS", "2048"))
+VLLM_MAX_MODEL_LEN = int(os.getenv("VLLM_MAX_MODEL_LEN", "8192"))
+VLLM_TEMPERATURE = float(os.getenv("VLLM_TEMPERATURE", "0.0"))  # 0.0 = deterministic (consistent remediation commands)
 
 logger.info("LLM backend: %s", LLM_BACKEND)
 if LLM_BACKEND == "vllm":
@@ -98,7 +98,7 @@ def _query_aide(prompt: str) -> Tuple[bool, int, str]:
     headers = {
         "Authorization": f"Bearer {AIDE_API_KEY}",
         "Content-Type": "application/json",
-        "User-Agent": "asset_management-genai/1.0",
+        "User-Agent": "aiops-platform-genai/1.0",
     }
     payload = {"messages": [{"role": "user", "content": prompt}]}
     call_id = f"aide-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"

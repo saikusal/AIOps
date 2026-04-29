@@ -693,17 +693,20 @@ a {
 .app-portfolio__status {
   display: inline-flex;
   align-items: center;
-  padding: 6px 10px;
+  padding: 7px 12px;
   border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 700;
+  font-size: 0.96rem;
+  font-weight: 800;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.09em;
 }
 
 .app-portfolio__status--healthy {
-  background: rgba(83, 196, 255, 0.1);
+  background: rgba(83, 196, 255, 0.22);
+  border: 1px solid rgba(141, 244, 255, 0.6);
   color: #8df4ff;
+  box-shadow: 0 0 0 1px rgba(83, 196, 255, 0.26) inset, 0 0 14px rgba(141, 244, 255, 0.34);
+  text-shadow: 0 0 8px rgba(141, 244, 255, 0.5);
 }
 
 .app-portfolio__status--degraded {
@@ -1263,6 +1266,186 @@ a {
 
 .assistant-message__content li {
   margin-bottom: 6px;
+}
+
+/* ── RCA Confidence / Evidence Panel ─────────────────────────── */
+.rca-confidence {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  font-size: 0.84rem;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rca-confidence--high {
+  background: rgba(34, 197, 94, 0.07);
+  border-color: rgba(34, 197, 94, 0.25);
+}
+
+.rca-confidence--medium {
+  background: rgba(234, 179, 8, 0.07);
+  border-color: rgba(234, 179, 8, 0.25);
+}
+
+.rca-confidence--low {
+  background: rgba(239, 68, 68, 0.07);
+  border-color: rgba(239, 68, 68, 0.25);
+}
+
+.rca-confidence__header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.rca-confidence__badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.rca-confidence--high .rca-confidence__badge {
+  background: rgba(34, 197, 94, 0.15);
+  color: #86efac;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+}
+
+.rca-confidence--medium .rca-confidence__badge {
+  background: rgba(234, 179, 8, 0.15);
+  color: #fde047;
+  border: 1px solid rgba(234, 179, 8, 0.35);
+}
+
+.rca-confidence--low .rca-confidence__badge {
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+.rca-confidence__next {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-style: italic;
+}
+
+.rca-confidence__reason {
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.decision-policy {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.decision-policy--observe {
+  background: rgba(59, 130, 246, 0.14);
+  color: #93c5fd;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+}
+
+.decision-policy--diagnose {
+  background: rgba(234, 179, 8, 0.14);
+  color: #fde68a;
+  border: 1px solid rgba(234, 179, 8, 0.35);
+}
+
+.decision-policy--remediate {
+  background: rgba(34, 197, 94, 0.14);
+  color: #86efac;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+}
+
+.rca-evidence {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rca-evidence__label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-weight: 700;
+}
+
+.rca-evidence--supporting .rca-evidence__label { color: #86efac; }
+.rca-evidence--contradicting .rca-evidence__label { color: #fca5a5; }
+.rca-evidence--hard .rca-evidence__label { color: #7dd3fc; }
+.rca-evidence--missing .rca-evidence__label { color: #fcd34d; }
+
+.rca-evidence ul {
+  margin: 4px 0 0 16px;
+  padding: 0;
+}
+
+.rca-evidence li {
+  margin-bottom: 3px;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.incident-deep-dive__panel--decision {
+  border-color: rgba(83, 196, 255, 0.18);
+  background: linear-gradient(180deg, rgba(9, 25, 36, 0.88), rgba(8, 18, 27, 0.78));
+}
+
+.incident-decision__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.incident-decision__target {
+  margin-top: 8px;
+  color: var(--accent-2);
+  font-size: 0.82rem;
+}
+
+.incident-decision__section {
+  margin-top: 10px;
+}
+
+.incident-decision__section span {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.incident-decision__section--hard span {
+  color: #7dd3fc;
+}
+
+.incident-decision__section--missing span {
+  color: #fcd34d;
+}
+
+.incident-decision__section ul {
+  margin: 0 0 0 18px;
+  padding: 0;
+}
+
+.incident-decision__section li {
+  margin-bottom: 5px;
+  line-height: 1.5;
 }
 
 .assistant-prompts {

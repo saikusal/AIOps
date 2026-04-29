@@ -8,7 +8,8 @@ import time
 import subprocess
 import uuid
 import hashlib
-from datetime import timedelta
+import csv
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Tuple, Optional
 from urllib.parse import urlparse
@@ -19,7 +20,7 @@ from urllib3.util import Retry
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-from io import BytesIO
+from io import BytesIO, StringIO
 from django.contrib.auth import authenticate, login as auth_login, logout as auth_logout
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse, HttpResponse, HttpRequest
@@ -34,14 +35,22 @@ from django.utils import timezone
 import pandas as pd
 
 from .models import (
+    AgentBehaviorVersion,
     ChatMessage,
     ChatSession,
     DiscoveredService,
     EnrollmentToken,
+    ExecutionIntent,
     GenAIChatHistory,
     Incident,
     IncidentAlert,
     IncidentTimelineEvent,
+    OperatorFeedback,
+    RemediationOutcome,
+    ReplayEvaluation,
+    ReplayScenario,
+    Runbook,
+    SLAPolicy,
     ServicePrediction,
     Target,
     TargetComponent,
@@ -51,11 +60,87 @@ from .models import (
 )
 from .predictions import score_components
 from .sso import ensure_sso_user, get_sso_identity
+from .tools.direct_action import handle_direct_action as direct_action_tool
+from .tools.docs import build_docs_proxy_body
+from .tools.general import handle_general_chat as general_chat_tool
+from .tools.ai_generation import (
+    analyze_change_risk_payload,
+    explain_anomaly_payload,
+    generate_runbook_payload,
+    generate_timeline_narrative_payload,
+)
+from .tools.investigation import (
+    build_investigation_context as build_investigation_context_tool,
+    extract_investigation_scope as extract_investigation_scope_tool,
+    find_investigation_incident as find_investigation_incident_tool,
+    run_investigation_route as investigation_route_tool,
+)
+from .tools.prometheus import handle_prometheus_query as prometheus_query_tool
+from .tools.router import classify_query as hybrid_classify_query
+from .tools.sql import handle_sql as sql_tool
+from .mcp_services import (
+    applications_get_component_snapshot as applications_get_component_snapshot_service,
+    applications_get_graph as applications_get_graph_service,
+    applications_get_overview as applications_get_overview_service,
+    incidents_get_summary as incidents_get_summary_service,
+    incidents_get_timeline as incidents_get_timeline_service,
+    logs_search as logs_search_service,
+    metrics_query_raw as metrics_query_raw_service,
+    metrics_query_service_overview as metrics_query_service_overview_service,
+    runbooks_search as runbooks_search_service,
+    traces_search as traces_search_service,
+    source_read_traceback as source_read_traceback_service,
+)
+from .policy_engine import evaluate_execution_policy, record_execution_attempt
+from .behavior_versions import current_behavior_version_payload
+from .execution_safety import (
+    action_signature as execution_action_signature,
+    context_fingerprint as execution_context_fingerprint,
+    frequency_limit_config,
+    issue_approval_token,
+    resolve_idempotency_key,
+    sign_intent_payload,
+    verify_approval_token,
+)
+from .remediation_ranking import rank_typed_action
+from .replay_evaluation import build_replay_scores
+from .multi_step_workflow import build_execution_workflow
+from .typed_actions import (
+    action_summary,
+    command_from_typed_action,
+    infer_typed_action,
+    serialize_action_signature,
+)
 from better_profanity import profanity
 import os
 
 # ---------------- logging ----------------
 logger = logging.getLogger("genai")
+
+
+def _avg_boolean(field_name: str) -> models.Case:
+    return models.Case(
+        models.When(**{field_name: True}, then=models.Value(1.0)),
+        default=models.Value(0.0),
+        output_field=models.FloatField(),
+    )
+
+
+def _json_safe(obj: Any) -> Any:
+    """Recursively convert any non-JSON-serializable values (UUID, datetime, etc.) to strings
+    so dicts can be safely stored in JSONField or returned via JsonResponse."""
+    import uuid as _uuid
+    from datetime import date, datetime as _datetime
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, _uuid.UUID):
+        return str(obj)
+    if isinstance(obj, (_datetime, date)):
+        return obj.isoformat()
+    return obj
+
 
 def load_custom_profanity_words():
     """Reads a list of words from profanity_wordlist.txt and adds them to the better-profanity filter."""
@@ -87,7 +172,7 @@ from .telemetry_cache import (
 
 # ---------------- config ----------------
 TARGET_TABLE = os.getenv("GENAI_TABLE", "")
-PROMETHEUS_URL = os.getenv("PROMETHEUS_URL")
+METRICS_API_URL = os.getenv("METRICS_API_URL") or os.getenv("PROMETHEUS_URL")
 ELASTICSEARCH_URL = os.getenv("ELASTICSEARCH_URL")
 JAEGER_URL = os.getenv("JAEGER_URL")
 AIDE_API_URL = os.getenv("AIDE_API_URL")
@@ -104,14 +189,93 @@ DB_AGENT_HOST = os.getenv("DB_AGENT_HOST", "db-agent")
 CONTROL_AGENT_HOST = os.getenv("CONTROL_AGENT_HOST", "control-agent")
 DB_NAME = os.getenv("POSTGRES_DB", "aiops")
 DB_USER = os.getenv("POSTGRES_USER", "user")
+
+# Source-reader MCP tool configuration
+# MCP_SOURCE_PATH_FROM=/app  ->  MCP_SOURCE_PATH_TO=/source/demo/app
+_MCP_SOURCE_PATH_FROM = os.getenv("MCP_SOURCE_PATH_FROM", "/app")
+_MCP_SOURCE_PATH_TO = os.getenv("MCP_SOURCE_PATH_TO", "/source/demo/app")
+MCP_SOURCE_PATH_MAP: Dict[str, str] = (
+    {_MCP_SOURCE_PATH_FROM: _MCP_SOURCE_PATH_TO}
+    if _MCP_SOURCE_PATH_FROM and _MCP_SOURCE_PATH_TO
+    else {}
+)
+MCP_SOURCE_ROOT = os.getenv("MCP_SOURCE_ROOT", "/source/demo")
 AIOPS_PUBLIC_BASE_URL = os.getenv("AIOPS_PUBLIC_BASE_URL", "").strip()
 AIOPS_PUBLIC_OTLP_GRPC_ENDPOINT = os.getenv("AIOPS_PUBLIC_OTLP_GRPC_ENDPOINT", "").strip()
 AIOPS_OTELCOL_VERSION = os.getenv("AIOPS_OTELCOL_VERSION", "0.87.0")
 AIOPS_NODE_EXPORTER_VERSION = os.getenv("AIOPS_NODE_EXPORTER_VERSION", "1.8.1")
 CHAT_HISTORY_WINDOW = int(os.getenv("CHAT_HISTORY_WINDOW", "12"))
+MCP_INTERNAL_TOKEN = (os.getenv("MCP_INTERNAL_TOKEN", "") or "").strip()
 RECENT_ALERT_CACHE_KEY = "aiops_recent_alert_recommendations"
 RECENT_ALERT_CACHE_TTL = 60 * 60 * 24
+RECENT_ALERT_FRESHNESS_SECONDS = 10 * 60
 MAX_RECENT_ALERTS = 20
+INCIDENT_STATE_CACHE_PREFIX = "aiops_incident_state"
+INCIDENT_STATE_CACHE_TTL = int(os.getenv("AIOPS_INCIDENT_STATE_CACHE_TTL", str(60 * 60 * 6)))
+REMEDIATION_VARIANCE_HISTORY_LIMIT = int(os.getenv("AIOPS_REMEDIATION_VARIANCE_HISTORY_LIMIT", "20"))
+
+# ---------------------------------------------------------------------------
+# Prompt budget helpers
+# Model hard limit: 8192 tokens. We reserve 2048 for output.
+# At ~4 chars/token that leaves ~6144 * 4 = 24576 chars, but the full
+# system message + JSON framing adds ~500 chars, so a safe per-prompt
+# budget is ~5000 chars for all variable sections combined.
+# Individual section caps below are set so the total stays inside that.
+# ---------------------------------------------------------------------------
+def _tail_for_prompt(text: str, max_chars: int, label: str = "") -> str:
+    """Return the *tail* of `text` within `max_chars` (most recent lines)."""
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    snippet = text[-max_chars:]
+    newline = snippet.find("\n")
+    if newline > 0:
+        snippet = snippet[newline + 1:]
+    prefix = f"[{label} — truncated, showing last {max_chars} chars]\n" if label else ""
+    return prefix + snippet
+
+
+def _head_for_prompt(text: str, max_chars: int) -> str:
+    """Return the *head* of `text` within `max_chars`."""
+    if not text or len(text) <= max_chars:
+        return text
+    snippet = text[:max_chars]
+    newline = snippet.rfind("\n")
+    return snippet[:newline] if newline > 0 else snippet
+
+
+def _errors_first_for_prompt(text: str, max_chars: int, tail_lines: int = 40) -> str:
+    """Return ERROR/exception lines first, then the recent tail, within max_chars.
+
+    When a command returns mixed log output (HTTP 200s interleaved with ERRORs),
+    a naive tail() will drown out the error lines. This helper surfaces them first
+    so the LLM cannot miss them.
+    """
+    if not text:
+        return ""
+    lines = text.splitlines()
+    error_kw = (" error ", "error:", "exception", "traceback", "runtimeerror", "critical", "fatal", "db_write_failed", "db_query_failed", "status=503")
+    error_lines = [ln for ln in lines if any(kw in ln.lower() for kw in error_kw)]
+    tail = lines[-tail_lines:]
+    seen: set = set()
+    combined: list = []
+    for ln in error_lines:
+        if ln not in seen:
+            combined.append(ln)
+            seen.add(ln)
+    if error_lines:
+        combined.append("--- recent tail ---")
+    for ln in tail:
+        if ln not in seen:
+            combined.append(ln)
+            seen.add(ln)
+    result = "\n".join(combined)
+    if len(result) > max_chars:
+        return result[:max_chars]
+    return result
+
+
 APP_OVERVIEW_CACHE_KEY = "aiops_application_overview"
 APP_OVERVIEW_CACHE_TTL = 60
 IMPACT_WINDOW_DAYS = 7
@@ -415,6 +579,7 @@ def _correlate_alert_to_incident(alert_payload: Dict[str, Any], context: Dict[st
             detail=summary or why or "",
             payload={"alert_payload": alert_payload, "context": context},
         )
+        _assign_sla_to_incident(incident)
     else:
         incident.status = "resolved" if alert_status == "resolved" else "investigating"
         incident.summary = summary or incident.summary
@@ -546,6 +711,146 @@ def _compute_incident_revenue_impact(incident: Incident) -> Optional[Dict[str, A
     }
 
 
+def _recent_incident_memory(service_name: Optional[str], target_host: Optional[str], alert_name: Optional[str], limit: int = 8) -> Dict[str, Any]:
+    service_key = str(service_name or "").strip()
+    host_key = str(target_host or "").strip()
+    alert_key = str(alert_name or "").strip()
+    if not any([service_key, host_key, alert_key]):
+        return {}
+
+    incident = (
+        Incident.objects.filter(
+            models.Q(primary_service=service_key)
+            | models.Q(target_host=host_key)
+            | models.Q(title__icontains=alert_key)
+        )
+        .order_by("-updated_at")
+        .first()
+    )
+    if not incident:
+        return {}
+
+    timeline = IncidentTimelineEvent.objects.filter(incident=incident).order_by("-created_at")[:limit]
+    events: List[Dict[str, Any]] = []
+    last_remediation_command = ""
+    last_remediation_at = ""
+    for event in reversed(list(timeline)):
+        detail = str(event.detail or "")
+        if event.event_type == "remediation_command_executed" and detail:
+            last_remediation_command = detail
+            last_remediation_at = event.created_at.isoformat() if event.created_at else ""
+        events.append(
+            {
+                "event_type": event.event_type,
+                "title": event.title,
+                "detail": detail[:500],
+                "created_at": event.created_at.isoformat() if event.created_at else "",
+            }
+        )
+
+    return {
+        "incident_key": str(incident.incident_key),
+        "incident_status": incident.status,
+        "incident_title": incident.title,
+        "incident_summary": incident.summary,
+        "last_remediation_command": last_remediation_command,
+        "last_remediation_at": last_remediation_at,
+        "recent_events": events,
+    }
+
+
+def _inventory_runtime_context(service_name: Optional[str]) -> Dict[str, Any]:
+    if str(service_name or "").strip().lower() not in {"app-inventory", "inventory"}:
+        return {}
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT sku, available_quantity, reserved_quantity, updated_at
+                FROM demo_inventory
+                ORDER BY sku
+                """
+            )
+            inventory_rows = cursor.fetchall()
+
+            cursor.execute(
+                """
+                SELECT sku, COUNT(*) AS orders_last_5m, COALESCE(SUM(quantity), 0) AS units_last_5m
+                FROM demo_orders
+                WHERE created_at >= NOW() - INTERVAL '5 minutes'
+                GROUP BY sku
+                ORDER BY sku
+                """
+            )
+            recent_order_rows = cursor.fetchall()
+
+        return {
+            "inventory_rows": _rows_to_json_safe_lists(inventory_rows),
+            "orders_last_5m_by_sku": _rows_to_json_safe_lists(recent_order_rows),
+        }
+    except Exception:
+        logger.exception("Failed to load inventory runtime context")
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# SLA helpers
+# ---------------------------------------------------------------------------
+
+def _severity_to_priority(severity: str) -> str:
+    sev = (severity or "warning").lower()
+    if sev in ("critical",):
+        return "P1"
+    if sev in ("high", "error"):
+        return "P2"
+    if sev in ("warning", "warn"):
+        return "P3"
+    return "P4"
+
+
+def _assign_sla_to_incident(incident: Incident) -> None:
+    """Set priority + SLA due timestamps from the SLAPolicy table."""
+    priority = _severity_to_priority(incident.severity)
+    policy = SLAPolicy.objects.filter(priority=priority).first()
+    if not policy:
+        return
+    base = incident.opened_at or timezone.now()
+    incident.priority = priority
+    incident.sla_response_due_at = base + timedelta(minutes=policy.response_minutes)
+    incident.sla_resolution_due_at = base + timedelta(minutes=policy.resolution_minutes)
+    incident.save(update_fields=["priority", "sla_response_due_at", "sla_resolution_due_at", "updated_at"])
+
+
+def _compute_sla_status(incident: Incident) -> Dict[str, Any]:
+    """Return a rich SLA status dict for the incident payload."""
+    now = timezone.now()
+    response_due = incident.sla_response_due_at
+    resolution_due = incident.sla_resolution_due_at
+    acked = incident.sla_response_acknowledged_at
+
+    def _remaining_minutes(due):
+        if not due:
+            return None
+        return round((due - now).total_seconds() / 60, 1)
+
+    response_breached = bool(response_due and now > response_due and not acked)
+    resolution_breached = bool(
+        resolution_due and now > resolution_due and incident.status != "resolved"
+    )
+    return {
+        "priority": incident.priority,
+        "response_due_at": response_due.isoformat() if response_due else None,
+        "resolution_due_at": resolution_due.isoformat() if resolution_due else None,
+        "response_acknowledged_at": acked.isoformat() if acked else None,
+        "response_remaining_minutes": _remaining_minutes(response_due),
+        "resolution_remaining_minutes": _remaining_minutes(resolution_due),
+        "response_breached": response_breached,
+        "resolution_breached": resolution_breached,
+        "breached": response_breached or resolution_breached,
+    }
+
+
 def _incident_summary_payload(incident: Incident) -> Dict[str, Any]:
     alerts = list(incident.alerts.order_by("-last_seen_at")[:10])
     latest_prediction = ServicePrediction.objects.filter(
@@ -588,6 +893,8 @@ def _incident_summary_payload(incident: Incident) -> Dict[str, Any]:
             else None
         ),
         "business_impact": _compute_incident_revenue_impact(incident),
+        "priority": incident.priority,
+        "sla": _compute_sla_status(incident),
     }
 
 
@@ -598,13 +905,40 @@ def _incident_timeline_payload(incident: Incident) -> Dict[str, Any]:
         for entry in recent_entries:
             if not isinstance(entry, dict):
                 continue
-            if str(entry.get("incident_key") or "") == str(incident.incident_key):
+            if str(entry.get("incident_key") or "") == str(incident.incident_key) and _recent_alert_recommendation_is_fresh(entry):
                 linked_recommendation = entry
                 break
+    latest_runbook = incident.runbooks.order_by("-created_at").first()
+    latest_narrative_event = incident.timeline.filter(event_type="pir_generated").order_by("-created_at").first()
+    latest_narrative = ""
+    latest_narrative_created_at = None
+    if latest_narrative_event:
+        latest_narrative = (
+            str((latest_narrative_event.payload or {}).get("narrative") or latest_narrative_event.detail or "").strip()
+        )
+        latest_narrative_created_at = latest_narrative_event.created_at.isoformat()
 
     return {
         **_incident_summary_payload(incident),
         "linked_recommendation": linked_recommendation,
+        "latest_runbook": (
+            {
+                "runbook_id": latest_runbook.id,
+                "title": latest_runbook.title,
+                "content": latest_runbook.content,
+                "created_at": latest_runbook.created_at.isoformat(),
+            }
+            if latest_runbook
+            else None
+        ),
+        "latest_narrative": (
+            {
+                "narrative": latest_narrative,
+                "created_at": latest_narrative_created_at,
+            }
+            if latest_narrative
+            else None
+        ),
         "timeline": [
             {
                 "event_type": item.event_type,
@@ -618,43 +952,29 @@ def _incident_timeline_payload(incident: Incident) -> Dict[str, Any]:
     }
 
 
+def _download_filename(prefix: str, incident_key: str, extension: str) -> str:
+    safe_key = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(incident_key or "incident")).strip("-") or "incident"
+    return f"{prefix}-{safe_key}.{extension}"
+
+
+def _csv_download_response(filename: str, rows: List[Dict[str, Any]]) -> HttpResponse:
+    output = StringIO()
+    if rows:
+        writer = csv.DictWriter(output, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    response = HttpResponse(output.getvalue(), content_type="text/csv; charset=utf-8")
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
+
+
 def _extract_investigation_scope(question: str, body: Dict[str, Any]) -> Dict[str, str]:
-    text = " ".join(
-        part for part in [
-            question or "",
-            str(body.get("application") or ""),
-            str(body.get("service") or ""),
-            str(body.get("incident") or ""),
-        ]
-        if part
-    )
-    scope = {"application": "", "service": "", "incident": ""}
-    for key in ("application", "service", "incident"):
-        match = re.search(rf"{key}=([A-Za-z0-9_\-:]+)", text, re.IGNORECASE)
-        if match:
-            scope[key] = match.group(1)
-    return scope
+    return extract_investigation_scope_tool(question, body)
 
 
 def _find_investigation_incident(scope: Dict[str, str]) -> Optional[Incident]:
-    incident_key = scope.get("incident") or ""
-    if incident_key:
-        incident = Incident.objects.filter(incident_key=incident_key).first()
-        if incident:
-            return incident
-
-    service = scope.get("service") or ""
-    if service:
-        incident = Incident.objects.filter(primary_service=service).order_by("-updated_at").first()
-        if incident:
-            return incident
-
-    application = scope.get("application") or ""
-    if application:
-        incident = Incident.objects.filter(application=application).order_by("-updated_at").first()
-        if incident:
-            return incident
-    return None
+    return find_investigation_incident_tool(scope, incident_model=Incident)
 
 
 def _find_component_snapshot(application_key: str, service: str) -> Optional[Dict[str, Any]]:
@@ -669,75 +989,18 @@ def _find_component_snapshot(application_key: str, service: str) -> Optional[Dic
 
 
 def build_investigation_context(question: str, body: Dict[str, Any]) -> Dict[str, Any]:
-    scope = _extract_investigation_scope(question, body)
-    incident = _find_investigation_incident(scope)
-    linked_recommendation = None
-    application_graph = None
-    component_snapshot = None
-    dependency_context: Dict[str, Any] = {}
-    logs: Dict[str, Any] = {}
-    traces: Dict[str, Any] = {}
-    prometheus_context: Dict[str, Any] = {}
-
-    application_key = scope.get("application") or ""
-    service = scope.get("service") or ""
-
-    if incident:
-        timeline_payload = _incident_timeline_payload(incident)
-        linked_recommendation = timeline_payload.get("linked_recommendation")
-        dependency_context = incident.dependency_graph or _get_dependency_context(incident.primary_service or incident.target_host)
-        application_key = application_key or incident.application or dependency_context.get("application") or ""
-        service = service or incident.primary_service or incident.target_host or ""
-    else:
-        timeline_payload = None
-        dependency_context = _get_dependency_context(service or "")
-
-    if application_key:
-        application_graph = _application_graph_payload(application_key)
-
-    if application_key and service:
-        component_snapshot = _find_component_snapshot(application_key, service)
-
-    target_host = (
-        (component_snapshot or {}).get("target_host")
-        or (incident.target_host if incident else "")
-        or service
-        or scope.get("service")
-        or ""
+    return build_investigation_context_tool(
+        question,
+        body,
+        incident_model=Incident,
+        build_application_overview=_build_application_overview,
+        incident_timeline_payload=_incident_timeline_payload,
+        get_dependency_context=_get_dependency_context,
+        application_graph_payload=_application_graph_payload,
+        fetch_elasticsearch_logs=_fetch_elasticsearch_logs,
+        fetch_jaeger_traces=_fetch_jaeger_traces,
+        fetch_metrics_query=_fetch_metrics_query,
     )
-    service_name = (
-        (component_snapshot or {}).get("service")
-        or (incident.primary_service if incident else "")
-        or service
-        or target_host
-    )
-
-    if target_host or service_name:
-        logs = _fetch_elasticsearch_logs(target_host, question or service_name)
-        traces = _fetch_jaeger_traces(service_name)
-        prometheus_context = {
-            "latency_p95_seconds": _fetch_prometheus_custom_query(
-                f'histogram_quantile(0.95, sum by (le) (rate(flask_http_request_duration_seconds_bucket{{job="{service_name}"}}[5m])))'
-            ) if service_name else {},
-            "error_rate": _fetch_prometheus_custom_query(
-                f'sum(rate(flask_http_request_total{{job="{service_name}",status=~"5.."}}[5m]))'
-            ) if service_name else {},
-        }
-
-    return {
-        "scope": scope,
-        "incident": _incident_timeline_payload(incident) if incident else None,
-        "linked_recommendation": linked_recommendation,
-        "application_graph": application_graph,
-        "component_snapshot": component_snapshot,
-        "dependency_graph": dependency_context,
-        "prometheus": prometheus_context,
-        "elasticsearch": logs,
-        "jaeger": traces,
-        "target_host": target_host,
-        "service_name": service_name,
-        "application": application_key,
-    }
 
 
 def _chat_json_response(session: Optional[ChatSession], payload: Dict[str, Any], status: int = 200) -> JsonResponse:
@@ -746,6 +1009,13 @@ def _chat_json_response(session: Optional[ChatSession], payload: Dict[str, Any],
         _record_chat_reply(session, enriched_payload)
         return JsonResponse(enriched_payload, status=status)
     return JsonResponse(payload, status=status)
+
+
+def _is_authorized_mcp_request(request: HttpRequest) -> bool:
+    if getattr(request, "user", None) and request.user.is_authenticated:
+        return True
+    supplied = (request.headers.get("X-MCP-Token") or "").strip()
+    return bool(MCP_INTERNAL_TOKEN and supplied and supplied == MCP_INTERNAL_TOKEN)
 
 # --- VIP User Check ---
 def get_vip_emails() -> set:
@@ -954,9 +1224,419 @@ def _lookup_recent_alert_recommendation(alert_id: Optional[str]) -> Optional[Dic
     if not isinstance(entries, list):
         return None
     for entry in entries:
-        if isinstance(entry, dict) and entry.get("alert_id") == alert_id:
+        if isinstance(entry, dict) and entry.get("alert_id") == alert_id and _recent_alert_recommendation_is_fresh(entry):
             return entry
     return None
+
+
+def _parse_recent_alert_timestamp(value: Any) -> Optional[datetime]:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, timezone=ZoneInfo("UTC"))
+    return parsed
+
+
+def _recent_alert_recommendation_is_fresh(entry: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    observed_at = _parse_recent_alert_timestamp(entry.get("created_at") or entry.get("last_execution_at"))
+    if not observed_at:
+        return False
+    return (timezone.now() - observed_at).total_seconds() <= RECENT_ALERT_FRESHNESS_SECONDS
+
+
+def _extract_log_messages(log_payload: Dict[str, Any]) -> List[str]:
+    hits = ((log_payload or {}).get("hits") or {}).get("hits") or []
+    messages: List[str] = []
+    for hit in hits:
+        if not isinstance(hit, dict):
+            continue
+        source = hit.get("_source") if isinstance(hit.get("_source"), dict) else {}
+        message = source.get("message")
+        if isinstance(message, str) and message.strip():
+            messages.append(message.strip())
+    return messages
+
+
+def _component_aliases(component: str) -> List[str]:
+    if not component:
+        return []
+    normalized = str(component).strip().lower()
+    aliases = {normalized, normalized.replace("_", "-"), normalized.replace("-", "_")}
+    if normalized.startswith("app-"):
+        aliases.add(normalized.replace("app-", ""))
+    if normalized == "db":
+        aliases.update({"postgres", "postgresql", "database", "psycopg2", "sql", "pg_"})
+    elif normalized == "gateway":
+        aliases.update({"nginx", "proxy"})
+    elif normalized == "frontend":
+        aliases.update({"ui", "browser", "nginx"})
+    elif normalized == "toxiproxy":
+        aliases.update({"proxy", "toxiproxy"})
+    return sorted(alias for alias in aliases if alias)
+
+
+def _message_mentions_component(message: str, component: str) -> bool:
+    haystack = (message or "").lower()
+    return any(alias in haystack for alias in _component_aliases(component))
+
+
+def _trace_contains_error(trace_payload: Dict[str, Any], *, db_related: bool = False) -> bool:
+    error_tokens = (" error", " exception", " failed", " timeout", "connection refused", "operationalerror")
+    db_tokens = ("postgres", "psycopg2", "database", "pg_", "sql", "db")
+    for trace in (trace_payload or {}).get("data") or []:
+        if not isinstance(trace, dict):
+            continue
+        processes = trace.get("processes") if isinstance(trace.get("processes"), dict) else {}
+        for span in trace.get("spans") or []:
+            if not isinstance(span, dict):
+                continue
+            process = processes.get(span.get("processID") or "", {}) if isinstance(processes, dict) else {}
+            haystack = " ".join(
+                part for part in [
+                    str(span.get("operationName") or ""),
+                    json.dumps(span.get("tags") or [], default=str),
+                    json.dumps(span.get("logs") or [], default=str),
+                    json.dumps(process.get("tags") or [], default=str) if isinstance(process, dict) else "",
+                ]
+                if part
+            ).lower()
+            if not any(token in haystack for token in error_tokens):
+                continue
+            if not db_related or any(token in haystack for token in db_tokens):
+                return True
+    return False
+
+
+def _trace_contains_component_error(trace_payload: Dict[str, Any], component: str) -> bool:
+    aliases = _component_aliases(component)
+    if not aliases:
+        return False
+    error_tokens = (" error", " exception", " failed", " timeout", "connection refused", "operationalerror")
+    for trace in (trace_payload or {}).get("data") or []:
+        if not isinstance(trace, dict):
+            continue
+        processes = trace.get("processes") if isinstance(trace.get("processes"), dict) else {}
+        for span in trace.get("spans") or []:
+            if not isinstance(span, dict):
+                continue
+            process = processes.get(span.get("processID") or "", {}) if isinstance(processes, dict) else {}
+            haystack = " ".join(
+                part for part in [
+                    str(span.get("operationName") or ""),
+                    json.dumps(span.get("tags") or [], default=str),
+                    json.dumps(span.get("logs") or [], default=str),
+                    json.dumps(process.get("tags") or [], default=str) if isinstance(process, dict) else "",
+                ]
+                if part
+            ).lower()
+            if any(token in haystack for token in error_tokens) and any(alias in haystack for alias in aliases):
+                return True
+    return False
+
+
+def _error_tokens() -> Tuple[str, ...]:
+    return (
+        " error",
+        " exception",
+        " failed",
+        " timeout",
+        "connection refused",
+        "operationalerror",
+        "runtimeerror",
+        "insufficient",
+        "available=0",
+        "status=503",
+        "db_write_failed",
+        "db_query_failed",
+        "fatal",
+        "critical",
+    )
+
+
+def _extract_metric_result_count(query_result: Dict[str, Any]) -> int:
+    if not isinstance(query_result, dict):
+        return 0
+    result = query_result.get("result")
+    return len(result) if isinstance(result, list) else 0
+
+
+def _extract_alert_states(alert_state_payload: Dict[str, Any]) -> List[str]:
+    states: List[str] = []
+    for item in (alert_state_payload or {}).get("result") or []:
+        if not isinstance(item, dict):
+            continue
+        metric = item.get("metric") if isinstance(item.get("metric"), dict) else {}
+        state = str(metric.get("alertstate") or metric.get("state") or "").strip().lower()
+        if state:
+            states.append(state)
+    return states
+
+
+def _normalize_signature_text(value: str, *, limit: int = 180) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    text = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "<ip>", text)
+    text = re.sub(r"\b[0-9a-f]{8}-[0-9a-f-]{27}\b", "<uuid>", text)
+    text = re.sub(r"\b\d+\b", "<num>", text)
+    text = re.sub(r"\s+", " ", text)
+    return text[:limit]
+
+
+def _collect_log_error_messages(log_payload: Dict[str, Any], *, limit: int = 3) -> List[str]:
+    messages = _extract_log_messages(log_payload)
+    tokens = _error_tokens()
+    filtered = [msg for msg in messages if any(token in msg.lower() for token in tokens)]
+    return [_normalize_signature_text(msg) for msg in filtered[:limit] if msg]
+
+
+def _structured_evidence_from_context(
+    context: Optional[Dict[str, Any]],
+    *,
+    alert_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    context = context or {}
+    alert_payload = alert_payload or {}
+    logger.info(f"[EVIDENCE] Starting evidence extraction for alert: {alert_payload.get('alert_name', 'unknown')}")
+    metrics = context.get("metrics") if isinstance(context, dict) else {}
+    alert_state = (metrics or {}).get("alert_state") if isinstance(metrics, dict) else {}
+    custom_query = (metrics or {}).get("custom_query") if isinstance(metrics, dict) else {}
+    custom_query_value = _extract_first_sample_value(custom_query or {})
+    custom_query_result_count = _extract_metric_result_count(custom_query or {})
+    alert_states = _extract_alert_states(alert_state or {})
+    if alert_states:
+        alert_firing: Optional[bool] = any(state == "firing" for state in alert_states)
+    else:
+        # ALERTS metric returned no samples — fall back to the inbound payload's status field
+        payload_status = str(alert_payload.get("status") or "").strip().lower()
+        if payload_status == "firing":
+            alert_firing = True
+        elif payload_status in ("resolved", "ok"):
+            alert_firing = False
+        else:
+            alert_firing = None
+    logger.debug(f"[EVIDENCE] Alert state from metric: {alert_states} | Resolved alert_firing: {alert_firing} (payload status: {alert_payload.get('status')})")
+
+    dependency_graph = context.get("dependency_graph") if isinstance(context, dict) else {}
+    blast_radius = (dependency_graph or {}).get("blast_radius") or []
+    depends_on = (dependency_graph or {}).get("depends_on") or []
+    target_component = str(
+        context.get("target_host")
+        or context.get("service_name")
+        or alert_payload.get("target_host")
+        or ""
+    )
+    primary_symptom = str(
+        alert_payload.get("alert_name")
+        or ((alert_payload.get("annotations") or {}).get("summary"))
+        or ((alert_payload.get("annotations") or {}).get("description"))
+        or context.get("alert_name")
+        or "unknown_alert"
+    )
+
+    confirming_signals: List[str] = []
+    contradicting_signals: List[str] = []
+    missing_signals: List[str] = []
+    dependency_hard_evidence: Dict[str, List[str]] = {}
+    log_messages = _extract_log_messages(context.get("elasticsearch") or {})
+    normalized_error_messages = _collect_log_error_messages(context.get("elasticsearch") or {})
+    trace_service_error = _trace_contains_error(context.get("jaeger") or {}, db_related=False)
+    trace_dependency_errors: Dict[str, bool] = {}
+
+    logger.debug(f"[EVIDENCE] Alert firing state: {alert_firing}, Custom query value: {custom_query_value}")
+    
+    if alert_firing is True:
+        confirming_signals.append("Alert state is still firing.")
+    elif alert_firing is False:
+        contradicting_signals.append("Alert state is no longer firing.")
+    else:
+        missing_signals.append("Alert state was not available from the metrics backend.")
+
+    if custom_query_value is not None:
+        if custom_query_value > 0.1:
+            confirming_signals.append(f"Alert metric remains elevated at {custom_query_value:.2f}.")
+        else:
+            contradicting_signals.append(f"Alert metric is low at {custom_query_value:.2f}.")
+    elif custom_query_result_count:
+        confirming_signals.append("Custom metric query returned active samples.")
+    elif alert_firing is True:
+        # Alert state already confirmed firing — no separate custom query is required
+        logger.debug("[EVIDENCE] Skipping custom metric missing signal — alert_firing already confirmed")
+    else:
+        missing_signals.append("No custom metric sample was available.")
+    
+    logger.debug(f"[EVIDENCE] Log error count: {len(normalized_error_messages)}, Trace service error: {trace_service_error}")
+
+    if normalized_error_messages:
+        confirming_signals.append("Recent logs contain active error messages.")
+    else:
+        contradicting_signals.append("Recent logs do not contain clear active error messages.")
+
+    if trace_service_error:
+        confirming_signals.append("Recent traces contain service failures.")
+    else:
+        contradicting_signals.append("Recent traces do not show service failures.")
+
+    tokens = _error_tokens()
+    for dependency in depends_on:
+        if not dependency:
+            continue
+        dependency_evidence: List[str] = []
+        # Hard evidence: log message explicitly names the dependency AND contains an error token
+        if any(_message_mentions_component(msg, dependency) and any(token in msg.lower() for token in tokens) for msg in log_messages):
+            dependency_evidence.append(f"Logs reference failures on dependency {dependency}.")
+        dep_trace_error = _trace_contains_component_error(context.get("jaeger") or {}, dependency)
+        if dep_trace_error:
+            dependency_evidence.append(f"Traces show failing spans for dependency {dependency}.")
+        # Soft evidence: service has active errors AND trace shows any span touching this dependency
+        # This catches data-layer issues (e.g. insufficient quantity) where the DB is causal but logs
+        # reference the business-level symptom rather than the dependency name directly
+        if not dependency_evidence and normalized_error_messages:
+            dep_aliases = _component_aliases(dependency)
+            trace_calls_dep = any(
+                any(alias in span_text for alias in dep_aliases)
+                for trace in (context.get("jaeger") or {}).get("data") or []
+                if isinstance(trace, dict)
+                for span in (trace.get("spans") or [])
+                if isinstance(span, dict)
+                for span_text in [
+                    " ".join(filter(None, [
+                        str(span.get("operationName") or ""),
+                        json.dumps(span.get("tags") or [], default=str),
+                        json.dumps((trace.get("processes") or {}).get(span.get("processID") or "", {}).get("tags") or [], default=str),
+                    ])).lower()
+                ]
+            )
+            if trace_calls_dep:
+                dependency_evidence.append(f"Service has active errors and traces show calls to dependency {dependency} — likely causal.")
+            elif _message_mentions_component(" ".join(log_messages), dependency):
+                # Dependency is mentioned in logs even without a combined error token — soft signal
+                dependency_evidence.append(f"Logs reference dependency {dependency} in context of active errors.")
+        trace_dependency_errors[str(dependency)] = dep_trace_error
+        if dependency_evidence:
+            dependency_hard_evidence[str(dependency)] = dependency_evidence
+            confirming_signals.extend(dependency_evidence)
+            logger.debug(f"[EVIDENCE] Dependency {dependency} evidence: {dependency_evidence}")
+        elif blast_radius:
+            missing_signals.append(f"Dependency {dependency} is in the topology path, but no direct or indirect evidence found.")
+
+    best_dependency_target = next(iter(dependency_hard_evidence), "")
+    signal_score = 0.0
+    # alert_firing=True from ALERTS metric OR from payload status both earn full weight
+    signal_score += 0.25 if alert_firing is True else 0.0
+    # custom query is a bonus — only subtract if alert is NOT confirmed
+    if custom_query_value is not None and custom_query_value > 0.1:
+        signal_score += 0.20
+    elif custom_query_value is not None and custom_query_value <= 0.1:
+        # metric present but low — mild negative
+        if alert_firing is not True:
+            signal_score -= 0.05
+    # No penalty for missing custom query when alert_firing is already confirmed
+    signal_score += 0.20 if normalized_error_messages else 0.0
+    signal_score += 0.20 if trace_service_error else 0.0
+    signal_score += min(0.15, 0.05 * len(dependency_hard_evidence))
+    signal_score -= 0.10 if alert_firing is False else 0.0
+    signal_score -= 0.05 if not normalized_error_messages and alert_firing is not True else 0.0
+    confidence_score = max(0.0, min(1.0, round(signal_score, 2)))
+    
+    logger.info(f"[EVIDENCE] Confidence score: {confidence_score:.2f} | Best dependency target: {best_dependency_target} | Signals: {len(confirming_signals)} confirming, {len(contradicting_signals)} contradicting, {len(missing_signals)} missing")
+
+    recommended_action_mode = "observe"
+    confidence_reason = "No strong failure evidence is present yet."
+    if confidence_score >= 0.35:
+        recommended_action_mode = "diagnose"
+        confidence_reason = "There is enough live evidence to continue diagnostic investigation."
+    if best_dependency_target:
+        confidence_reason = f"Direct evidence points to downstream component {best_dependency_target}."
+
+    return {
+        "schema_version": "structured-evidence-v1",
+        "primary_symptom": primary_symptom,
+        "target_component": target_component,
+        "service_name": context.get("service_name") or alert_payload.get("service_name") or "",
+        "target_host": context.get("target_host") or alert_payload.get("target_host") or "",
+        "candidate_dependencies": [str(item) for item in depends_on if item],
+        "blast_radius": [str(item) for item in blast_radius if item],
+        "signals": {
+            "confirming": confirming_signals,
+            "contradicting": contradicting_signals,
+            "missing": missing_signals,
+        },
+        "observations": {
+            "alert_states": alert_states,
+            "alert_firing": alert_firing,
+            "custom_query_value": custom_query_value,
+            "custom_query_result_count": custom_query_result_count,
+            "log_error_count": len(normalized_error_messages),
+            "log_error_examples": normalized_error_messages,
+            "trace_service_error": trace_service_error,
+            "trace_dependency_errors": trace_dependency_errors,
+        },
+        "dependency_hard_evidence": dependency_hard_evidence,
+        "best_dependency_target": best_dependency_target,
+        "confidence_score": confidence_score,
+        "confidence_reason": confidence_reason,
+        "recommended_action_mode": recommended_action_mode,
+        "error_signature": hashlib.sha256(
+            json.dumps(
+                {
+                    "logs": normalized_error_messages,
+                    "trace_service_error": trace_service_error,
+                    "trace_dependency_errors": trace_dependency_errors,
+                },
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()[:16],
+    }
+
+
+def _format_structured_evidence_for_prompt(evidence: Dict[str, Any], max_chars: int = 1200) -> str:
+    if not isinstance(evidence, dict) or not evidence:
+        return "{}"
+    prompt_safe = {
+        "primary_symptom": evidence.get("primary_symptom"),
+        "target_component": evidence.get("target_component"),
+        "candidate_dependencies": evidence.get("candidate_dependencies") or [],
+        "signals": evidence.get("signals") or {},
+        "observations": evidence.get("observations") or {},
+        "confidence_score": evidence.get("confidence_score"),
+        "confidence_reason": evidence.get("confidence_reason"),
+        "recommended_action_mode": evidence.get("recommended_action_mode"),
+    }
+    return _head_for_prompt(json.dumps(prompt_safe, indent=2, default=str), max_chars)
+
+
+def _assess_recommendation_evidence(context: Dict[str, Any]) -> Dict[str, Any]:
+    evidence = _structured_evidence_from_context(context)
+    service_hard_evidence = list((evidence.get("signals") or {}).get("confirming") or [])
+    dependency_hard_evidence = evidence.get("dependency_hard_evidence") or {}
+    missing_evidence = list((evidence.get("signals") or {}).get("missing") or [])
+    best_dependency_target = evidence.get("best_dependency_target") or ""
+    safe_action = evidence.get("recommended_action_mode") or "observe"
+    hard_evidence = service_hard_evidence[:]
+    for dependency_evidence in dependency_hard_evidence.values():
+        hard_evidence.extend(dependency_evidence)
+
+    return {
+        "safe_action": safe_action,
+        "confidence_reason": evidence.get("confidence_reason") or "",
+        "confidence_score": evidence.get("confidence_score") or 0.0,
+        "target_component": evidence.get("target_component") or "",
+        "service_hard_evidence": service_hard_evidence,
+        "dependency_hard_evidence": dependency_hard_evidence,
+        "best_dependency_target": best_dependency_target,
+        "hard_evidence": hard_evidence,
+        "missing_evidence": missing_evidence,
+        "allow_dependency_pivot": bool(best_dependency_target),
+        "structured_evidence": evidence,
+    }
 
 
 def _shared_dependency_suspected(context: Dict[str, Any]) -> bool:
@@ -997,13 +1677,20 @@ def _coerce_diagnostic_plan(
     service_name = context.get("service_name") or target_host
     dependency_graph = context.get("dependency_graph") or {}
     suspected_dependency = _shared_dependency_suspected(context)
+    evidence_assessment = _assess_recommendation_evidence(context)
+    fallback_target = fallback_target_host or service_name or target_host
+    best_dependency_target = evidence_assessment.get("best_dependency_target") or ""
 
-    if suspected_dependency and (service_name or "").startswith("app-") and "db" in (dependency_graph.get("depends_on") or []):
-        target_host = "db"
-        target_type = "database"
-        why = why or "Shared dependency indicators point to the database path, so the next diagnostic should pivot to the database agent."
+    if suspected_dependency and best_dependency_target and best_dependency_target != fallback_target and evidence_assessment.get("allow_dependency_pivot"):
+        target_host = str(best_dependency_target)
+        why = why or f"Direct evidence points to downstream component {best_dependency_target}, so the next diagnostic should pivot there."
         if not diagnostic_command or diagnostic_command.startswith("tail ") or "/var/log/demo/" in diagnostic_command:
             diagnostic_command = _default_diagnostic_for_target(target_host)
+    elif suspected_dependency and (dependency_graph.get("depends_on") or []):
+        target_host = fallback_target
+        target_type = "application_container" if str(target_host).startswith("app-") else "service"
+        why = why or "A downstream dependency may be involved, but there is no direct evidence yet. Verify the impacted component first before pivoting."
+        diagnostic_command = _default_diagnostic_for_target(target_host)
 
     if target_host == "db":
         target_type = "database"
@@ -1023,7 +1710,7 @@ def _coerce_diagnostic_plan(
 
     should_execute = _to_bool(
         ai_plan.get("should_execute"),
-        default=bool(diagnostic_command and target_host),
+        default=bool(diagnostic_command and target_host and evidence_assessment.get("safe_action") != "observe"),
     )
 
     return {
@@ -1033,6 +1720,9 @@ def _coerce_diagnostic_plan(
         "target_type": target_type,
         "diagnostic_command": diagnostic_command,
         "should_execute": should_execute,
+        "decision_policy": evidence_assessment.get("safe_action") or "diagnose",
+        "confidence_reason": evidence_assessment.get("confidence_reason") or "",
+        "evidence_assessment": evidence_assessment,
     }
 
 
@@ -1062,6 +1752,112 @@ def _summarize_execution_type(execution_type: str) -> str:
     return "remediation" if execution_type == "remediation" else "diagnostic"
 
 
+def _policy_status_code(policy_decision: Dict[str, Any]) -> int:
+    blocked_reasons = policy_decision.get("blocked_reasons") or []
+    transient_block = any("cooldown" in str(reason).lower() or "retry limit" in str(reason).lower() for reason in blocked_reasons)
+    return 429 if transient_block else 403
+
+
+def _get_or_create_behavior_version() -> Optional[AgentBehaviorVersion]:
+    payload = current_behavior_version_payload()
+    defaults = {
+        "prompt_version": payload.get("prompt_version", ""),
+        "policy_version": payload.get("policy_version", ""),
+        "model_version": payload.get("model_version", ""),
+        "evidence_rules_version": payload.get("evidence_rules_version", ""),
+        "ranking_version": payload.get("ranking_version", ""),
+        "metadata_json": payload.get("metadata_json") or {},
+        "is_active": True,
+    }
+    behavior, _ = AgentBehaviorVersion.objects.get_or_create(
+        name=payload.get("name", "default"),
+        defaults=defaults,
+    )
+    changed = False
+    for field, value in defaults.items():
+        if getattr(behavior, field) != value:
+            setattr(behavior, field, value)
+            changed = True
+    if changed:
+        behavior.save()
+    return behavior
+
+
+def _check_service_execution_frequency(service: str) -> Dict[str, Any]:
+    service_name = (service or "").strip()
+    if not service_name:
+        return {"allowed": True, "count": 0, "max_frequency": None, "window_seconds": None}
+    config = frequency_limit_config()
+    cutoff = timezone.now() - timedelta(seconds=config["window_seconds"])
+    count = ExecutionIntent.objects.filter(
+        service=service_name,
+        created_at__gte=cutoff,
+    ).exclude(status__in=["blocked", "expired"]).count()
+    allowed = count < config["max_frequency"]
+    reason = "" if allowed else f"Execution frequency limit reached for service '{service_name}'."
+    return {
+        "allowed": allowed,
+        "count": count,
+        "max_frequency": config["max_frequency"],
+        "window_seconds": config["window_seconds"],
+        "reason": reason,
+    }
+
+
+def _prepare_execution_intent(
+    *,
+    session: Optional[ChatSession],
+    user: Any,
+    incident: Optional[Incident],
+    execution_type: str,
+    command: str,
+    typed_action: Dict[str, Any],
+    target_host: str,
+    service: str,
+    environment: str,
+    policy_decision: Dict[str, Any],
+    ranking: Dict[str, Any],
+    context_fingerprint: str,
+    dry_run: bool,
+    rollback_metadata: Dict[str, Any],
+    idempotency_key: str,
+) -> Tuple[ExecutionIntent, bool]:
+    behavior_version = _get_or_create_behavior_version()
+    defaults = {
+        "session": session,
+        "user": user if getattr(user, "is_authenticated", False) else None,
+        "incident": incident,
+        "behavior_version": behavior_version,
+        "execution_type": execution_type,
+        "action_type": str((typed_action or {}).get("action") or ""),
+        "service": service,
+        "environment": environment,
+        "target_host": target_host,
+        "command": command,
+        "action_json": typed_action or {},
+        "action_signature": execution_action_signature(typed_action),
+        "request_signature": sign_intent_payload(
+            {
+                "execution_type": execution_type,
+                "typed_action": typed_action or {},
+                "target_host": target_host,
+                "context_fingerprint": context_fingerprint,
+            }
+        ),
+        "requires_approval": bool(policy_decision.get("requires_approval")),
+        "dry_run": dry_run,
+        "rollback_json": rollback_metadata or {},
+        "policy_decision_json": policy_decision or {},
+        "ranking_json": ranking or {},
+        "context_fingerprint": context_fingerprint,
+        "status": "dry_run" if dry_run else "planned",
+    }
+    intent, created = ExecutionIntent.objects.get_or_create(idempotency_key=idempotency_key, defaults=defaults)
+    if not created:
+        return intent, True
+    return intent, False
+
+
 def _coerce_remediation_command(analysis_sections: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not isinstance(analysis_sections, dict):
         return {}
@@ -1077,6 +1873,8 @@ def _coerce_remediation_command(analysis_sections: Dict[str, Any], context: Opti
         or ""
     )
     depends_on = (dependency_graph or {}).get("depends_on") or []
+    evidence_assessment = _assess_recommendation_evidence(context or {})
+    current_target = str((context or {}).get("target_host") or service_name or "")
 
     candidate_service = service_name
     if "toxiproxy" in context_blob or "connection to server at \"toxiproxy\"" in context_blob:
@@ -1086,12 +1884,59 @@ def _coerce_remediation_command(analysis_sections: Dict[str, Any], context: Opti
     elif "db" in depends_on or "postgres" in context_blob or "database" in context_blob:
         candidate_service = "db"
 
+    analysis_blob = json.dumps(analysis_sections or {}, default=str).lower()
+
+    # If the LLM generated a SQL command (derived from live source context), route it
+    # to db-agent which has psql on its allowlist. Detect both bare SQL DML and
+    # fully-formed psql CLI commands.
+    existing_cmd = (analysis_sections.get("remediation_command") or "").strip()
+    # If the LLM explicitly returned no command (e.g. "can't fix safely"), honour
+    # that decision — don't fall through and invent a docker restart.
+    if not existing_cmd:
+        analysis_sections["remediation_typed_action"] = {}
+        return analysis_sections
+    _sql_dml_prefixes = ("psql ", "update ", "insert ", "delete ", "select ")
+    if any(existing_cmd.lower().startswith(p) for p in _sql_dml_prefixes):
+        # Bare SQL DML (UPDATE/INSERT...) needs wrapping in a psql call.
+        if not existing_cmd.lower().startswith("psql "):
+            safe_sql = existing_cmd.replace('"', '\"')
+            existing_cmd = f'psql -h db -U {DB_USER} -d {DB_NAME} -c "{safe_sql}"'
+            analysis_sections["remediation_command"] = existing_cmd
+        analysis_sections["remediation_target_host"] = "db"
+        analysis_sections["remediation_requires_approval"] = True
+        analysis_sections["remediation_typed_action"] = infer_typed_action(
+            command=analysis_sections["remediation_command"],
+            target_host="db",
+            why=str(analysis_sections.get("remediation_why") or "").strip(),
+            requires_approval=True,
+            service="db",
+        )
+        return analysis_sections
+
+    if candidate_service and candidate_service not in {service_name, current_target}:
+        component_text_evidence = any(
+            token in analysis_blob
+            for token in _component_aliases(candidate_service)
+        )
+        dependency_hard_evidence = evidence_assessment.get("dependency_hard_evidence") or {}
+        if candidate_service not in dependency_hard_evidence and not component_text_evidence:
+            analysis_sections["remediation_command"] = ""
+            analysis_sections["remediation_target_host"] = ""
+            analysis_sections["remediation_why"] = (
+                analysis_sections.get("remediation_why")
+                or f"Remediation for {candidate_service} was withheld because the current evidence does not directly confirm failure on that component."
+            )
+            analysis_sections["remediation_requires_approval"] = False
+            analysis_sections["remediation_typed_action"] = {}
+            return analysis_sections
+
     container_name = RESTARTABLE_CONTAINER_NAMES.get(candidate_service)
     if not container_name:
         analysis_sections["remediation_command"] = ""
         analysis_sections["remediation_target_host"] = ""
         analysis_sections["remediation_why"] = analysis_sections.get("remediation_why") or ""
         analysis_sections["remediation_requires_approval"] = False
+        analysis_sections["remediation_typed_action"] = {}
         return analysis_sections
 
     analysis_sections["remediation_command"] = f"docker restart {container_name}"
@@ -1102,6 +1947,13 @@ def _coerce_remediation_command(analysis_sections: Dict[str, Any], context: Opti
     )
     analysis_sections["remediation_service"] = candidate_service
     analysis_sections["remediation_requires_approval"] = True
+    analysis_sections["remediation_typed_action"] = infer_typed_action(
+        command=analysis_sections["remediation_command"],
+        target_host="control-agent",
+        why=str(analysis_sections.get("remediation_why") or "").strip(),
+        requires_approval=True,
+        service=candidate_service,
+    )
     return analysis_sections
 
 
@@ -1298,8 +2150,8 @@ def _extract_target_host_from_payload(payload: Dict[str, Any]) -> Optional[str]:
                 return host
     return None
 
-def _fetch_prometheus_alert(alert_name: str, target_host: Optional[str]) -> Dict[str, Any]:
-    if not PROMETHEUS_URL or not alert_name:
+def _fetch_metrics_alert_state(alert_name: str, target_host: Optional[str]) -> Dict[str, Any]:
+    if not METRICS_API_URL or not alert_name:
         return {}
     selectors = [f'alertname="{alert_name}"']
     if target_host:
@@ -1310,7 +2162,7 @@ def _fetch_prometheus_alert(alert_name: str, target_host: Optional[str]) -> Dict
     def _do_fetch():
         session = get_http_session("victoriametrics")
         response = session.get(
-            f"{PROMETHEUS_URL}/api/v1/query",
+            f"{METRICS_API_URL}/api/v1/query",
             params={"query": query},
             timeout=(3, 10),
         )
@@ -1319,14 +2171,14 @@ def _fetch_prometheus_alert(alert_name: str, target_host: Optional[str]) -> Dict
 
     return metadata_cache_get_or_fetch("prom_alert", cache_id, _do_fetch, ttl=30, backend="victoriametrics")
 
-def _fetch_prometheus_custom_query(query: str) -> Dict[str, Any]:
-    if not PROMETHEUS_URL or not query:
+def _fetch_metrics_query(query: str) -> Dict[str, Any]:
+    if not METRICS_API_URL or not query:
         return {}
 
     def _do_fetch(q: str) -> Dict[str, Any]:
         session = get_http_session("victoriametrics")
         response = session.get(
-            f"{PROMETHEUS_URL}/api/v1/query",
+            f"{METRICS_API_URL}/api/v1/query",
             params={"query": q},
             timeout=(3, 10),
         )
@@ -1414,20 +2266,485 @@ def collect_alert_context(alert_payload: Dict[str, Any]) -> Dict[str, Any]:
         or labels.get("service")
         or labels.get("job")
     )
-    prometheus_query = alert_payload.get("prometheus_query")
+    metrics_query = alert_payload.get("prometheus_query") or alert_payload.get("metrics_query")
     dependency_context = _get_dependency_context(service_name or target_host)
+    recent_incident_memory = _recent_incident_memory(service_name, target_host, alert_name)
+    inventory_runtime = _inventory_runtime_context(service_name)
 
     return {
         "alert_name": alert_name,
         "target_host": target_host,
         "service_name": service_name,
         "dependency_graph": dependency_context,
-        "prometheus": {
-            "alert_state": _fetch_prometheus_alert(alert_name, target_host),
-            "custom_query": _fetch_prometheus_custom_query(prometheus_query) if prometheus_query else {},
+        "recent_incident_memory": recent_incident_memory,
+        "inventory_runtime": inventory_runtime,
+        "metrics": {
+            "alert_state": _fetch_metrics_alert_state(alert_name, target_host),
+            "custom_query": _fetch_metrics_query(metrics_query) if metrics_query else {},
         },
         "elasticsearch": _fetch_elasticsearch_logs(target_host, query_text),
         "jaeger": _fetch_jaeger_traces(service_name),
+    }
+
+
+def _incident_state_cache_key(fingerprint: str) -> str:
+    return f"{INCIDENT_STATE_CACHE_PREFIX}:{fingerprint}"
+
+
+def _build_incident_state_fingerprint(
+    alert_payload: Optional[Dict[str, Any]],
+    context: Optional[Dict[str, Any]],
+    structured_evidence: Optional[Dict[str, Any]],
+) -> str:
+    alert_payload = alert_payload or {}
+    context = context or {}
+    structured_evidence = structured_evidence or {}
+    observations = structured_evidence.get("observations") if isinstance(structured_evidence, dict) else {}
+    dependency_graph = context.get("dependency_graph") if isinstance(context, dict) else {}
+    linked_recommendation = context.get("linked_recommendation") if isinstance(context, dict) else {}
+    signature_payload = {
+        "alert_name": alert_payload.get("alert_name") or context.get("alert_name") or "",
+        "status": alert_payload.get("status") or "firing",
+        "target_host": context.get("target_host") or alert_payload.get("target_host") or "",
+        "service_name": context.get("service_name") or alert_payload.get("service_name") or "",
+        "candidate_dependencies": sorted(structured_evidence.get("candidate_dependencies") or []),
+        "best_dependency_target": structured_evidence.get("best_dependency_target") or "",
+        "blast_radius": sorted((dependency_graph or {}).get("blast_radius") or []),
+        "alert_firing": observations.get("alert_firing"),
+        "custom_query_value": round(float(observations.get("custom_query_value") or 0.0), 2) if observations.get("custom_query_value") is not None else None,
+        "log_error_examples": observations.get("log_error_examples") or [],
+        "trace_service_error": observations.get("trace_service_error"),
+        "trace_dependency_errors": observations.get("trace_dependency_errors") or {},
+        "prior_remediation_command": (linked_recommendation or {}).get("remediation_command") or "",
+        "error_signature": structured_evidence.get("error_signature") or "",
+    }
+    fingerprint_source = json.dumps(signature_payload, sort_keys=True, default=str)
+    fingerprint = hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()
+    logger.info(f"[FINGERPRINT] Generated: {fingerprint[:16]}... for alert {alert_payload.get('alert_name')} on {context.get('target_host')}")
+    return fingerprint
+
+
+def _get_cached_state_decision(fingerprint: str) -> Dict[str, Any]:
+    cached = cache.get(_incident_state_cache_key(fingerprint))
+    if isinstance(cached, dict):
+        logger.info(f"[CACHE] HIT for fingerprint {fingerprint[:16]}... | Stored decision: {cached.get('remediation_command', 'N/A')}")
+        return cached
+    else:
+        logger.info(f"[CACHE] MISS for fingerprint {fingerprint[:16]}...")
+        return {}
+
+
+def _store_cached_state_decision(fingerprint: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+    existing = _get_cached_state_decision(fingerprint)
+    merged = {
+        **existing,
+        **(updates or {}),
+        "fingerprint": fingerprint,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    cache.set(_incident_state_cache_key(fingerprint), merged, INCIDENT_STATE_CACHE_TTL)
+    logger.info(f"[CACHE] STORED for fingerprint {fingerprint[:16]}... | TTL: {INCIDENT_STATE_CACHE_TTL}s | Command: {merged.get('remediation_command', 'N/A')}")
+    return merged
+
+
+def _remediation_decision_payload(analysis_sections: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(analysis_sections, dict):
+        return {}
+    typed_action = analysis_sections.get("remediation_typed_action")
+    if not isinstance(typed_action, dict):
+        typed_action = infer_typed_action(
+            command=str(analysis_sections.get("remediation_command") or "").strip(),
+            target_host=str(analysis_sections.get("remediation_target_host") or "").strip(),
+            why=str(analysis_sections.get("remediation_why") or "").strip(),
+            requires_approval=_to_bool(analysis_sections.get("remediation_requires_approval"), default=False),
+            service=str(analysis_sections.get("remediation_service") or "").strip(),
+        )
+    return {
+        "command": str(analysis_sections.get("remediation_command") or "").strip(),
+        "target_host": str(analysis_sections.get("remediation_target_host") or "").strip(),
+        "why": str(analysis_sections.get("remediation_why") or "").strip(),
+        "requires_approval": _to_bool(analysis_sections.get("remediation_requires_approval"), default=False),
+        "typed_action": typed_action,
+    }
+
+
+def _detect_remediation_variance(previous: Dict[str, Any], current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(previous, dict) or not isinstance(current, dict):
+        return None
+    previous_command = str(previous.get("command") or "").strip()
+    current_command = str(current.get("command") or "").strip()
+    if not previous_command or not current_command:
+        return None
+    previous_target = str(previous.get("target_host") or "").strip()
+    current_target = str(current.get("target_host") or "").strip()
+    previous_signature = serialize_action_signature(previous.get("typed_action")) or json.dumps({"command": previous_command, "target_host": previous_target}, sort_keys=True)
+    current_signature = serialize_action_signature(current.get("typed_action")) or json.dumps({"command": current_command, "target_host": current_target}, sort_keys=True)
+    if previous_signature == current_signature:
+        logger.debug(f"[VARIANCE] No variance detected: same command for same state")
+        return None
+    logger.warning(f"[VARIANCE] DETECTED! Previous: {previous_command} → Current: {current_command}")
+    return {
+        "detected": True,
+        "previous": previous,
+        "current": current,
+    }
+
+
+def _evidence_delta(previous: Dict[str, Any], current: Dict[str, Any]) -> Dict[str, Any]:
+    previous_signals = previous.get("signals") if isinstance(previous, dict) else {}
+    current_signals = current.get("signals") if isinstance(current, dict) else {}
+    previous_confirming = set(previous_signals.get("confirming") or [])
+    current_confirming = set(current_signals.get("confirming") or [])
+    previous_contradicting = set(previous_signals.get("contradicting") or [])
+    current_contradicting = set(current_signals.get("contradicting") or [])
+    return {
+        "new_confirming": sorted(current_confirming - previous_confirming),
+        "cleared_confirming": sorted(previous_confirming - current_confirming),
+        "new_contradicting": sorted(current_contradicting - previous_contradicting),
+        "cleared_contradicting": sorted(previous_contradicting - current_contradicting),
+    }
+
+
+def _record_remediation_variance(
+    *,
+    incident: Optional[Incident],
+    fingerprint: str,
+    variance: Dict[str, Any],
+    structured_evidence: Optional[Dict[str, Any]] = None,
+) -> None:
+    if not variance:
+        return
+    payload = {
+        "fingerprint": fingerprint,
+        "variance": variance,
+        "evidence_delta": _evidence_delta(
+            ((variance.get("previous") or {}).get("structured_evidence") or {}),
+            structured_evidence or {},
+        ),
+        "structured_evidence": structured_evidence or {},
+    }
+    logger.warning(
+        "Remediation variance detected fingerprint=%s previous=%s current=%s",
+        fingerprint[:12],
+        (variance.get("previous") or {}).get("command"),
+        (variance.get("current") or {}).get("command"),
+    )
+    if incident:
+        IncidentTimelineEvent.objects.create(
+            incident=incident,
+            event_type="remediation_variance_detected",
+            title="Remediation recommendation changed for matching incident state",
+            detail=(variance.get("current") or {}).get("command") or "",
+            payload=payload,
+        )
+
+
+def _build_contradiction_assessment(structured_evidence: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    structured_evidence = structured_evidence or {}
+    signals = structured_evidence.get("signals") if isinstance(structured_evidence, dict) else {}
+    confirming = [str(item) for item in (signals.get("confirming") or []) if item]
+    contradicting = [str(item) for item in (signals.get("contradicting") or []) if item]
+    confidence = float(structured_evidence.get("confidence_score") or 0.0)
+    total = len(confirming) + len(contradicting)
+    contradiction_ratio = round(len(contradicting) / total, 4) if total else 0.0
+    severity = "low"
+    if contradicting and (len(contradicting) >= len(confirming) or confidence < 0.35):
+        severity = "high"
+    elif contradicting:
+        severity = "medium"
+    reasons: List[str] = []
+    if contradicting:
+        reasons.append(f"Found {len(contradicting)} contradictory signal(s).")
+    if confidence < 0.35:
+        reasons.append("Overall evidence confidence is low.")
+    if len(contradicting) >= len(confirming) and contradicting:
+        reasons.append("Contradictory evidence is equal to or stronger than confirming evidence.")
+    return {
+        "severity": severity,
+        "contradiction_ratio": contradiction_ratio,
+        "confirming_count": len(confirming),
+        "contradicting_count": len(contradicting),
+        "confidence_score": confidence,
+        "should_prefer_observe": severity == "high",
+        "reasons": reasons,
+        "contradicting_signals": contradicting[:6],
+    }
+
+
+def _command_looks_like_restart(command: str) -> bool:
+    normalized = str(command or "").strip().lower()
+    if not normalized:
+        return False
+    restart_markers = (
+        "restart",
+        "reboot",
+        "rollout restart",
+        "docker restart",
+        "systemctl restart",
+        "kubectl rollout restart",
+    )
+    return any(marker in normalized for marker in restart_markers)
+
+
+def _historical_outcome_learning_snapshot(
+    *,
+    service: str = "",
+    environment: str = "",
+    action_type: str = "",
+    context_fingerprint: str = "",
+) -> Dict[str, Any]:
+    queryset = RemediationOutcome.objects.all()
+    if service:
+        queryset = queryset.filter(service=service)
+    if environment:
+        queryset = queryset.filter(environment=environment)
+    if action_type:
+        queryset = queryset.filter(action_type=action_type)
+    if context_fingerprint:
+        queryset = queryset.filter(context_fingerprint=context_fingerprint)
+
+    summary = queryset.aggregate(
+        total=models.Count("id"),
+        success_rate=models.Avg(_avg_boolean("success")),
+        avg_ttr=models.Avg("time_to_recovery_seconds"),
+        override_rate=models.Avg(_avg_boolean("operator_override")),
+    )
+    by_action = list(
+        queryset.values("action_type")
+        .annotate(
+            total=models.Count("id"),
+            success_rate=models.Avg(_avg_boolean("success")),
+            avg_ttr=models.Avg("time_to_recovery_seconds"),
+            override_rate=models.Avg(_avg_boolean("operator_override")),
+        )
+        .order_by("-total", "-success_rate")[:6]
+    )
+    recent = list(
+        queryset.values(
+            "service",
+            "environment",
+            "action_type",
+            "success",
+            "verification_status",
+            "created_at",
+            "metadata_json",
+        ).order_by("-created_at")[:5]
+    )
+    return {
+        "filters": {
+            "service": service,
+            "environment": environment,
+            "action_type": action_type,
+            "context_fingerprint": context_fingerprint,
+        },
+        "summary": {
+            "total": int(summary.get("total") or 0),
+            "success_rate": round(float(summary.get("success_rate") or 0.0), 4),
+            "avg_time_to_recovery_seconds": summary.get("avg_ttr"),
+            "operator_override_rate": round(float(summary.get("override_rate") or 0.0), 4),
+        },
+        "by_action": [
+            {
+                **row,
+                "success_rate": round(float(row.get("success_rate") or 0.0), 4),
+                "override_rate": round(float(row.get("override_rate") or 0.0), 4),
+            }
+            for row in by_action
+        ],
+        "recent_examples": recent,
+    }
+
+
+def _feedback_learning_summary(*, service: str = "", environment: str = "") -> Dict[str, Any]:
+    queryset = OperatorFeedback.objects.all()
+    if service:
+        queryset = queryset.filter(service=service)
+    if environment:
+        queryset = queryset.filter(environment=environment)
+    summary = queryset.aggregate(total=models.Count("id"))
+    breakdown = list(
+        queryset.values("feedback_type")
+        .annotate(total=models.Count("id"))
+        .order_by("feedback_type")
+    )
+    recent = list(
+        queryset.values(
+            "feedback_type",
+            "outcome_quality",
+            "service",
+            "environment",
+            "action_type",
+            "notes",
+            "created_at",
+        ).order_by("-created_at")[:8]
+    )
+    return {
+        "total": int(summary.get("total") or 0),
+        "breakdown": breakdown,
+        "recent": recent,
+    }
+
+
+def _preventive_action_candidates(component: Dict[str, Any]) -> List[Dict[str, Any]]:
+    prediction = component.get("prediction") or {}
+    features = prediction.get("features") or {}
+    service = str(component.get("service") or "")
+    suggestions: List[Dict[str, Any]] = []
+    error_rate = float(features.get("error_rate") or 0.0)
+    latency = float(features.get("latency_p95_seconds") or 0.0)
+    active_alerts = int(features.get("active_alert_count") or 0)
+    blast_radius = int(features.get("blast_radius_size") or 0)
+
+    suggestions.append(
+        {
+            "action": "pre_incident_investigation",
+            "summary": f"Open a pre-incident investigation for {service or 'the service'}.",
+            "requires_approval": False,
+            "reason": "Risk score is elevated before a confirmed incident.",
+        }
+    )
+    if error_rate >= 0.05:
+        suggestions.append(
+            {
+                "action": "check_error_budget",
+                "summary": "Review error spikes and dependency failures before the service degrades further.",
+                "requires_approval": False,
+                "reason": f"Current error rate is elevated at {error_rate:.3f}/s.",
+            }
+        )
+    if latency >= 1.0:
+        suggestions.append(
+            {
+                "action": "scale_or_throttle_review",
+                "summary": "Review scaling, saturation, or traffic throttling options.",
+                "requires_approval": True,
+                "reason": f"p95 latency is elevated at {latency:.2f}s.",
+            }
+        )
+    if active_alerts == 0 and blast_radius >= 2:
+        suggestions.append(
+            {
+                "action": "watch_incident",
+                "summary": "Create a watch incident because blast radius is high even before alerts escalate.",
+                "requires_approval": False,
+                "reason": "High blast radius risk with no active alert yet can indicate an emerging issue.",
+            }
+        )
+    return suggestions[:4]
+
+
+def _apply_contradiction_guardrail(response_data: Dict[str, Any], structured_evidence: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(response_data, dict):
+        return response_data
+    assessment = _build_contradiction_assessment(structured_evidence)
+    response_data["contradiction_assessment"] = assessment
+    remediation_command = str(response_data.get("remediation_command") or "").strip()
+    if remediation_command and assessment.get("should_prefer_observe") and _command_looks_like_restart(remediation_command):
+        validation_steps = response_data.get("validation_steps") if isinstance(response_data.get("validation_steps"), list) else []
+        validation_steps.insert(0, "Contradictory evidence is high; verify service health and dependency state before any restart.")
+        response_data["validation_steps"] = validation_steps[:8]
+        response_data["remediation_command"] = ""
+        response_data["remediation_requires_approval"] = False
+        response_data["remediation_typed_action"] = {}
+        answer = str(response_data.get("answer") or "").strip()
+        guardrail_note = "Restart recommendation was suppressed because contradictory evidence is high and confidence is low."
+        response_data["answer"] = f"{answer}\n\n{guardrail_note}".strip()
+    return response_data
+
+
+def _issue_score_from_evidence(evidence: Dict[str, Any]) -> int:
+    observations = evidence.get("observations") if isinstance(evidence, dict) else {}
+    score = 0
+    if observations.get("alert_firing") is True:
+        score += 2
+    if observations.get("custom_query_value") is not None and float(observations.get("custom_query_value") or 0.0) > 0.1:
+        score += 1
+    score += min(int(observations.get("log_error_count") or 0), 2)
+    if observations.get("trace_service_error"):
+        score += 1
+    dependency_errors = observations.get("trace_dependency_errors") if isinstance(observations.get("trace_dependency_errors"), dict) else {}
+    score += min(sum(1 for value in dependency_errors.values() if value), 2)
+    return max(score, 0)
+
+
+def _build_verification_alert_payload(source: Dict[str, Any], *, fallback_target_host: str = "", fallback_summary: str = "") -> Dict[str, Any]:
+    labels = source.get("labels") if isinstance(source.get("labels"), dict) else {}
+    annotations = source.get("annotations") if isinstance(source.get("annotations"), dict) else {}
+    return {
+        "alert_name": source.get("alert_name") or labels.get("alertname") or fallback_summary or "verification_follow_up",
+        "status": source.get("status") or "firing",
+        "target_host": source.get("target_host") or fallback_target_host,
+        "service_name": source.get("service_name") or labels.get("service_name") or labels.get("service") or labels.get("job") or "",
+        "labels": labels,
+        "annotations": annotations,
+        "prometheus_query": source.get("prometheus_query") or source.get("metrics_query") or "",
+    }
+
+
+def _run_post_action_verification(
+    *,
+    alert_payload: Dict[str, Any],
+    baseline_context: Dict[str, Any],
+    baseline_evidence: Dict[str, Any],
+    execution_type: str,
+    command: str,
+    agent_success: bool,
+) -> Dict[str, Any]:
+    logger.info(f"[VERIFICATION] Starting post-action verification for command: {command[:60]}...")
+    if not any((METRICS_API_URL, ELASTICSEARCH_URL, JAEGER_URL)):
+        logger.warning(f"[VERIFICATION] Backends not configured, marking inconclusive")
+        return {
+            "status": "inconclusive",
+            "reason": "Telemetry backends are not configured for post-action verification.",
+        }
+
+    verification_alert = _build_verification_alert_payload(
+        alert_payload,
+        fallback_target_host=str((baseline_context or {}).get("target_host") or ""),
+        fallback_summary=str((baseline_evidence or {}).get("primary_symptom") or ""),
+    )
+    fresh_context = collect_alert_context(verification_alert)
+    fresh_evidence = _structured_evidence_from_context(fresh_context, alert_payload=verification_alert)
+    baseline_score = _issue_score_from_evidence(baseline_evidence or {})
+    fresh_score = _issue_score_from_evidence(fresh_evidence or {})
+    
+    logger.debug(f"[VERIFICATION] Baseline issue score: {baseline_score}, Fresh score: {fresh_score}")
+
+    if not agent_success:
+        status = "execution_failed"
+        reason = "The action did not complete successfully, so no improvement can be confirmed."
+    elif fresh_score == 0 and (fresh_evidence.get("observations") or {}).get("alert_firing") is False:
+        status = "resolved"
+        reason = "Telemetry no longer shows an active alert or active failure indicators."
+    elif fresh_score < baseline_score:
+        status = "partially_improved"
+        reason = "Failure indicators decreased after the action, but some signals remain."
+    elif fresh_score > baseline_score:
+        status = "worsened"
+        reason = "Failure indicators increased after the action."
+    elif fresh_score == baseline_score:
+        status = "unchanged"
+        reason = "Verification telemetry did not materially change after the action."
+    else:
+        status = "inconclusive"
+        reason = "Verification telemetry was not sufficient to determine the outcome."
+    
+    logger.info(f"[VERIFICATION] Result: {status} | Baseline score: {baseline_score} → Fresh score: {fresh_score} | Reason: {reason}")
+
+    return {
+        "status": status,
+        "reason": reason,
+        "execution_type": execution_type,
+        "command": command,
+        "baseline_issue_score": baseline_score,
+        "post_issue_score": fresh_score,
+        "baseline_evidence": baseline_evidence or {},
+        "post_evidence": fresh_evidence,
+        "post_context_summary": {
+            "alert_name": fresh_context.get("alert_name") or "",
+            "target_host": fresh_context.get("target_host") or "",
+            "service_name": fresh_context.get("service_name") or "",
+        },
     }
 
 def delegate_command_to_agent(command_to_run: str, target_host: str) -> Tuple[bool, str, Dict[str, Any]]:
@@ -1469,6 +2786,29 @@ def delegate_command_to_agent(command_to_run: str, target_host: str) -> Tuple[bo
         output = f"Error: Could not communicate with the agent on {requested_target_host}. Details: {exc}"
         return False, output, {"error": str(exc)}
 
+def _format_source_context_for_prompt(context: Optional[Dict[str, Any]], max_chars: int) -> str:
+    """Format source_context from the investigation context for LLM prompt injection."""
+    source_context = (context or {}).get("source_context") if isinstance(context, dict) else {}
+    if not source_context or not isinstance(source_context, dict):
+        return ""
+    parts: List[str] = []
+    for file_entry in (source_context.get("files") or [])[:3]:
+        if not file_entry.get("readable"):
+            continue
+        parts.append(
+            f"# {file_entry['container_path']} (function: {file_entry['function_name']}, line {file_entry['line_number']})\n"
+            f"{file_entry['snippet']}"
+        )
+    for schema in (source_context.get("schema_files") or [])[:2]:
+        parts.append(f"# Schema: {schema['path']}\n{schema['content']}")
+    if not parts:
+        return ""
+    combined = "\n\n".join(parts)
+    if len(combined) > max_chars:
+        combined = combined[:max_chars]
+    return f"\nSOURCE CODE CONTEXT (read from actual application code — use to generate precise remediation):\n---\n{combined}\n---\n"
+
+
 def analyze_command_output(
     original_question: str,
     target_host: str,
@@ -1476,22 +2816,128 @@ def analyze_command_output(
     command_output: str,
     context: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str, Dict[str, Any]]:
+    # If the command output contains a Python traceback, read the referenced
+    # source files and SQL schema from the filesystem via the MCP source-reader.
+    # This lets the LLM see the actual application code and generate a precise
+    # remediation command (e.g. the correct psql UPDATE) instead of guessing.
+    source_context_prompt = ""
+    _traceback_markers = ('File "/', 'Traceback (most recent')
+    if any(marker in command_output for marker in _traceback_markers):
+        try:
+            source_result = source_read_traceback_service(
+                log_messages=[command_output],
+                path_prefix_map=MCP_SOURCE_PATH_MAP,
+                source_root=MCP_SOURCE_ROOT,
+            )
+            source_context_prompt = _format_source_context_for_prompt(
+                {"source_context": source_result}, max_chars=1600
+            )
+            files_count = len((source_result or {}).get("files") or [])
+            schema_count = len((source_result or {}).get("schema_files") or [])
+            logger.info(
+                "source_context via traceback: files=%s schema_files=%s readable_files=%s",
+                files_count,
+                schema_count,
+                (source_result or {}).get("readable_files"),
+            )
+        except Exception:
+            logger.exception("source_context traceback read failed")
+
+    # Fallback: scan schema files (*.sql, *.prisma, *.dbml) from the mounted
+    # source root whenever the traceback path didn't produce context.  This
+    # ensures the LLM always sees exact table/column names (e.g. available_quantity)
+    # even when command output contains no Python traceback.
+    if not source_context_prompt and MCP_SOURCE_ROOT:
+        try:
+            from genai.mcp_services import _scan_schema_files as _scan_schemas
+            schema_files = _scan_schemas(MCP_SOURCE_ROOT)
+            if schema_files:
+                source_context_prompt = _format_source_context_for_prompt(
+                    {"source_context": {"files": [], "schema_files": schema_files}},
+                    max_chars=1600,
+                )
+                logger.info(
+                    "source_context via schema fallback: schema_files=%s sample=%s",
+                    len(schema_files),
+                    [item.get("path") for item in schema_files[:2]],
+                )
+        except Exception:
+            logger.exception("source_context schema fallback failed")
+
+    # Trim the context dict to essential fields only before serialising — the
+    # full context (with elasticsearch hits, jaeger spans, etc.) easily exceeds
+    # the prompt budget and buries the source code snippet we just fetched.
+    _CONTEXT_KEEP_KEYS = (
+        "target_host",
+        "service_name",
+        "linked_recommendation",
+        "dependency_graph",
+        "evidence_assessment",
+        "recent_incident_memory",
+        "inventory_runtime",
+    )
+    slim_context: Dict[str, Any] = {
+        k: (context or {}).get(k)
+        for k in _CONTEXT_KEEP_KEYS
+        if (context or {}).get(k) is not None
+    }
+    evidence_source_alert = {}
+    if isinstance((context or {}).get("linked_recommendation"), dict):
+        linked = (context or {}).get("linked_recommendation") or {}
+        evidence_source_alert = {
+            "alert_name": linked.get("alert_name") or "",
+            "status": linked.get("status") or "firing",
+            "target_host": linked.get("target_host") or target_host,
+            "service_name": (linked.get("labels") or {}).get("service") or (context or {}).get("service_name") or "",
+            "labels": linked.get("labels") or {},
+            "annotations": linked.get("annotations") or {},
+        }
+    structured_evidence = _structured_evidence_from_context(context or {}, alert_payload=evidence_source_alert)
+    contradiction_assessment = _build_contradiction_assessment(structured_evidence)
+    learning_environment = (
+        str((((context or {}).get("linked_recommendation") or {}).get("labels") or {}).get("environment") or "")
+        or str((((context or {}).get("linked_recommendation") or {}).get("labels") or {}).get("env") or "")
+        or str((((context or {}).get("inventory_runtime") or {}).get("environment") or ""))
+    )
+    learning_snapshot = _historical_outcome_learning_snapshot(
+        service=str((context or {}).get("service_name") or ""),
+        environment=learning_environment.lower(),
+    )
+
     analysis_prompt = (
         "You are an IT infrastructure expert. A diagnostic command was run on a remote server. "
-        "Analyze the output and provide JSON only with keys: answer, root_cause, evidence, impact, resolution, remediation_steps, validation_steps, remediation_command, remediation_target_host, remediation_why, remediation_requires_approval. "
+        "Analyze the output and provide JSON only with keys: answer, root_cause, evidence, impact, resolution, remediation_steps, validation_steps, remediation_command, remediation_target_host, remediation_why, remediation_requires_approval, remediation_typed_action. "
         "remediation_steps and validation_steps must be arrays of concise action items. "
         "If a concrete remediation command is justified, remediation_command must be a single executable command suitable for the target troubleshooting agent. "
         "If no safe remediation command should be proposed yet, return an empty remediation_command string. "
         "remediation_requires_approval should be true whenever a remediation_command is returned. "
+        "If you can infer a structured remediation, populate remediation_typed_action with keys: action, target, reason, requires_approval, validation_plan. "
+        "You must explicitly consider contradictory evidence before recommending a restart or disruptive action. "
+        "If contradictory evidence is high, prefer validation or observation over restart. "
+        "CRITICAL: If the command output contains ERROR log lines, Python exceptions, Tracebacks, or lines containing 'db_write_failed', 'db_query_failed', 'status=503', or 'RuntimeError', those are PRIMARY evidence of the failure. "
+        "You MUST analyze them — do NOT conclude the service is healthy if ERROR entries are present. "
+        "If RECENT INCIDENT MEMORY is provided, compare the current evidence with prior diagnostics and prior remediation results. "
+        "If the same failure pattern has recurred after a previous remediation temporarily resolved it, propose the next safe remediation based on the current runtime state rather than repeating stale reasoning. "
+        "If SOURCE CODE CONTEXT is provided below, read it carefully: use the exact table names, column names, and logic from the source to write the precise remediation command. "
+        "If the error reveals a data-constraint issue (e.g. depleted inventory, zero quantity), propose a targeted SQL fix using the exact table/column names visible in the source — NOT a container restart. "
         "Do not ask the operator to inspect logs manually. If the command output contains logs, extract the likely error, impact, and concrete next action directly.\n\n"
-        f"Original Question: '{original_question}'\n"
+        f"Original Question: '{original_question[:300]}'\n"
         f"Target Server: {target_host}\n"
-        f"Command Run: `{command_to_run}`\n"
-        f"Context: {json.dumps(context or {}, indent=2)[:4000]}\n"
-        f"Command Output:\n---\n{command_output}\n---\n"
+        f"Command Run: `{command_to_run[:300]}`\n"
+        f"Structured Evidence: {_format_structured_evidence_for_prompt(structured_evidence, 900)}\n"
+        f"Contradiction Assessment: {_head_for_prompt(json.dumps(contradiction_assessment, indent=2, default=str), 500)}\n"
+        f"Historical Outcome Learning: {_head_for_prompt(json.dumps(learning_snapshot, indent=2, default=str), 700)}\n"
+        f"Context: {_head_for_prompt(json.dumps(slim_context, indent=2, default=str), 600)}\n"
+        f"{source_context_prompt}"
+        f"Command Output:\n---\n{_errors_first_for_prompt(command_output, 1600)}\n---\n"
     )
+    logger.info(f"[LLM] Sending analysis prompt to AIDE | Evidence confidence: {structured_evidence.get('confidence_score', 'N/A')} | Target: {target_host}")
+    logger.debug(f"[LLM] Prompt (first 800 chars): {analysis_prompt[:800]}...")
     ok, status, body_text = query_aide_api(analysis_prompt)
+    logger.info(f"[LLM] Response received | Status: {str(status)[:50] if status else 'None'}")
+    logger.debug(f"[LLM] Response body (first 500 chars): {body_text[:500] if body_text else 'Empty'}")
     if not ok:
+        logger.error(f"[LLM] API call failed: {status}")
         return False, "AI service failed to analyze the command output.", {}
     try:
         start_index = body_text.find('{')
@@ -1510,9 +2956,36 @@ def analyze_command_output(
                 default=bool(remediation_command),
             )
             response_data = _coerce_remediation_command(response_data, context)
+            if not isinstance(response_data.get("remediation_typed_action"), dict) or not response_data.get("remediation_typed_action"):
+                response_data["remediation_typed_action"] = infer_typed_action(
+                    command=str(response_data.get("remediation_command") or "").strip(),
+                    target_host=str(response_data.get("remediation_target_host") or "").strip(),
+                    why=str(response_data.get("remediation_why") or "").strip(),
+                    requires_approval=_to_bool(response_data.get("remediation_requires_approval"), default=False),
+                    service=str(response_data.get("remediation_service") or "").strip(),
+                )
+            remediation_action = response_data.get("remediation_typed_action") or {}
+            if remediation_action:
+                ranking_environment = (
+                    str((((context or {}).get("linked_recommendation") or {}).get("labels") or {}).get("environment") or "")
+                    or str((((context or {}).get("linked_recommendation") or {}).get("labels") or {}).get("env") or "")
+                    or str((((context or {}).get("inventory_runtime") or {}).get("environment") or ""))
+                )
+                response_data["remediation_ranking"] = rank_typed_action(
+                    remediation_action,
+                    service=str(response_data.get("remediation_service") or (context or {}).get("service_name") or ""),
+                    environment=ranking_environment.lower(),
+                    blast_radius_size=len((((context or {}).get("dependency_graph") or {}).get("blast_radius") or [])),
+                )
+            response_data["behavior_version"] = current_behavior_version_payload()
+            response_data.setdefault("structured_evidence", structured_evidence)
+            response_data.setdefault("historical_outcome_learning", learning_snapshot)
+            response_data = _apply_contradiction_guardrail(response_data, structured_evidence)
+            logger.info(f"[LLM] Parsed response | Recommended command: {remediation_command[:60] if remediation_command else 'NO REMEDIATION'} | Requires approval: {response_data.get('remediation_requires_approval')}")
         answer = response_data.get("answer") or _format_analysis_sections(response_data) or body_text
         return True, answer, response_data if isinstance(response_data, dict) else {}
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        logger.error(f"[LLM] JSON decode error: {e}")
         return True, body_text, {}
 
 
@@ -1884,7 +3357,7 @@ def _generate_overview_insights(components: List[Dict[str, Any]]) -> Dict[str, s
         "Given the current telemetry snapshot, return JSON only with a top-level key named 'applications'. "
         "That key must map service names to a short operational insight string of at most 2 sentences each. "
         "Focus on current status, likely impact, blast radius, and next attention area. Do not mention missing data unless it matters.\n\n"
-        f"APPLICATION SNAPSHOT:\n{json.dumps(components, indent=2)[:12000]}"
+        f"APPLICATION SNAPSHOT:\n{_head_for_prompt(json.dumps(components, indent=2, default=str), 4000)}"
     )
     ok, status, body_text = query_aide_api(prompt)
     if not ok:
@@ -1931,7 +3404,7 @@ def _build_application_overview(include_ai: bool = True, include_predictions: bo
     misses = {}
     for _, _, _, q in query_map:
         if q and q not in cached_results and q not in misses:
-            misses[q] = _fetch_prometheus_custom_query(q)
+            misses[q] = _fetch_metrics_query(q)
 
     # Batch-store misses (the individual fetch already caches via instant_cache_get_or_fetch,
     # but this is a no-op if the key was just set — harmless)
@@ -2101,6 +3574,156 @@ def recent_predictions_view(request: HttpRequest):
     )
     return JsonResponse({"count": len(rows), "results": rows})
 
+
+@login_required
+def remediation_learning_view(request: HttpRequest):
+    service = str(request.GET.get("service") or "").strip()
+    environment = str(request.GET.get("environment") or "").strip()
+    action_type = str(request.GET.get("action_type") or "").strip()
+    context_fingerprint = str(request.GET.get("context_fingerprint") or "").strip()
+    payload = {
+        "generated_at": timezone.now().isoformat(),
+        "outcomes": _historical_outcome_learning_snapshot(
+            service=service,
+            environment=environment,
+            action_type=action_type,
+            context_fingerprint=context_fingerprint,
+        ),
+        "feedback": _feedback_learning_summary(service=service, environment=environment),
+    }
+    return JsonResponse(payload)
+
+
+@login_required
+def preventive_recommendations_view(request: HttpRequest):
+    overview = _build_application_overview(include_ai=True, include_predictions=True)
+    recommendations: List[Dict[str, Any]] = []
+    for application in overview.get("results", []):
+        for component in application.get("components", []):
+            prediction = component.get("prediction") or {}
+            risk_score = float(prediction.get("risk_score") or 0.0)
+            if risk_score < 0.45:
+                continue
+            service = str(component.get("service") or "")
+            recommendations.append(
+                {
+                    "application": application.get("application") or "",
+                    "service": service,
+                    "status": component.get("status") or "healthy",
+                    "risk_score": round(risk_score, 4),
+                    "prediction_status": prediction.get("prediction_status") or "low",
+                    "explanation": prediction.get("explanation") or "",
+                    "preventive_actions": _preventive_action_candidates(component),
+                    "historical_learning": _historical_outcome_learning_snapshot(service=service),
+                }
+            )
+    recommendations.sort(key=lambda item: item.get("risk_score") or 0.0, reverse=True)
+    return JsonResponse(
+        {
+            "generated_at": timezone.now().isoformat(),
+            "count": len(recommendations),
+            "results": recommendations[:20],
+        }
+    )
+
+
+@login_required
+@csrf_exempt
+def operator_feedback_view(request: HttpRequest):
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    try:
+        body = json.loads(request.body or "{}")
+    except Exception as exc:
+        return JsonResponse({"error": "invalid_json", "detail": str(exc)}, status=400)
+
+    feedback_type = str(body.get("feedback_type") or "").strip().lower()
+    if feedback_type not in {"accepted", "rejected", "edited", "manual_fix"}:
+        return JsonResponse({"error": "feedback_type must be accepted, rejected, edited, or manual_fix"}, status=400)
+    outcome_quality = str(body.get("outcome_quality") or "unknown").strip().lower()
+    if outcome_quality not in {"excellent", "good", "partial", "poor", "unknown"}:
+        outcome_quality = "unknown"
+
+    intent_id = str(body.get("execution_intent_id") or "").strip()
+    incident_key = str(body.get("incident_key") or "").strip()
+    execution_intent = ExecutionIntent.objects.filter(intent_id=intent_id).first() if intent_id else None
+    incident = Incident.objects.filter(incident_key=incident_key).first() if incident_key else None
+    if not execution_intent and not incident:
+        return JsonResponse({"error": "execution_intent_id or incident_key is required"}, status=400)
+
+    original_action = body.get("original_action") if isinstance(body.get("original_action"), dict) else ((execution_intent.action_json if execution_intent else {}) or {})
+    submitted_action = body.get("submitted_action") if isinstance(body.get("submitted_action"), dict) else original_action
+    service = str(body.get("service") or (execution_intent.service if execution_intent else "") or (incident.primary_service if incident else "")).strip()
+    environment = str(body.get("environment") or (execution_intent.environment if execution_intent else "")).strip()
+    action_type = str(body.get("action_type") or (submitted_action.get("action") if isinstance(submitted_action, dict) else "") or (execution_intent.action_type if execution_intent else "")).strip()
+    context_fingerprint = str(body.get("context_fingerprint") or (execution_intent.context_fingerprint if execution_intent else "")).strip()
+    notes = str(body.get("notes") or "").strip()
+
+    feedback = OperatorFeedback.objects.create(
+        execution_intent=execution_intent,
+        incident=incident or (execution_intent.incident if execution_intent else None),
+        user=request.user if getattr(request.user, "is_authenticated", False) else None,
+        feedback_type=feedback_type,
+        outcome_quality=outcome_quality,
+        service=service,
+        environment=environment,
+        action_type=action_type,
+        context_fingerprint=context_fingerprint,
+        original_action_json=original_action,
+        submitted_action_json=submitted_action,
+        notes=notes,
+        metadata_json={"behavior_version": current_behavior_version_payload()},
+    )
+
+    if execution_intent:
+        latest_outcome = RemediationOutcome.objects.filter(execution_intent=execution_intent).order_by("-created_at").first()
+        if latest_outcome:
+            latest_outcome.operator_override = feedback_type in {"rejected", "edited", "manual_fix"}
+            latest_meta = latest_outcome.metadata_json or {}
+            latest_meta["operator_feedback"] = {
+                "feedback_id": feedback.feedback_id,
+                "feedback_type": feedback_type,
+                "outcome_quality": outcome_quality,
+                "submitted_action": submitted_action,
+                "notes": notes,
+                "created_by": getattr(request.user, "username", "") or getattr(request.user, "email", ""),
+            }
+            latest_outcome.metadata_json = latest_meta
+            latest_outcome.save(update_fields=["operator_override", "metadata_json"])
+
+    linked_incident = incident or (execution_intent.incident if execution_intent else None)
+    if linked_incident:
+        IncidentTimelineEvent.objects.create(
+            incident=linked_incident,
+            event_type="operator_feedback_recorded",
+            title="Operator feedback recorded",
+            detail=feedback_type,
+            payload={
+                "feedback_id": feedback.feedback_id,
+                "feedback_type": feedback_type,
+                "outcome_quality": outcome_quality,
+                "original_action": original_action,
+                "submitted_action": submitted_action,
+                "notes": notes,
+            },
+        )
+
+    return JsonResponse(
+        {
+            "status": "recorded",
+            "feedback": {
+                "feedback_id": feedback.feedback_id,
+                "feedback_type": feedback.feedback_type,
+                "outcome_quality": feedback.outcome_quality,
+                "service": feedback.service,
+                "environment": feedback.environment,
+                "action_type": feedback.action_type,
+                "created_at": feedback.created_at.isoformat(),
+            },
+            "learning": _historical_outcome_learning_snapshot(service=service, environment=environment),
+        }
+    )
+
 # ---------------- LLM API (delegated to genai.llm_backend) ----------------
 # Backward-compatible: query_aide_api is now imported from llm_backend.
 # The original inline implementation has been moved to genai/llm_backend.py
@@ -2259,115 +3882,8 @@ def _extract_selected_columns(sql: str) -> List[str]:
             cols.append(candidate)
     return cols
 
-# ---------------- intent detection ----------------
-def classify_query(query: str):
-    """Decide routing: docs, or general LLM (simple heuristics)."""
-    if not query:
-        return "general"
-    t = query.lower()
-
-    # Investigation / RCA prompts should stay on the general assistant path even if
-    # they contain service, latency, or incident context. These are reasoning-heavy
-    # prompts, not raw metric-query requests.
-    investigation_keywords = [
-        "rca",
-        "root cause",
-        "blast radius",
-        "investigate",
-        "investigation",
-        "diagnose",
-        "diagnostic step",
-        "next diagnostic",
-        "next step",
-        "what happened",
-        "why did",
-        "why is",
-        "impact",
-        "impacted",
-        "incident",
-        "deep dive",
-        "recommendation",
-        "recommended command",
-    ]
-    contextual_handoff_markers = ["application=", "service=", "incident="]
-    if any(keyword in t for keyword in investigation_keywords) or any(marker in t for marker in contextual_handoff_markers):
-        return "investigation"
-    
-    # --- Prometheus/Observability Intent (Network & Server) ---
-    observability_keywords = [
-        'status', 'health', 'uptime', 'downtime', 'availability', 'reachable', 'online', 'offline', 'load', 'usage', 'utilization', 'capacity', 'bottleneck', 'saturation', 'throughput', 'slowdown', 'link', 'connection', 'line', 'cable', 'channel', 'speed', 'duplex', 'negotiation', 'link quality', 'flapping', 'instability', 'incoming', 'outgoing', 'upload', 'download', 'inbound', 'outbound', 'spikes', 'bursts', 'flow', 'congestion', 'faults', 'issues', 'anomalies', 'corruption', 'drops', 'failures', 'degraded link', 'signal problems', 'hostname', 'model', 'vendor', 'version', 'firmware', 'temperature', 'serial number', 'hardware status', 'power usage', 'poe usage', 'poe load', 'power consumption', 'overheating', 'fan status', 'neighbors', 'connected devices', 'upstream', 'downstream', 'path', 'hop', 'segment', 'vlan group', 'broadcast domain', 'unauthorized access', 'blocked', 'allowed', 'authentication issues', 'login attempts', 'security posture', 'alarms', 'warnings', 'critical events', 'logs', 'system messages', 'traps','packets','discarded','bandwidth','discarded','snmp'
-        # Server
-        'server', 'machine', 'system', 'host', 'node', 'computer',
-'cpu', 'processor', 'core', 'load', 'usage', 'performance', 'slow', 'overload',
-'memory', 'ram', 'swap', 'out of memory', 'running out of memory',
-'disk', 'storage', 'hard drive', 'ssd', 'disk space', 'space full', 'low space',
-'network', 'connection', 'internet', 'latency', 'ping', 'connectivity',
-'process', 'task', 'app', 'program', 'service', 'daemon', 'running', 'stuck',
-'boot', 'startup', 'reboot', 'shutdown', 'crash', 'freeze',
-'temperature', 'heat', 'overheating',
-'permissions', 'users', 'login', 'access', 'credentials',
-'logs', 'errors', 'warnings', 'events',
-'update', 'upgrade', 'patch', 'package', 'software install'
-    ]
-    
-    # --- Direct File/System Action Intent ---
-    direct_action_keywords = [
-        'list files', 'delete file', 'remove file', 'ls', 'rm', 'show directory'
-    ]
-    if any(keyword in t for keyword in direct_action_keywords) and 'server' in t:
-        return "direct_action"
-
-    explicit_metric_keywords = [
-        "prometheus",
-        "promql",
-        "metric",
-        "metrics",
-        "query",
-        "cpu usage",
-        "memory usage",
-        "disk usage",
-        "bandwidth",
-        "process usage",
-        "server health",
-        "node exporter",
-        "snmp",
-        "rate(",
-        "sum by",
-        "avg by",
-    ]
-    if any(keyword in t for keyword in explicit_metric_keywords):
-        return "prometheus_query"
-
-    if any(keyword in t for keyword in observability_keywords):
-        return "prometheus_query"
-
-    # Rule for initiating a password reset. This is a fast, local rule that doesn't require an API call.
-    password_reset_patterns = [
-        r'reset\s+(my\s+)?password',
-        r'password\s+reset',
-        r'forgot\s+(my\s+)?password',
-        r'change\s+(my\s+)?password',
-        r'update\s+(my\s+)?password',
-        r'unlock\s+(my\s+)?account',
-        r'account\s+locked',
-        r'cant\s+login',
-        r'login\s+issue',
-        r'unable to login'
-    ]
-    if any(re.search(pattern, t, re.IGNORECASE) for pattern in password_reset_patterns):
-        return "initiate_password_reset"
-
-    # All other queries will now be routed to either 'docs' or 'general'.
-    doc_tokens = ["document", "docs", "confluence", "policy", "manual", "procedure", "pdf", "doc", "wiki"]
-    if any(tok in t for tok in doc_tokens):
-        return "docs"
-
-    # Short greetings are routed to the general model.
-    if len(t.split()) <= 6 and any(t.startswith(g) for g in ("hi", "hello", "hey", "what's up", "how are you", "good")):
-        return "general"
-    
-    # Default to the general assistant. Documents are now opt-in instead of the default boundary.
-    return "general"
+def classify_query(query: str) -> str:
+    return hybrid_classify_query(query, llm_query=query_aide_api, logger=logger)
 
 # ---------------- visualization suggestion ----------------
 def suggest_visualization(columns: List[str], rows: List[Tuple]) -> dict:
@@ -2408,286 +3924,37 @@ def suggest_visualization(columns: List[str], rows: List[Tuple]) -> dict:
 
 # ---------------- SQL handler (text->SQL->execute -> visualize -> persist) ----------------
 def handle_direct_action(prompt: str) -> Tuple[Optional[dict], str]:
-    """
-    Handles a direct action request by using the AI to generate a safe command.
-    Returns a dictionary with the command and target host, or an error string.
-    """
-    action_prompt = (
-        "You are a system administrator's assistant. Your task is to convert a user's request into a single, safe Linux command. "
-        "1.  **Identify the Action:** Determine if the user wants to list files (`ls`), delete a file (`rm`), or another simple file operation. "
-        "2.  **Identify the Target:** Extract the target server's IP address or hostname. "
-        "3.  **Identify the Path:** Extract the file or directory path. "
-        "4.  **Assess Risk:** Determine if the command is destructive (e.g., `rm`, `find -delete`). "
-        "5.  **Be Verbose:** For any destructive action, ensure the command produces output. Use verbose flags (e.g., `rm -v`) or print flags (e.g., `find ... -print -delete`). "
-        "6.  **Handle Compound Requests:** If the user asks to show and then delete, combine the commands with a semicolon (e.g., `ls -l /some/dir; find /some/dir -name '*.log' -delete`)."
-        "7.  **Format Output:** Return a JSON object with three keys: 'command' (string), 'target_host' (string), and 'is_destructive' (boolean). "
-        "Return ONLY the JSON object.\n\n"
-        "--- EXAMPLES ---\n"
-        "User: 'list files in /var/log on server 10.1.10.5' -> {\"command\": \"ls -l /var/log\", \"target_host\": \"10.1.10.5\", \"is_destructive\": false}\n"
-        "User: 'delete the file /tmp/error.log on the server 192.168.1.100' -> {\"command\": \"rm -v /tmp/error.log\", \"target_host\": \"192.168.1.100\", \"is_destructive\": true}\n"
-        "User: 'show me the contents of /etc and delete all .tmp files there on server web-01' -> {\"command\": \"ls -l /etc; find /etc -name '*.tmp' -print -delete\", \"target_host\": \"web-01\", \"is_destructive\": true}\n\n"
-        f"--- TASK ---\n"
-        f"Generate the JSON for this request: '{prompt}'"
-    )
-
-    ok, status, body = query_aide_api(action_prompt)
-    if not ok:
-        return None, "Sorry, I couldn't understand that command. Please try rephrasing."
-
-    try:
-        start_index = body.find('{')
-        end_index = body.rfind('}')
-        if start_index != -1 and end_index != -1:
-            json_string = body[start_index:end_index+1]
-            response_data = json.loads(json_string)
-            
-            # Basic validation
-            if 'command' in response_data and 'target_host' in response_data:
-                return response_data, ""
-            else:
-                return None, "Sorry, I understood the request but couldn't determine the exact command or target server."
-        else:
-            return None, "Sorry, I failed to generate a valid command structure."
-            
-    except json.JSONDecodeError:
-        logger.exception("Failed to decode JSON from direct action prompt.")
-        return None, "Sorry, there was an issue interpreting the command."
+    return direct_action_tool(prompt, llm_query=query_aide_api, logger=logger)
 
 
 def handle_prometheus_query(prompt: str) -> Tuple[Optional[dict], dict, str, str]:
-    """
-    Handles an observability query by dynamically generating and executing a PromQL query.
-    This is a two-step AI process:
-    1. Text-to-PromQL: Convert the user's question into a PromQL query for either network or server metrics.
-    2. Results-to-Text: Interpret the Prometheus data and form a natural language answer with suggestions.
-    """
-    if not PROMETHEUS_URL:
-        return None, {}, "Prometheus URL not configured", ""
-
-    # --- Step 1: Generate PromQL from the user's prompt ---
-    text_to_promql_prompt = (
-        "You are a Prometheus expert for an IT infrastructure environment. Your task is to convert a user's question into a valid PromQL query. "
-        "Determine if the user is asking about a **Network Device**, a **Server**, or a specific **Process**. Then, use the appropriate metrics.\n"
-        "Return ONLY the PromQL query string. Do not add any explanation or markdown.\n\n"
-        "--- CONTEXT 1: Network Device Metrics (SNMP Exporter) ---\n"
-        "Use these for questions about switches, routers, and bandwidth.\n"
-        "Metrics: ifHCInOctets, ifHCOutOctets, ifInErrors, ifOutErrors, ifOperStatus.\n"
-        "Labels: 'instance' (device IP), 'ifName' (interface name).\n"
-        "Example Q: 'What is the bandwidth for 172.24.95.10?' -> A: sum by (instance) (rate(ifHCInOctets{instance=\"172.24.95.10\"}[5m]))\n\n"
-        "--- CONTEXT 2: Server Metrics (Node Exporter) ---\n"
-        "Use these for general questions about servers, CPU, memory, and disk space.\n"
-        "Metrics: node_cpu_seconds_total, node_memory_MemTotal_bytes, node_memory_MemAvailable_bytes, node_filesystem_size_bytes, node_filesystem_avail_bytes.\n"
-        "Labels: 'instance' (server IP/hostname), 'device' (for disks), 'mountpoint'.\n"
-        "Example Q: 'CPU usage for server 10.0.1.5?' -> A: 100 - (avg by (instance) (rate(node_cpu_seconds_total{instance=\"10.0.1.5\",mode='idle'}[5m])) * 100)\n\n"
-        "--- CONTEXT 3: Per-Process Metrics (Process Exporter) ---\n"
-        "Use these for specific questions about running processes like 'java' or 'nginx'.\n"
-        "Metrics:\n"
-        "- namedprocess_namegroup_cpu_seconds_total: CPU time for a process group.\n"
-        "- namedprocess_namegroup_memory_bytes: Memory usage (resident, virtual, etc.). Use `memtype='resident'` for actual physical memory.\n"
-        "- namedprocess_namegroup_num_threads: Number of threads.\n"
-        "Labels: 'instance' (server IP), 'groupname' (the name of the process, e.g., 'java', 'nginx').\n"
-        "Example Q: 'Which process is using the most CPU on 10.1.10.4?' -> A: topk(5, sum by (groupname) (rate(namedprocess_namegroup_cpu_seconds_total{instance=\"10.1.10.4\"}[5m])))\n"
-        "Example Q: 'How much memory is the java process using on server 10.1.10.4?' -> A: namedprocess_namegroup_memory_bytes{groupname='java', instance='10.1.10.4', memtype='resident'}\n\n"
-        f"--- TASK ---\n"
-        f"Generate the PromQL query for this question: '{prompt}'"
+    return prometheus_query_tool(
+        prompt,
+        llm_query=query_aide_api,
+        prometheus_url=METRICS_API_URL,
+        logger=logger,
     )
-
-    ok, status, generated_query = query_aide_api(text_to_promql_prompt)
-    if not ok or not generated_query.strip():
-        logger.error(f"Failed to generate PromQL query. Status: {status}, Body: {generated_query}")
-        return None, {}, "Sorry, I couldn't understand how to query that. Please try rephrasing your question.", ""
-
-    promql_query = generated_query.strip()
-    logger.info(f"Dynamically generated PromQL query: {promql_query}")
-
-    # --- Step 2: Execute the generated query ---
-    try:
-        response = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={'query': promql_query}, timeout=10)
-        response.raise_for_status()
-        prometheus_data = response.json()
-    except requests.exceptions.RequestException as e:
-        logger.exception("Failed to query Prometheus with generated query: %s", e)
-        return None, {}, f"Error executing query against Prometheus: {e}", promql_query
-
-    if not prometheus_data.get('data', {}).get('result'):
-        return None, {}, "Sorry, your query returned no data. Please check the device or interface name and try again.", promql_query
-
-    # --- Step 3: Interpret the results and suggest next steps ---
-    results_to_text_prompt = (
-        "You are an IT infrastructure observability expert. Your job is to interpret raw Prometheus data, provide a clear answer, and suggest relevant follow-up actions or diagnostic commands.\n"
-        "1.  **Answer:** Directly answer the user's question based on the data.\n"
-        "    - For **Bandwidth**, convert bytes/sec to a readable format like Mbps or Gbps.\n"
-        "    - For **CPU Usage**, state the percentage clearly.\n"
-        "    - For **Memory/Disk**, convert bytes to a readable format like MB, GB, or TB.\n"
-        "    - For **Status**, explain the value (1=up, 2=down).\n"
-        "    - For **Errors/Discards**, state the count. If it's high, mention that it might indicate a problem.\n"
-        "2.  **Suggestions:** Provide a list of 2-3 insightful follow-up questions.\n"
-        "3.  **Suggested Command:** If relevant, suggest a single, non-destructive Linux command that could help diagnose the issue further. For example, if CPU is high, suggest `top -b -n 1`. If disk is low, suggest `df -h`. If network errors are high, suggest `ip -s link show [interface]`.\n\n"
-        "Format the output as a JSON object with three keys: 'answer' (string), 'follow_up_questions' (list of strings), and 'suggested_command' (string or null).\n\n"
-        f"USER'S QUESTION: {prompt}\n"
-        f"PROMETHEUS DATA: {json.dumps(prometheus_data.get('data', {}), indent=2)}\n\n"
-        "JSON Response:"
-    )
-
-    ok, status, body = query_aide_api(results_to_text_prompt)
-    if not ok:
-        return None, {}, "Error: AI service failed to interpret the data.", promql_query
-
-    # --- Step 4: Extract target_host and parse AI response ---
-    target_host = None
-    try:
-        # Extract the 'instance' label from the first result to identify the target host.
-        result_list = prometheus_data.get('data', {}).get('result', [])
-        if result_list:
-            metric_info = result_list[0].get('metric', {})
-            if 'instance' in metric_info:
-                target_host = metric_info['instance']
-                # Often the instance includes the port, which we don't want for the host address.
-                if ':' in target_host:
-                    target_host = target_host.split(':')[0]
-                logger.info(f"Extracted target_host='{target_host}' from Prometheus data.")
-
-    except Exception as e:
-        logger.warning(f"Could not extract target_host from Prometheus data: {e}")
-
-
-    try:
-        start_index = body.find('{')
-        end_index = body.rfind('}')
-        if start_index != -1 and end_index != -1:
-            json_string = body[start_index:end_index+1]
-            response_data = json.loads(json_string)
-        else:
-            response_data = {"answer": body, "follow_up_questions": [], "suggested_command": None}
-        
-        answer = response_data.get("answer", body)
-        follow_ups = response_data.get("follow_up_questions", [])
-        suggested_command = response_data.get("suggested_command")
-        
-    except json.JSONDecodeError:
-        answer = body
-        follow_ups = []
-        suggested_command = None
-
-    # The final dictionary now includes the target_host
-    final_result = {
-        "answer": answer, 
-        "follow_up_questions": follow_ups, 
-        "suggested_command": suggested_command,
-        "target_host": target_host
-    }
-    return final_result, {}, "", promql_query
 
 def handle_sql(prompt: str) -> Tuple[Optional[dict], dict, str, str]:
-    """
-    Returns (results_json_safe_or_None, vis_dict, error_msg_or_empty, generated_sql)
-    results_json_safe = {'columns': [...], 'rows': [[..],[..]]}
-    """
-    schema = get_full_schema_for_prompt(target_table=TARGET_TABLE, max_tables=6, sample_rows_limit=0, max_total_chars=3000)
-    sql_system = (
-        "You are a PostgreSQL SQL generator. Return exactly ONE valid SQL SELECT statement only.\n"
-        "Use ONLY the exact column names present in the schema below. If impossible to answer, return exactly: SELECT 'NOT_POSSIBLE' AS note;\n"
-        "Return SQL only (no explanation)."
+    return sql_tool(
+        prompt,
+        llm_query=query_aide_api,
+        get_full_schema_for_prompt=get_full_schema_for_prompt,
+        target_table=TARGET_TABLE,
+        extract_sql_from_markdown=_extract_sql_from_markdown,
+        strip_after_stop_tokens=_strip_after_stop_tokens,
+        ensure_select_prefix=_ensure_select_prefix,
+        quote_text_literals=_quote_text_literals,
+        prefer_ilike_for_strings=_prefer_ilike_for_strings,
+        extract_selected_columns=_extract_selected_columns,
+        suggest_visualization=suggest_visualization,
+        rows_to_json_safe_lists=_rows_to_json_safe_lists,
+        safe_preview_value=_safe_preview_value,
+        history_model=GenAIChatHistory,
+        db_connection=connection,
+        forbidden_sql=FORBIDDEN_SQL,
+        logger=logger,
     )
-    full_prompt = f"{sql_system}\n\nSCHEMA:\n{schema}\n\nQUESTION: {prompt}\nSQL:"
-    ok, status, body = query_aide_api(full_prompt)
-    logger.info("AIDE raw for SQL prompt: %s", (body or "")[:1000])
-    if not ok:
-        return None, {}, "Error: AI service failed.", ""
-
-    raw_text = (body or "").strip()
-    candidate = _extract_sql_from_markdown(raw_text)
-    candidate = _strip_after_stop_tokens(candidate)
-    candidate = _ensure_select_prefix(candidate)
-    candidate = _quote_text_literals(candidate)
-    generated_sql = candidate.strip()
-    generated_sql = _prefer_ilike_for_strings(generated_sql)
-    if not generated_sql.endswith(";"):
-        generated_sql = generated_sql + ";"
-    logger.info("Generated SQL (trimmed): %.500s", generated_sql)
-
-    # Persist generated SQL early
-    normalized_q = " ".join(prompt.lower().split())
-    try:
-        GenAIChatHistory.objects.update_or_create(question=normalized_q, defaults={"generated_sql": generated_sql, "answer": "Pending"})
-    except Exception:
-        logger.exception("Failed to persist generated_sql early.")
-
-    if FORBIDDEN_SQL.search(generated_sql):
-        err = "Error: Generated forbidden SQL statement."
-        try:
-            GenAIChatHistory.objects.update_or_create(question=normalized_q, defaults={"generated_sql": generated_sql, "answer": err})
-        except Exception:
-            logger.exception("Failed to persist forbidden SQL error.")
-        return None, {}, err, generated_sql
-
-    # Validate columns
-    try:
-        with connection.cursor() as c:
-            c.execute("SELECT column_name FROM information_schema.columns WHERE table_name = %s", [TARGET_TABLE])
-            valid_cols = [r[0] for r in c.fetchall()]
-    except Exception:
-        valid_cols = []
-        logger.exception("Failed to fetch valid columns for validation.")
-
-    selected_cols = _extract_selected_columns(generated_sql)
-    logger.info("Selected columns: %s", selected_cols)
-    if selected_cols and "*" not in selected_cols:
-        invalid = [col for col in selected_cols if col and col not in valid_cols]
-        if invalid:
-            err = f"Error: Query uses unknown columns: {', '.join(invalid)}"
-            try:
-                GenAIChatHistory.objects.update_or_create(question=normalized_q, defaults={"generated_sql": generated_sql, "answer": err})
-            except Exception:
-                logger.exception("Failed to persist invalid-columns error.")
-            return None, {}, err, generated_sql
-
-    # EXPLAIN
-    try:
-        with connection.cursor() as c:
-            c.execute("EXPLAIN " + generated_sql)
-    except Exception as e:
-        logger.exception("EXPLAIN failed: %s", e)
-        err = "Error: Invalid SQL generated; please rephrase."
-        try:
-            GenAIChatHistory.objects.update_or_create(question=normalized_q, defaults={"generated_sql": generated_sql, "answer": err})
-        except Exception:
-            logger.exception("Failed to persist EXPLAIN error.")
-        return None, {}, err, generated_sql
-
-    # Execute (safe limit)
-    try:
-        safe_sql = generated_sql if re.search(r"\blimit\b", generated_sql, flags=re.IGNORECASE) else generated_sql.rstrip(";") + " LIMIT 1000;"
-        with connection.cursor() as c:
-            c.execute(safe_sql)
-            cols = [col[0] for col in c.description] if c.description else []
-            rows = c.fetchall()
-            results = {"columns": cols, "rows": rows}
-    except Exception as e:
-        logger.exception("DB execution failed: %s", e)
-        err = "Error: DB execution failed."
-        try:
-            GenAIChatHistory.objects.update_or_create(question=normalized_q, defaults={"generated_sql": generated_sql, "answer": err})
-        except Exception:
-            logger.exception("Failed to persist DB exec error.")
-        return None, {}, err, generated_sql
-
-    # Suggest visualization
-    vis = suggest_visualization(results["columns"], results["rows"])
-
-    # Persist final answer blob
-    answer_blob = {
-        "rows_count": len(results["rows"]),
-        "preview": [ {c: _safe_preview_value(v,80) for c, v in zip(results["columns"], row)} for row in results["rows"][:5] ],
-        "visualization": vis
-    }
-    try:
-        GenAIChatHistory.objects.update_or_create(question=normalized_q, defaults={"generated_sql": generated_sql, "answer": json.dumps(answer_blob)})
-    except Exception:
-        logger.exception("Failed to persist successful SQL run.")
-
-    results_json_safe = {"columns": results["columns"], "rows": _rows_to_json_safe_lists(results["rows"])}
-    return results_json_safe, vis, "", generated_sql
 
 # ---------------- RAG proxy (delegation) ----------------
 def proxy_to_rag(request: HttpRequest) -> JsonResponse:
@@ -2785,55 +4052,26 @@ def genai_chat(request: HttpRequest):
 
     if route == "investigation":
         try:
-            investigation_context = build_investigation_context(question, body)
-
-            # Extract server-computed business impact so it's always in the response
-            incident_data = investigation_context.get("incident") or {}
-            business_impact = incident_data.get("business_impact") or {}
-            if not business_impact and investigation_context.get("scope"):
-                # Try computing from the incident directly
-                scope = investigation_context["scope"]
-                inc = _find_investigation_incident(scope)
-                if inc:
-                    business_impact = _compute_incident_revenue_impact(inc) or {}
-
-            prompt = (
-                "You are an AIOps incident investigation assistant. "
-                "Use the incident context, metrics, logs, traces, and dependency graph to answer the user's question. "
-                "Provide a concise RCA-oriented answer as JSON with two keys: 'answer' and 'follow_up_questions'.\n"
-                "- 'answer' must explain the likely root cause, blast radius, strongest evidence, and the next best diagnostic step.\n"
-                "- ALWAYS include the estimated revenue/business impact if available in the context (failed transactions, revenue lost, impact level).\n"
-                "- If a linked recommendation or diagnostic command exists, mention it directly.\n"
-                "- Do not answer with raw PromQL unless the user explicitly asked for a Prometheus query.\n\n"
-                f"RECENT CONVERSATION:\n{conversation_history or 'No prior conversation.'}\n\n"
-                f"QUESTION: {question}\n\n"
-                f"INVESTIGATION CONTEXT:\n{json.dumps(investigation_context, indent=2)[:14000]}\n\n"
-                "Return JSON only."
+            response_data = investigation_route_tool(
+                question,
+                body,
+                conversation_history,
+                llm_query=query_aide_api,
+                incident_model=Incident,
+                build_application_overview=_build_application_overview,
+                incident_timeline_payload=_incident_timeline_payload,
+                get_dependency_context=_get_dependency_context,
+                application_graph_payload=_application_graph_payload,
+                fetch_elasticsearch_logs=_fetch_elasticsearch_logs,
+                fetch_jaeger_traces=_fetch_jaeger_traces,
+                fetch_metrics_query=_fetch_metrics_query,
+                compute_incident_revenue_impact=_compute_incident_revenue_impact,
+                logger=logger,
+                chat_session=chat_session,
+                user=request.user,
+                source_path_map=MCP_SOURCE_PATH_MAP,
+                source_root=MCP_SOURCE_ROOT,
             )
-            ok, status, body_text = query_aide_api(prompt)
-            if not ok:
-                return _chat_json_response(
-                    chat_session,
-                    {"error": "investigation_failed", "detail": body_text, "answer": "Investigation analysis failed."},
-                    status=502,
-                )
-
-            try:
-                start_index = body_text.find("{")
-                end_index = body_text.rfind("}")
-                parsed = json.loads(body_text[start_index:end_index + 1]) if start_index != -1 and end_index != -1 else {}
-            except json.JSONDecodeError:
-                parsed = {"answer": body_text, "follow_up_questions": []}
-
-            response_data = {
-                "question": question,
-                "answer": parsed.get("answer") or body_text,
-                "follow_up_questions": parsed.get("follow_up_questions") or [],
-                "suggested_command": ((investigation_context.get("linked_recommendation") or {}).get("diagnostic_command")),
-                "target_host": investigation_context.get("target_host"),
-                "business_impact": business_impact,
-                "cached": False,
-            }
             return _chat_json_response(chat_session, response_data)
         except Exception as e:
             logger.exception("Investigation route error: %s", e)
@@ -2921,15 +4159,7 @@ def genai_chat(request: HttpRequest):
 
     # Docs (RAG) route -> delegate to doc_search
     if route == "docs":
-        # DEFINITIVE FIX: Merge the original request body with the proxy fields
-        # to ensure session_id and other state is preserved.
-        proxy_body = body.copy() # Start with the original body
-        proxy_body.update({
-            "query": question,
-            "top_k": client_top_k,
-            "use_documents": True,
-            "strict_docs": client_strict_docs
-        })
+        proxy_body = build_docs_proxy_body(body, question, client_top_k, client_strict_docs)
         
         logger.info(f"genai_chat: Proxying to RAG with body: {proxy_body}")
 
@@ -2952,46 +4182,14 @@ def genai_chat(request: HttpRequest):
 
     # General LLM
     try:
-        prompt = (
-            "You are a helpful assistant. Your response MUST be a single JSON object with two keys: 'answer' and 'follow_up_questions'.\n"
-            "- 'answer': A string containing the direct answer to the user's question.\n"
-            "- 'follow_up_questions': A list of 3-4 relevant follow-up questions a user might ask next.\n\n"
-            f"RECENT CONVERSATION:\n{conversation_history or 'No prior conversation.'}\n\n"
-            f"QUESTION: {question}\n\nJSON Response:"
+        response_data = general_chat_tool(
+            question,
+            conversation_history,
+            llm_query=query_aide_api,
+            history_model=GenAIChatHistory,
+            cache_store=simple_cache,
+            logger=logger,
         )
-        ok, status, body_text = query_aide_api(prompt)
-        if not ok:
-            logger.error("AIDE general completion failed: %s", body_text)
-            return _chat_json_response(chat_session, {"error":"AIDE_completion_failed","detail": body_text, "answer": "AiDE failed to generate a response."}, status=502)
-
-        try:
-            # Clean the text to make sure it's valid JSON
-            start_index = body_text.find('{')
-            end_index = body_text.rfind('}')
-            if start_index != -1 and end_index != -1:
-                json_string = body_text[start_index:end_index+1]
-                response_data = json.loads(json_string)
-            else:
-                response_data = {"answer": body_text, "follow_up_questions": []}
-            
-            answer = response_data.get("answer", body_text)
-            follow_ups = response_data.get("follow_up_questions", [])
-        except json.JSONDecodeError:
-            answer = body_text
-            follow_ups = []
-
-        response_data = {"question": question, "answer": answer, "follow_up_questions": follow_ups, "cached": False}
-        
-        # Persist and cache
-        try:
-            GenAIChatHistory.objects.update_or_create(
-                question=question,
-                defaults={'answer': answer}
-            )
-            simple_cache.add(question, response_data)
-        except Exception:
-            logger.exception("Failed to persist or cache general chat history.")
-
         return _chat_json_response(chat_session, response_data)
     except Exception as e:
         logger.exception("General LLM error: %s", e)
@@ -3192,6 +4390,348 @@ def applications_dashboard_view(request):
 @login_required
 def applications_overview_view(request: HttpRequest):
     return JsonResponse(_build_application_overview())
+
+
+def mcp_incident_summary_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "GET required"}, status=405)
+    incident_key = (request.GET.get("incident_key") or "").strip()
+    if not incident_key:
+        return JsonResponse({"error": "incident_key is required"}, status=400)
+    payload = incidents_get_summary_service(
+        incident_key=incident_key,
+        incident_model=Incident,
+        incident_summary_payload=_incident_summary_payload,
+    )
+    if not payload:
+        return JsonResponse({"error": "incident_not_found"}, status=404)
+    return JsonResponse(payload)
+
+
+def mcp_incident_timeline_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "GET required"}, status=405)
+    incident_key = (request.GET.get("incident_key") or "").strip()
+    if not incident_key:
+        return JsonResponse({"error": "incident_key is required"}, status=400)
+    payload = incidents_get_timeline_service(
+        incident_key=incident_key,
+        incident_model=Incident,
+        incident_timeline_payload=_incident_timeline_payload,
+    )
+    if not payload:
+        return JsonResponse({"error": "incident_not_found"}, status=404)
+    return JsonResponse(payload)
+
+
+def mcp_applications_overview_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "GET required"}, status=405)
+    application = (request.GET.get("application") or "").strip()
+    payload = applications_get_overview_service(
+        build_application_overview=_build_application_overview,
+        application=application,
+    )
+    return JsonResponse(payload)
+
+
+def mcp_application_graph_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "GET required"}, status=405)
+    application = (request.GET.get("application") or "").strip()
+    if not application:
+        return JsonResponse({"error": "application is required"}, status=400)
+    payload = applications_get_graph_service(
+        application=application,
+        application_graph_payload=_application_graph_payload,
+    )
+    if not payload:
+        return JsonResponse({"error": "application_not_found"}, status=404)
+    return JsonResponse(payload)
+
+
+def mcp_application_component_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "GET required"}, status=405)
+    application = (request.GET.get("application") or "").strip()
+    service = (request.GET.get("service") or "").strip()
+    if not application or not service:
+        return JsonResponse({"error": "application and service are required"}, status=400)
+    payload = applications_get_component_snapshot_service(
+        application=application,
+        service=service,
+        build_application_overview=_build_application_overview,
+    )
+    if not payload:
+        return JsonResponse({"error": "component_not_found"}, status=404)
+    return JsonResponse(payload)
+
+
+def mcp_metrics_service_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "GET required"}, status=405)
+    service_name = (request.GET.get("service_name") or "").strip()
+    if not service_name:
+        return JsonResponse({"error": "service_name is required"}, status=400)
+    payload = metrics_query_service_overview_service(
+        service_name=service_name,
+        fetch_metrics_query=_fetch_metrics_query,
+    )
+    return JsonResponse(payload)
+
+
+def mcp_metrics_query_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "GET required"}, status=405)
+    query = (request.GET.get("query") or "").strip()
+    if not query:
+        return JsonResponse({"error": "query is required"}, status=400)
+    payload = metrics_query_raw_service(
+        query=query,
+        fetch_metrics_query=_fetch_metrics_query,
+    )
+    return JsonResponse(payload)
+
+
+def mcp_logs_search_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "GET required"}, status=405)
+    target_host = (request.GET.get("target_host") or "").strip() or None
+    query = (request.GET.get("query") or "").strip()
+    if not target_host and not query:
+        return JsonResponse({"error": "target_host or query is required"}, status=400)
+    payload = logs_search_service(
+        target_host=target_host,
+        query=query,
+        fetch_elasticsearch_logs=_fetch_elasticsearch_logs,
+    )
+    return JsonResponse(payload)
+
+
+def mcp_traces_search_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "GET required"}, status=405)
+    service_name = (request.GET.get("service_name") or "").strip() or None
+    if not service_name:
+        return JsonResponse({"error": "service_name is required"}, status=400)
+    payload = traces_search_service(
+        service_name=service_name,
+        fetch_jaeger_traces=_fetch_jaeger_traces,
+    )
+    return JsonResponse(payload)
+
+
+def mcp_runbooks_search_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "GET required"}, status=405)
+    incident_key = (request.GET.get("incident_key") or "").strip()
+    query = (request.GET.get("query") or "").strip()
+    if not incident_key and not query:
+        return JsonResponse({"error": "incident_key or query is required"}, status=400)
+    payload = runbooks_search_service(
+        incident_key=incident_key,
+        query=query,
+        incident_model=Incident,
+        runbook_model=Runbook,
+    )
+    return JsonResponse(payload)
+
+
+@login_required
+def investigations_dashboard_view(request: HttpRequest):
+    return render(request, "genai/investigations_dashboard.html", {"active_nav": "investigations"})
+
+
+@login_required
+def investigations_recent_view(request: HttpRequest):
+    runs = InvestigationRun.objects.select_related("incident", "session").prefetch_related("tool_invocations").all()[:25]
+    results = []
+    for run in runs:
+        invocations = list(run.tool_invocations.all()[:10])
+        results.append(
+            {
+                "run_id": str(run.run_id),
+                "status": run.status,
+                "question": run.question,
+                "application": run.application,
+                "service": run.service,
+                "target_host": run.target_host,
+                "incident_key": str(run.incident.incident_key) if run.incident else "",
+                "session_id": str(run.session.session_id) if run.session else "",
+                "tool_call_count": run.tool_invocations.count(),
+                "updated_at": run.updated_at.isoformat(),
+                "tool_calls": [
+                    {
+                        "server_name": item.server_name,
+                        "tool_name": item.tool_name,
+                        "status": item.status,
+                        "latency_ms": item.latency_ms,
+                        "created_at": item.created_at.isoformat(),
+                    }
+                    for item in invocations
+                ],
+            }
+        )
+    return JsonResponse({"count": len(results), "results": results})
+
+
+@login_required
+def operations_dashboard_view(request: HttpRequest):
+    return render(request, "genai/operations_dashboard.html", {"active_nav": "operations"})
+
+
+@login_required
+def operations_summary_view(request: HttpRequest):
+    recent_intents = list(
+        ExecutionIntent.objects.select_related("incident", "behavior_version", "approved_by")
+        .order_by("-created_at")[:20]
+    )
+    recent_evaluations = list(
+        ReplayEvaluation.objects.select_related("scenario", "execution_intent")
+        .order_by("-created_at")[:12]
+    )
+    behavior_versions = list(
+        AgentBehaviorVersion.objects.order_by("-updated_at")[:10]
+    )
+
+    intent_status_counts = ExecutionIntent.objects.values("status").annotate(total=models.Count("id")).order_by("status")
+    dry_run_count = ExecutionIntent.objects.filter(dry_run=True).count()
+    approval_required_count = ExecutionIntent.objects.filter(requires_approval=True).count()
+    outcomes_summary = RemediationOutcome.objects.aggregate(
+        total=models.Count("id"),
+        success_rate=models.Avg(_avg_boolean("success")),
+        avg_ttr=models.Avg("time_to_recovery_seconds"),
+    )
+    evaluation_summary = ReplayEvaluation.objects.aggregate(
+        avg_overall=models.Avg(models.F("scores_json__overall")),
+        total=models.Count("id"),
+    )
+    feedback_summary = OperatorFeedback.objects.aggregate(total=models.Count("id"))
+    feedback_breakdown = list(
+        OperatorFeedback.objects.values("feedback_type")
+        .annotate(total=models.Count("id"))
+        .order_by("feedback_type")
+    )
+    top_ranked_services = (
+        RemediationOutcome.objects.values("service")
+        .annotate(
+            total=models.Count("id"),
+            success_rate=models.Avg(_avg_boolean("success")),
+            avg_blast_radius=models.Avg("blast_radius_risk"),
+        )
+        .order_by("-success_rate", "-total")[:8]
+    )
+
+    results = {
+        "generated_at": timezone.now().isoformat(),
+        "totals": {
+            "execution_intents": ExecutionIntent.objects.count(),
+            "dry_runs": dry_run_count,
+            "approval_required": approval_required_count,
+            "replay_evaluations": ReplayEvaluation.objects.count(),
+            "behavior_versions": AgentBehaviorVersion.objects.count(),
+        },
+        "status_breakdown": list(intent_status_counts),
+        "outcomes": {
+            "total": int(outcomes_summary.get("total") or 0),
+            "success_rate": round(float(outcomes_summary.get("success_rate") or 0.0), 4),
+            "avg_time_to_recovery_seconds": outcomes_summary.get("avg_ttr"),
+        },
+        "feedback": {
+            "total": int(feedback_summary.get("total") or 0),
+            "breakdown": feedback_breakdown,
+        },
+        "replay": {
+            "total": int(evaluation_summary.get("total") or 0),
+            "avg_overall_score": round(float(evaluation_summary.get("avg_overall") or 0.0), 4),
+        },
+        "recent_intents": [
+            {
+                "intent_id": item.intent_id,
+                "status": item.status,
+                "execution_type": item.execution_type,
+                "action_type": item.action_type,
+                "service": item.service,
+                "environment": item.environment,
+                "target_host": item.target_host,
+                "dry_run": item.dry_run,
+                "requires_approval": item.requires_approval,
+                "ranking_score": (item.ranking_json or {}).get("score"),
+                "verification_status": (item.verification_json or {}).get("status"),
+                "incident_key": str(item.incident.incident_key) if item.incident else "",
+                "behavior_name": item.behavior_version.name if item.behavior_version else "",
+                "behavior_versions": {
+                    "prompt_version": item.behavior_version.prompt_version if item.behavior_version else "",
+                    "policy_version": item.behavior_version.policy_version if item.behavior_version else "",
+                    "model_version": item.behavior_version.model_version if item.behavior_version else "",
+                    "ranking_version": item.behavior_version.ranking_version if item.behavior_version else "",
+                },
+                "approved_by": getattr(item.approved_by, "username", "") if item.approved_by else "",
+                "created_at": item.created_at.isoformat(),
+                "updated_at": item.updated_at.isoformat(),
+            }
+            for item in recent_intents
+        ],
+        "top_ranked_services": [
+            {
+                "service": item.get("service") or "unknown",
+                "sample_size": int(item.get("total") or 0),
+                "success_rate": round(float(item.get("success_rate") or 0.0), 4),
+                "avg_blast_radius": round(float(item.get("avg_blast_radius") or 0.0), 4),
+            }
+            for item in top_ranked_services
+        ],
+        "recent_replay_results": [
+            {
+                "evaluation_id": item.evaluation_id,
+                "scenario_id": item.scenario.scenario_id if item.scenario else "",
+                "scenario_title": item.scenario.title if item.scenario else "",
+                "status": item.status,
+                "overall_score": (item.scores_json or {}).get("overall"),
+                "correctness": (item.scores_json or {}).get("correctness"),
+                "safety": (item.scores_json or {}).get("safety"),
+                "resolution_rate": (item.scores_json or {}).get("resolution_rate"),
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in recent_evaluations
+        ],
+        "behavior_history": [
+            {
+                "behavior_id": item.behavior_id,
+                "name": item.name,
+                "prompt_version": item.prompt_version,
+                "policy_version": item.policy_version,
+                "model_version": item.model_version,
+                "evidence_rules_version": item.evidence_rules_version,
+                "ranking_version": item.ranking_version,
+                "is_active": item.is_active,
+                "updated_at": item.updated_at.isoformat(),
+            }
+            for item in behavior_versions
+        ],
+        "recent_feedback": _feedback_learning_summary().get("recent") or [],
+    }
+    return JsonResponse(results)
 
 
 @login_required
@@ -3445,6 +4985,9 @@ def ingest_alert_view(request: HttpRequest):
     if not isinstance(alert_payload, dict):
         return JsonResponse({"error": "alert_payload_required"}, status=400)
 
+    alert_name = alert_payload.get("alert_name") or ((alert_payload.get("labels") or {}).get("alertname") or "unknown")
+    logger.info(f"[INGEST] Alert received: {alert_name} | From AlertManager: {from_alertmanager}")
+    
     context = collect_alert_context(alert_payload)
     target_host = (
         body.get("target_host")
@@ -3452,50 +4995,86 @@ def ingest_alert_view(request: HttpRequest):
         or _extract_target_host_from_payload(alert_payload)
     )
     execute_immediately = _to_bool(envelope_execute, default=not from_alertmanager)
-
-    planning_prompt = (
-        "You are an AIOps incident responder. Given the alert payload and telemetry context, "
-        "return JSON only with keys: summary, target_host, diagnostic_command, why, should_execute.\n"
-        "- diagnostic_command must be a single executable command suitable for the target troubleshooting agent.\n"
-        "- should_execute must be true only if there is enough information to run the command now.\n"
-        "- target_host must be the hostname or IP where the command should run.\n\n"
-        "- The telemetry context already contains Prometheus metrics, Elasticsearch logs, and Jaeger traces gathered by the app.\n"
-        "- If those logs are sufficient, summarize the root cause directly.\n"
-        "- If more evidence is needed, recommend one concrete diagnostic command appropriate for the execution target.\n"
-        "- Do not tell the operator to inspect logs manually. The command output will be sent back to the AI for analysis.\n\n"
-        "- Use the dependency graph context to estimate blast radius, upstream dependents, and the likely impacted services.\n"
-        "- The agent does not support shell operators, command substitution, pipes, or semicolons.\n"
-        "- For app containers, prefer file-log commands like `tail -n 200 /var/log/demo/app-orders.log`.\n"
-        f"- For the database target (`db` -> `{DB_AGENT_HOST}`), prefer `pg_isready -h db` or a `psql -h db -U {DB_USER} -d {DB_NAME} -c ...` query.\n"
-        "- If the evidence points to a shared dependency path, pivot the target to that dependency instead of staying on the symptom service.\n"
-        "- Return a literal executable command only.\n\n"
-        f"ALERT PAYLOAD:\n{json.dumps(alert_payload, indent=2)}\n\n"
-        f"OBSERVABILITY CONTEXT:\n{json.dumps(context, indent=2)[:12000]}\n"
+    structured_evidence = _structured_evidence_from_context(context, alert_payload=alert_payload)
+    contradiction_assessment = _build_contradiction_assessment(structured_evidence)
+    learning_snapshot = _historical_outcome_learning_snapshot(
+        service=str(context.get("service_name") or ((alert_payload.get("labels") or {}).get("service")) or ""),
+        environment=str(((alert_payload.get("labels") or {}).get("environment") or (alert_payload.get("labels") or {}).get("env") or (context.get("inventory_runtime") or {}).get("environment") or "")).lower(),
     )
-    ok, status, planning_body = query_aide_api(planning_prompt)
-    if not ok:
-        return JsonResponse(
-            {"error": "AIDE_planning_failed", "detail": planning_body, "context": context},
-            status=502,
+    state_fingerprint = _build_incident_state_fingerprint(alert_payload, context, structured_evidence)
+    cached_state = _get_cached_state_decision(state_fingerprint)
+    cached_planning = cached_state.get("planning") if isinstance(cached_state.get("planning"), dict) else {}
+
+    if cached_planning:
+        logger.info(f"[INGEST] Using cached planning decision for fingerprint {state_fingerprint[:16]}...")
+        normalized_plan = _coerce_diagnostic_plan(alert_payload, context, cached_planning, target_host)
+    else:
+        planning_prompt = (
+            "You are an AIOps incident responder. Given the alert payload and telemetry context, "
+            "return JSON only with keys: summary, target_host, diagnostic_command, why, should_execute.\n"
+            "- diagnostic_command must be a single executable command suitable for the target troubleshooting agent.\n"
+            "- should_execute must be true only if there is enough information to run the command now.\n"
+            "- target_host must be the hostname or IP where the command should run.\n\n"
+            "- The telemetry context already contains Prometheus metrics, Elasticsearch logs, and Jaeger traces gathered by the app.\n"
+            "- If those logs are sufficient, summarize the root cause directly.\n"
+            "- If more evidence is needed, recommend one concrete diagnostic command appropriate for the execution target.\n"
+            "- Do not tell the operator to inspect logs manually. The command output will be sent back to the AI for analysis.\n\n"
+            "- Use the dependency graph context to estimate blast radius, upstream dependents, and the likely impacted services.\n"
+            "- If recent incident memory is present, use it to determine whether this is a recurrence of the same failure after a previous remediation.\n"
+            "- If runtime state shows the previous remediation was exhausted or insufficient, choose the next diagnostic command or remediation based on the current evidence, not just the prior command.\n"
+            "- Explicitly weigh contradictory evidence before recommending aggressive action. If contradictions are high, prefer observation or safe validation.\n"
+            "- The agent does not support shell operators, command substitution, pipes, or semicolons.\n"
+            f"- Prefer evidence-guided targeting using this structured evidence summary: {_format_structured_evidence_for_prompt(structured_evidence, 900)}\n"
+            f"- Contradiction assessment: {_head_for_prompt(json.dumps(contradiction_assessment, indent=2, default=str), 500)}\n"
+            f"- Historical outcome learning: {_head_for_prompt(json.dumps(learning_snapshot, indent=2, default=str), 700)}\n"
+            "- Prefer target-native diagnostics (service health, logs, metrics, database readiness) instead of platform-specific shell tricks.\n"
+            "- If the evidence points to a shared dependency path, pivot the target to that dependency instead of staying on the symptom service.\n"
+            "- Return a literal executable command only.\n\n"
+            f"ALERT PAYLOAD:\n{_head_for_prompt(json.dumps(alert_payload, indent=2, default=str), 2000)}\n\n"
+            f"OBSERVABILITY CONTEXT:\n{_head_for_prompt(json.dumps(context, indent=2, default=str), 2500)}\n"
         )
+        logger.info(f"[INGEST] Sending planning prompt to AIDE for {alert_name} on {target_host}")
+        ok, status, planning_body = query_aide_api(planning_prompt)
+        if not ok:
+            # CRITICAL: Never return a non-2xx to alertmanager — it will retry indefinitely and
+            # mark the webhook as dead after 9 attempts. Accept the alert, log the LLM failure,
+            # return 200 with a degraded response so alertmanager considers it delivered.
+            logger.error(f"[INGEST] AIDE planning failed (LLM unavailable): {status} | Alert will be stored without AI analysis")
+            _correlate_alert_to_incident(alert_payload, context, f"AI analysis unavailable: {alert_name}", "LLM backend unreachable during ingestion.")
+            return JsonResponse(
+                {
+                    "status": "accepted_degraded",
+                    "warning": "AI analysis skipped — LLM backend unavailable. Alert recorded.",
+                    "alert_name": alert_name,
+                    "target_host": target_host,
+                    "structured_evidence": structured_evidence,
+                    "incident_state_fingerprint": state_fingerprint,
+                    "llm_error": str(status)[:200],
+                },
+                status=200,
+            )
 
-    try:
-        start_index = planning_body.find("{")
-        end_index = planning_body.rfind("}")
-        if start_index != -1 and end_index != -1:
-            plan = json.loads(planning_body[start_index:end_index + 1])
-        else:
+        try:
+            start_index = planning_body.find("{")
+            end_index = planning_body.rfind("}")
+            if start_index != -1 and end_index != -1:
+                plan = json.loads(planning_body[start_index:end_index + 1])
+            else:
+                plan = {}
+        except json.JSONDecodeError:
             plan = {}
-    except json.JSONDecodeError:
-        plan = {}
 
-    normalized_plan = _coerce_diagnostic_plan(alert_payload, context, plan, target_host)
+        normalized_plan = _coerce_diagnostic_plan(alert_payload, context, plan, target_host)
+        logger.info(f"[INGEST] Planning result: {normalized_plan.get('diagnostic_command', 'NO CMD')[:60]} | Should execute: {normalized_plan.get('should_execute')}")
     diagnostic_command = normalized_plan["diagnostic_command"]
     target_host = normalized_plan["target_host"]
     summary = normalized_plan["summary"]
     why = normalized_plan["why"]
     should_execute = normalized_plan["should_execute"]
     target_type = normalized_plan["target_type"]
+    decision_policy = normalized_plan.get("decision_policy") or "diagnose"
+    confidence_reason = normalized_plan.get("confidence_reason") or ""
+    evidence_assessment = normalized_plan.get("evidence_assessment") or {}
 
     response_payload = {
         "summary": summary,
@@ -3504,11 +5083,65 @@ def ingest_alert_view(request: HttpRequest):
         "target_type": target_type,
         "diagnostic_command": diagnostic_command,
         "should_execute": should_execute,
+        "decision_policy": decision_policy,
+        "confidence_reason": confidence_reason,
+        "evidence_assessment": evidence_assessment,
+        "structured_evidence": structured_evidence,
+        "contradiction_assessment": contradiction_assessment,
+        "historical_outcome_learning": learning_snapshot,
+        "incident_state_fingerprint": state_fingerprint,
+        "state_cache_hit": bool(cached_planning),
         "context": context,
     }
+    response_payload["diagnostic_typed_action"] = infer_typed_action(
+        command=diagnostic_command,
+        target_host=target_host,
+        why=why,
+        requires_approval=False,
+        service=str(context.get("service_name") or "") if isinstance(context, dict) else "",
+    )
 
     incident = _correlate_alert_to_incident(alert_payload, context, summary, why)
     response_payload["incident"] = _incident_summary_payload(incident)
+    policy_context = {
+        "labels": alert_payload.get("labels") or {},
+        "target_type": target_type,
+        "target_host": target_host,
+        "service_name": context.get("service_name") or ((alert_payload.get("labels") or {}).get("service")) or "",
+        "dependency_graph": context.get("dependency_graph") or {},
+        "inventory_runtime": context.get("inventory_runtime") or {},
+    }
+    policy_decision = evaluate_execution_policy(
+        command=diagnostic_command,
+        target_host=target_host,
+        execution_type="diagnostic",
+        context=policy_context,
+        approval_present=False,
+        actor="alert-ingest",
+    )
+    response_payload["policy_decision"] = policy_decision
+    response_payload["behavior_version"] = current_behavior_version_payload()
+    _store_cached_state_decision(
+        state_fingerprint,
+        {
+            "planning": {
+                "summary": summary,
+                "why": why,
+                "target_host": target_host,
+                "target_type": target_type,
+                "diagnostic_command": diagnostic_command,
+                "should_execute": should_execute,
+                "decision_policy": decision_policy,
+                "confidence_reason": confidence_reason,
+                "evidence_assessment": evidence_assessment,
+                "policy_decision": policy_decision,
+                "diagnostic_typed_action": response_payload["diagnostic_typed_action"],
+                "behavior_version": response_payload["behavior_version"],
+            },
+            "structured_evidence": structured_evidence,
+            "incident_key": str(incident.incident_key),
+        },
+    )
 
     cache_entry = {
         "alert_id": f"alert-{uuid.uuid4().hex}",
@@ -3523,11 +5156,24 @@ def ingest_alert_view(request: HttpRequest):
         "initial_ai_reasoning": why,
         "diagnostic_command": diagnostic_command,
         "should_execute": should_execute,
+        "decision_policy": decision_policy,
+        "confidence_reason": confidence_reason,
+        "evidence_assessment": evidence_assessment,
+        "policy_decision": policy_decision,
+        "diagnostic_typed_action": response_payload["diagnostic_typed_action"],
+        "behavior_version": response_payload["behavior_version"],
+        "structured_evidence": structured_evidence,
+        "contradiction_assessment": contradiction_assessment,
+        "historical_outcome_learning": learning_snapshot,
+        "incident_state_fingerprint": state_fingerprint,
+        "state_cache_hit": bool(cached_planning),
         "execute_immediately": execute_immediately,
         "from_alertmanager": from_alertmanager,
         "labels": alert_payload.get("labels") or {},
         "annotations": alert_payload.get("annotations") or {},
         "dependency_graph": context.get("dependency_graph") or {},
+        "recent_incident_memory": context.get("recent_incident_memory") or {},
+        "inventory_runtime": context.get("inventory_runtime") or {},
         "blast_radius": (context.get("dependency_graph") or {}).get("blast_radius", []),
         "depends_on": (context.get("dependency_graph") or {}).get("depends_on", []),
         "incident_key": str(incident.incident_key),
@@ -3557,13 +5203,73 @@ def ingest_alert_view(request: HttpRequest):
         response_payload["error"] = "AiDE did not return an executable command and target."
         return JsonResponse(response_payload, status=400)
 
+    if policy_decision["decision"] != "allowed":
+        cache_entry.update({
+            "should_execute": False,
+            "execution_status": policy_decision["decision"],
+            "policy_decision": policy_decision,
+        })
+        _store_recent_alert_recommendation(cache_entry)
+        IncidentTimelineEvent.objects.create(
+            incident=incident,
+            event_type="execution_blocked_by_policy",
+            title=f"Automatic diagnostic command {policy_decision['decision'].replace('_', ' ')}",
+            detail=policy_decision.get("reason") or "",
+            payload={
+                "command": diagnostic_command,
+                "target_host": target_host,
+                "execution_type": "diagnostic",
+                "typed_action": response_payload["diagnostic_typed_action"],
+                "policy_decision": policy_decision,
+                "incident_state_fingerprint": state_fingerprint,
+            },
+        )
+        response_payload["should_execute"] = False
+        return JsonResponse(response_payload, status=200)
+
     success, command_output, agent_response = delegate_command_to_agent(diagnostic_command, target_host)
+    record_execution_attempt(
+        policy_decision=policy_decision,
+        command=diagnostic_command,
+        target_host=target_host,
+        success=success,
+    )
     analysis_ok, final_answer, analysis_sections = analyze_command_output(
         summary,
         target_host,
         diagnostic_command,
         command_output,
         context=context,
+    )
+    remediation_decision = _remediation_decision_payload(analysis_sections)
+    previous_remediation = cached_state.get("remediation") if isinstance(cached_state.get("remediation"), dict) else {}
+    remediation_variance = _detect_remediation_variance(previous_remediation, remediation_decision)
+    if remediation_variance:
+        previous_variance = remediation_variance.get("previous") or {}
+        remediation_variance["previous"] = {**previous_variance, "structured_evidence": cached_state.get("structured_evidence") or {}}
+        remediation_variance["current"] = {**(remediation_variance.get("current") or {}), "structured_evidence": structured_evidence}
+        _record_remediation_variance(
+            incident=incident,
+            fingerprint=state_fingerprint,
+            variance=remediation_variance,
+            structured_evidence=structured_evidence,
+        )
+    verification = _run_post_action_verification(
+        alert_payload=alert_payload,
+        baseline_context=context,
+        baseline_evidence=structured_evidence,
+        execution_type="diagnostic",
+        command=diagnostic_command,
+        agent_success=success,
+    )
+    _store_cached_state_decision(
+        state_fingerprint,
+        {
+            "remediation": {**remediation_decision, "structured_evidence": structured_evidence},
+            "last_verification": verification,
+            "incident_key": str(incident.incident_key),
+            "remediation_typed_action": analysis_sections.get("remediation_typed_action") or {},
+        },
     )
 
     response_payload.update({
@@ -3573,6 +5279,12 @@ def ingest_alert_view(request: HttpRequest):
         "final_answer": final_answer,
         "analysis_sections": analysis_sections,
         "analysis_ok": analysis_ok,
+        "verification": verification,
+        "remediation_variance": remediation_variance or None,
+        "policy_decision": policy_decision,
+        "diagnostic_typed_action": response_payload["diagnostic_typed_action"],
+        "remediation_typed_action": analysis_sections.get("remediation_typed_action") or {},
+        "behavior_version": response_payload["behavior_version"],
     })
     IncidentTimelineEvent.objects.create(
         incident=incident,
@@ -3586,6 +5298,10 @@ def ingest_alert_view(request: HttpRequest):
             "command_output": command_output[:4000],
             "final_answer": final_answer,
             "analysis_sections": analysis_sections,
+            "typed_action": response_payload["diagnostic_typed_action"],
+            "verification": verification,
+            "incident_state_fingerprint": state_fingerprint,
+            "policy_decision": policy_decision,
         },
     )
     cache_entry.update({
@@ -3600,8 +5316,14 @@ def ingest_alert_view(request: HttpRequest):
         "post_command_ai_analysis": final_answer,
         "command_output": command_output,
         "agent_response": agent_response,
+        "verification": verification,
+        "remediation_variance": remediation_variance or None,
         "execution_status": "completed" if success else "failed",
         "last_execution_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "policy_decision": policy_decision,
+        "diagnostic_typed_action": response_payload["diagnostic_typed_action"],
+        "remediation_typed_action": analysis_sections.get("remediation_typed_action") or {},
+        "behavior_version": response_payload["behavior_version"],
     })
     _store_recent_alert_recommendation(cache_entry)
     return JsonResponse(response_payload, status=200 if success else 502)
@@ -3655,22 +5377,245 @@ def execute_command_view(request: HttpRequest):
     try:
         body = json.loads(request.body or "{}")
         alert_id = body.get("alert_id")
-        command_to_run = body.get("command")
+        session_id = str(body.get("session_id") or "").strip()
+        typed_action_payload = body.get("typed_action") if isinstance(body.get("typed_action"), dict) else None
+        rollback_metadata = body.get("rollback_metadata") if isinstance(body.get("rollback_metadata"), dict) else {}
+        approval_token = str(body.get("approval_token") or "").strip()
+        idempotency_key_input = str(body.get("idempotency_key") or "").strip()
+        dry_run = _to_bool(body.get("dry_run"), default=False)
+        command_to_run = body.get("command") or command_from_typed_action(typed_action_payload)
         original_question = body.get("original_question")
-        target_host = body.get("target_host") # The IP or hostname of the server to run the command on.
+        target_host = body.get("target_host") or (typed_action_payload or {}).get("target_host") or (typed_action_payload or {}).get("target") # The IP or hostname of the server to run the command on.
         execution_type = _summarize_execution_type(str(body.get("execution_type") or "diagnostic").strip().lower())
+
+        logger.info(f"[EXECUTE] Request to execute {execution_type} command: {command_to_run[:60]}... on {target_host}")
 
         if not all([command_to_run, original_question, target_host]):
             return JsonResponse({"error": "Missing required fields: command, original_question, and target_host are required."}, status=400)
 
         linked_recommendation = _lookup_recent_alert_recommendation(alert_id)
+        alert_source_payload = _build_verification_alert_payload(
+            linked_recommendation or {},
+            fallback_target_host=target_host,
+            fallback_summary=original_question,
+        )
+        baseline_context = collect_alert_context(alert_source_payload)
+        baseline_evidence = _structured_evidence_from_context(baseline_context, alert_payload=alert_source_payload)
+        state_fingerprint = _build_incident_state_fingerprint(alert_source_payload, baseline_context, baseline_evidence)
+        cached_state = _get_cached_state_decision(state_fingerprint)
         execution_context = {
             "linked_recommendation": linked_recommendation or {},
             "dependency_graph": (linked_recommendation or {}).get("dependency_graph") or {},
             "incident_key": (linked_recommendation or {}).get("incident_key"),
             "target_type": (linked_recommendation or {}).get("target_type"),
+            "target_host": baseline_context.get("target_host") or target_host,
+            "service_name": baseline_context.get("service_name") or ((linked_recommendation or {}).get("labels") or {}).get("service") or "",
+            "labels": (linked_recommendation or {}).get("labels") or {},
+            "evidence_assessment": {"structured_evidence": baseline_evidence},
+            "recent_incident_memory": baseline_context.get("recent_incident_memory") or {},
+            "inventory_runtime": baseline_context.get("inventory_runtime") or {},
+            "typed_action": typed_action_payload or {},
         }
+        resolved_typed_action = typed_action_payload or infer_typed_action(
+            command=command_to_run,
+            target_host=target_host,
+            why=original_question,
+            requires_approval=execution_type == "remediation",
+            service=str(execution_context.get("service_name") or ""),
+        )
+        incident = None
+        incident_key = str((linked_recommendation or {}).get("incident_key") or "").strip()
+        if incident_key:
+            incident = Incident.objects.filter(incident_key=incident_key).first()
+        session = ChatSession.objects.filter(session_id=session_id).first() if session_id else None
+        policy_decision = evaluate_execution_policy(
+            command=command_to_run,
+            target_host=target_host,
+            execution_type=execution_type,
+            context=execution_context,
+            approval_present=False,
+            actor=getattr(request.user, "username", "") or getattr(request.user, "email", "") or "operator",
+        )
+        environment = str(policy_decision.get("environment") or "")
+        service_name = str(execution_context.get("service_name") or "")
+        ranking = rank_typed_action(
+            resolved_typed_action,
+            service=service_name,
+            environment=environment,
+            blast_radius_size=len((((linked_recommendation or {}).get("dependency_graph") or {}).get("blast_radius") or [])),
+        )
+        intent_context_fingerprint = execution_context_fingerprint(
+            {
+                "incident_key": incident_key,
+                "execution_type": execution_type,
+                "typed_action": resolved_typed_action,
+                "structured_evidence": baseline_evidence,
+                "target_host": target_host,
+            }
+        )
+        idempotency_key = resolve_idempotency_key(
+            provided_key=idempotency_key_input,
+            execution_type=execution_type,
+            incident_key=incident_key,
+            action_payload=resolved_typed_action,
+            original_question=str(original_question or ""),
+        )
+        intent, reused_existing = _prepare_execution_intent(
+            session=session,
+            user=request.user,
+            incident=incident,
+            execution_type=execution_type,
+            command=command_to_run,
+            typed_action=resolved_typed_action,
+            target_host=target_host,
+            service=service_name,
+            environment=environment,
+            policy_decision=policy_decision,
+            ranking=ranking,
+            context_fingerprint=intent_context_fingerprint,
+            dry_run=dry_run,
+            rollback_metadata=rollback_metadata,
+            idempotency_key=idempotency_key,
+        )
+        if reused_existing and intent.response_json:
+            return JsonResponse(intent.response_json)
+
+        frequency_check = _check_service_execution_frequency(service_name)
+        if not frequency_check["allowed"]:
+            policy_decision = {
+                **policy_decision,
+                "decision": "blocked",
+                "allowed": False,
+                "blocked": True,
+                "reason": frequency_check["reason"],
+                "frequency_limit": frequency_check,
+            }
+        intent.policy_decision_json = policy_decision
+        intent.ranking_json = ranking
+        intent.status = "blocked" if policy_decision["decision"] == "blocked" else intent.status
+        intent.save(update_fields=["policy_decision_json", "ranking_json", "status", "updated_at"])
+
+        if policy_decision["decision"] == "requires_approval":
+            if not verify_approval_token(approval_token, intent.approval_token_hash, intent.approval_expires_at):
+                approval_workflow = build_execution_workflow(
+                    execution_type=execution_type,
+                    question=str(original_question or ""),
+                    typed_action=resolved_typed_action,
+                    target_host=target_host,
+                    policy_decision=policy_decision,
+                    ranking=ranking,
+                    baseline_evidence=baseline_evidence,
+                    execution_status="approval_required",
+                    dry_run=dry_run,
+                )
+                raw_token, token_hash, expires_at = issue_approval_token(intent.intent_id)
+                intent.approval_token_hash = token_hash
+                intent.approval_expires_at = expires_at
+                intent.status = "approval_required"
+                intent.requires_approval = True
+                intent.save(update_fields=["approval_token_hash", "approval_expires_at", "status", "requires_approval", "updated_at"])
+                approval_response = {
+                    "error": policy_decision.get("reason") or "Execution requires approval.",
+                    "approval_required": True,
+                    "approval_token": raw_token,
+                    "approval_expires_at": expires_at.isoformat(),
+                    "execution_intent_id": intent.intent_id,
+                    "policy_decision": policy_decision,
+                    "typed_action": resolved_typed_action,
+                    "ranking": ranking,
+                    "behavior_version": current_behavior_version_payload(),
+                    "workflow": approval_workflow,
+                }
+                intent.response_json = _json_safe(approval_response)
+                intent.save(update_fields=["response_json", "updated_at"])
+                return JsonResponse(approval_response, status=409)
+            intent.approved_at = timezone.now()
+            intent.approved_by = request.user
+            intent.status = "approved"
+            intent.save(update_fields=["approved_at", "approved_by", "status", "updated_at"])
+
+        if policy_decision["decision"] == "blocked":
+            blocked_workflow = build_execution_workflow(
+                execution_type=execution_type,
+                question=str(original_question or ""),
+                typed_action=resolved_typed_action,
+                target_host=target_host,
+                policy_decision=policy_decision,
+                ranking=ranking,
+                baseline_evidence=baseline_evidence,
+                execution_status="blocked",
+                dry_run=dry_run,
+            )
+            if alert_id:
+                _update_recent_alert_recommendation(
+                    alert_id,
+                    {
+                        "execution_status": policy_decision["decision"],
+                        "policy_decision": policy_decision,
+                        "typed_action": resolved_typed_action,
+                    },
+                )
+            blocked_response = {
+                "error": policy_decision.get("reason") or "Execution blocked by policy.",
+                "policy_decision": policy_decision,
+                "typed_action": resolved_typed_action,
+                "ranking": ranking,
+                "behavior_version": current_behavior_version_payload(),
+                "execution_intent_id": intent.intent_id,
+                "workflow": blocked_workflow,
+            }
+            intent.response_json = _json_safe(blocked_response)
+            intent.save(update_fields=["response_json", "updated_at"])
+            return JsonResponse(
+                blocked_response,
+                status=_policy_status_code(policy_decision),
+            )
+        if dry_run:
+            dry_run_workflow = build_execution_workflow(
+                execution_type=execution_type,
+                question=str(original_question or ""),
+                typed_action=resolved_typed_action,
+                target_host=target_host,
+                policy_decision=policy_decision,
+                ranking=ranking,
+                baseline_evidence=baseline_evidence,
+                execution_status="dry_run",
+                dry_run=True,
+            )
+            dry_run_response = {
+                "execution_type": execution_type,
+                "execution_status": "dry_run",
+                "final_answer": f"Dry run prepared for {action_summary(resolved_typed_action) or command_to_run}.",
+                "command_output": "",
+                "agent_success": True,
+                "typed_action": resolved_typed_action,
+                "typed_action_summary": action_summary(resolved_typed_action),
+                "policy_decision": policy_decision,
+                "ranking": ranking,
+                "behavior_version": current_behavior_version_payload(),
+                "execution_intent_id": intent.intent_id,
+                "idempotency_key": idempotency_key,
+                "rollback_metadata": rollback_metadata,
+                "workflow": dry_run_workflow,
+            }
+            intent.status = "dry_run"
+            intent.response_json = _json_safe(dry_run_response)
+            intent.executed_at = timezone.now()
+            intent.completed_at = timezone.now()
+            intent.save(update_fields=["status", "response_json", "executed_at", "completed_at", "updated_at"])
+            return JsonResponse(dry_run_response)
+        logger.info(f"[EXECUTE] Delegating command to agent...")
+        intent.status = "executing"
+        intent.executed_at = timezone.now()
+        intent.save(update_fields=["status", "executed_at", "updated_at"])
         success, command_output, agent_response = delegate_command_to_agent(command_to_run, target_host)
+        record_execution_attempt(
+            policy_decision=policy_decision,
+            command=command_to_run,
+            target_host=target_host,
+            success=success,
+        )
+        logger.info(f"[EXECUTE] Agent execution result: {execution_status if 'execution_status' in locals() else ('SUCCESS' if success else 'FAILED')} | Output length: {len(command_output)}")
         ok, final_answer, analysis_sections = analyze_command_output(
             original_question,
             target_host,
@@ -3679,6 +5624,7 @@ def execute_command_view(request: HttpRequest):
             context=execution_context,
         )
         if not ok:
+            logger.error(f"[EXECUTE] Analysis failed: {final_answer}")
             return JsonResponse({"error": final_answer}, status=502)
 
         execution_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -3689,6 +5635,18 @@ def execute_command_view(request: HttpRequest):
         execution_time_key = "remediation_last_execution_at" if execution_type == "remediation" else "last_execution_at"
         timeline_event_type = "remediation_command_executed" if execution_type == "remediation" else "manual_command_executed"
         timeline_title = f"Manual {execution_type} command executed against {target_host}"
+        remediation_decision = _remediation_decision_payload(analysis_sections)
+        previous_remediation = cached_state.get("remediation") if isinstance(cached_state.get("remediation"), dict) else {}
+        remediation_variance = _detect_remediation_variance(previous_remediation, remediation_decision)
+        verification = _run_post_action_verification(
+            alert_payload=alert_source_payload,
+            baseline_context=baseline_context,
+            baseline_evidence=baseline_evidence,
+            execution_type=execution_type,
+            command=command_to_run,
+            agent_success=success,
+        )
+        logger.info(f"[EXECUTE] Verification result: {verification.get('status')} | Variance detected: {bool(remediation_variance)}")
 
         if alert_id:
             incident_key = None
@@ -3715,7 +5673,13 @@ def execute_command_view(request: HttpRequest):
                         analysis_sections.get("remediation_requires_approval"),
                         default=_to_bool((linked_recommendation or {}).get("remediation_requires_approval"), default=False),
                     ),
+                    "remediation_typed_action": analysis_sections.get("remediation_typed_action") or ((linked_recommendation or {}).get("remediation_typed_action")) or {},
                     "agent_response": agent_response,
+                    "verification": verification,
+                    "remediation_variance": remediation_variance or None,
+                    "incident_state_fingerprint": state_fingerprint,
+                    "policy_decision": policy_decision,
+                    "typed_action": resolved_typed_action,
                 },
             )
             if incident_key:
@@ -3724,12 +5688,22 @@ def execute_command_view(request: HttpRequest):
                     incident.status = "investigating"
                     incident.summary = incident.summary or original_question
                     incident.save(update_fields=["status", "summary", "updated_at"])
+                    if remediation_variance:
+                        previous_variance = remediation_variance.get("previous") or {}
+                        remediation_variance["previous"] = {**previous_variance, "structured_evidence": cached_state.get("structured_evidence") or {}}
+                        remediation_variance["current"] = {**(remediation_variance.get("current") or {}), "structured_evidence": baseline_evidence}
+                        _record_remediation_variance(
+                            incident=incident,
+                            fingerprint=state_fingerprint,
+                            variance=remediation_variance,
+                            structured_evidence=baseline_evidence,
+                        )
                     IncidentTimelineEvent.objects.create(
                         incident=incident,
                         event_type=timeline_event_type,
                         title=timeline_title,
                         detail=command_to_run,
-                        payload={
+                        payload=_json_safe({
                             "execution_type": execution_type,
                             "command": command_to_run,
                             "target_host": target_host,
@@ -3737,10 +5711,94 @@ def execute_command_view(request: HttpRequest):
                             "command_output": command_output[:4000],
                             "final_answer": final_answer,
                             "analysis_sections": analysis_sections,
-                        },
+                            "verification": verification,
+                            "remediation_variance": remediation_variance or None,
+                            "incident_state_fingerprint": state_fingerprint,
+                            "policy_decision": policy_decision,
+                            "typed_action": resolved_typed_action,
+                        }),
                     )
 
-        return JsonResponse({
+        _store_cached_state_decision(
+            state_fingerprint,
+            {
+                "remediation": {**remediation_decision, "structured_evidence": baseline_evidence},
+                "last_verification": verification,
+                "structured_evidence": baseline_evidence,
+                "incident_key": str(incident.incident_key) if incident else (linked_recommendation or {}).get("incident_key") or "",
+                "policy_decision": policy_decision,
+                "typed_action": resolved_typed_action,
+            },
+        )
+        RemediationOutcome.objects.create(
+            execution_intent=intent,
+            incident=incident,
+            action_type=str(resolved_typed_action.get("action") or ""),
+            service=service_name,
+            environment=environment,
+            context_fingerprint=intent_context_fingerprint,
+            action_signature=execution_action_signature(resolved_typed_action),
+            success=bool(success and verification.get("status") in {"resolved", "partially_improved"}),
+            verification_status=str(verification.get("status") or ""),
+            time_to_recovery_seconds=0 if verification.get("status") == "resolved" else None,
+            recurrence_within_minutes=None,
+            blast_radius_risk=float(len((((linked_recommendation or {}).get("dependency_graph") or {}).get("blast_radius") or []))),
+            operator_override=False,
+            metadata_json={
+                "policy_decision": policy_decision,
+                "ranking": ranking,
+                "behavior_version": current_behavior_version_payload(),
+            },
+        )
+        replay_scenario = ReplayScenario.objects.create(
+            incident=incident,
+            session=session,
+            source="execution",
+            title=f"{execution_type}:{service_name or target_host}",
+            alert_payload_json=alert_source_payload,
+            metrics_snapshot_json=(baseline_context.get("metrics") or baseline_context.get("telemetry_metrics") or {}),
+            logs_snapshot_json=(baseline_context.get("logs") or {}),
+            traces_snapshot_json=(baseline_context.get("traces") or {}),
+            dependency_context_json={
+                "dependency_graph": execution_context.get("dependency_graph") or {},
+                "structured_evidence": baseline_evidence,
+            },
+            prior_incident_memory_json=baseline_context.get("recent_incident_memory") or {},
+            chosen_action_json=resolved_typed_action,
+            outcome_json={"verification": verification, "success": success},
+            behavior_version_json=current_behavior_version_payload(),
+        )
+        replay_scores = build_replay_scores(
+            verification=verification,
+            policy_decision=policy_decision,
+            execution_success=success,
+        )
+        ReplayEvaluation.objects.create(
+            scenario=replay_scenario,
+            execution_intent=intent,
+            status="completed",
+            scores_json=replay_scores,
+            summary_json={
+                "verification_status": verification.get("status"),
+                "execution_type": execution_type,
+                "service": service_name,
+            },
+        )
+        workflow = build_execution_workflow(
+            execution_type=execution_type,
+            question=str(original_question or ""),
+            typed_action=resolved_typed_action,
+            target_host=target_host,
+            policy_decision=policy_decision,
+            ranking=ranking,
+            baseline_evidence=baseline_evidence,
+            verification=verification,
+            analysis_sections=analysis_sections,
+            execution_status=execution_status,
+            dry_run=dry_run,
+        )
+
+        response_payload = {
             "execution_type": execution_type,
             "final_answer": final_answer,
             "analysis_sections": analysis_sections,
@@ -3749,7 +5807,27 @@ def execute_command_view(request: HttpRequest):
             "agent_response": agent_response,
             "last_execution_at": execution_time,
             "execution_status": execution_status,
-        })
+            "verification": verification,
+            "remediation_variance": remediation_variance or None,
+            "incident_state_fingerprint": state_fingerprint,
+            "policy_decision": policy_decision,
+            "typed_action": resolved_typed_action,
+            "typed_action_summary": action_summary(resolved_typed_action),
+            "ranking": ranking,
+            "behavior_version": current_behavior_version_payload(),
+            "execution_intent_id": intent.intent_id,
+            "idempotency_key": idempotency_key,
+            "rollback_metadata": rollback_metadata,
+            "replay_scores": replay_scores,
+            "workflow": workflow,
+        }
+        intent.status = execution_status
+        intent.verification_json = verification
+        intent.response_json = _json_safe(response_payload)
+        intent.completed_at = timezone.now()
+        intent.save(update_fields=["status", "verification_json", "response_json", "completed_at", "updated_at"])
+
+        return JsonResponse(response_payload)
 
     except Exception as e:
         logger.exception("execute_command_view error: %s", e)
@@ -4602,3 +6680,260 @@ start_services
 echo "Installed node_exporter and otelcol-contrib, wrote systemd services, enrolled the host, and enabled heartbeat."
 """
     return HttpResponse(script, content_type="text/plain")
+
+
+# ---------------------------------------------------------------------------
+# M6 — Runbook Generator
+# ---------------------------------------------------------------------------
+
+@login_required
+def generate_runbook_view(request: HttpRequest, incident_key: str):
+    """Generate an AI runbook from incident RCA + timeline and save to Knowledge Base."""
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+
+    incident = Incident.objects.filter(incident_key=incident_key).first()
+    if not incident:
+        return JsonResponse({"error": "incident_not_found"}, status=404)
+
+    try:
+        payload = generate_runbook_payload(
+            incident,
+            llm_query=query_aide_api,
+            runbook_model=Runbook,
+            timeline_event_model=IncidentTimelineEvent,
+            request_user=request.user,
+            logger=logger,
+        )
+    except RuntimeError as exc:
+        return JsonResponse({"error": "llm_failed", "detail": str(exc)}, status=502)
+
+    # Save to Knowledge Base (doc_search) so RAG can retrieve it
+    try:
+        from doc_search.models import Document, DocumentChunk
+        from django.core.files.base import ContentFile
+        doc = Document(title=payload["title"], uploaded_by=request.user if request.user.is_authenticated else None)
+        doc.file.save(
+            f"runbook_{str(incident_key)[:8]}.md",
+            ContentFile(payload["content"].encode("utf-8")),
+            save=False,
+        )
+        doc.processing_status = "SUCCESS"
+        doc.save()
+        chunk_size = 3000
+        overlap = 300
+        step = max(1, chunk_size - overlap)
+        for index, start in enumerate(range(0, len(payload["content"]), step)):
+            chunk = payload["content"][start:start + chunk_size]
+            if not chunk:
+                continue
+            DocumentChunk.objects.create(document=doc, chunk_text=chunk, chunk_index=index)
+    except Exception as kb_err:
+        logger.warning("Runbook KB save failed (non-fatal): %s", kb_err)
+    return JsonResponse(payload)
+
+
+@login_required
+def download_runbook_view(request: HttpRequest, incident_key: str):
+    """Download the latest saved runbook for an incident as CSV."""
+    if request.method != "GET":
+        return JsonResponse({"error": "GET required"}, status=405)
+
+    incident = Incident.objects.filter(incident_key=incident_key).first()
+    if not incident:
+        return JsonResponse({"error": "incident_not_found"}, status=404)
+
+    runbook = incident.runbooks.order_by("-created_at").first()
+    if not runbook:
+        return JsonResponse({"error": "runbook_not_found", "detail": "Generate a runbook first."}, status=404)
+
+    return _csv_download_response(
+        _download_filename("runbook", incident_key, "csv"),
+        [
+            {
+                "incident_key": incident.incident_key,
+                "title": runbook.title,
+                "created_at": runbook.created_at.isoformat(),
+                "content": runbook.content,
+            }
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# M6 — Anomaly Explainer
+# ---------------------------------------------------------------------------
+
+@login_required
+def explain_anomaly_view(request: HttpRequest):
+    """Return a plain-English explanation of why an alert fired."""
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+
+    try:
+        body = json.loads(request.body or "{}")
+    except Exception:
+        return JsonResponse({"error": "invalid_json"}, status=400)
+
+    alert_name = body.get("alert_name") or "unknown"
+    target_host = body.get("target_host") or ""
+    labels = body.get("labels") or {}
+    summary = body.get("summary") or body.get("initial_ai_diagnosis") or ""
+    incident_key = body.get("incident_key") or ""
+
+    incident = Incident.objects.filter(incident_key=incident_key).first() if incident_key else None
+    try:
+        payload = explain_anomaly_payload(
+            alert_name=alert_name,
+            target_host=target_host,
+            labels=labels,
+            summary=summary,
+            incident=incident,
+            llm_query=query_aide_api,
+            timeline_event_model=IncidentTimelineEvent,
+        )
+    except RuntimeError as exc:
+        return JsonResponse({"error": "llm_failed", "detail": str(exc)}, status=502)
+    return JsonResponse(payload)
+
+
+# ---------------------------------------------------------------------------
+# M6 — Change Risk Explainer
+# ---------------------------------------------------------------------------
+
+@login_required
+def change_risk_view(request: HttpRequest):
+    """Analyse a planned change and return a risk score, affected services, and maintenance window."""
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+
+    try:
+        body = json.loads(request.body or "{}")
+    except Exception:
+        return JsonResponse({"error": "invalid_json"}, status=400)
+
+    service = (body.get("service") or "").strip()
+    change_description = (body.get("change_description") or "").strip()
+    planned_at = body.get("planned_at") or ""
+    change_type = body.get("change_type") or "deployment"
+
+    if not change_description:
+        return JsonResponse({"error": "change_description is required"}, status=400)
+
+    # Topology context for the service
+    application_info = _get_application_info(service)
+    application_key = application_info.get("application") or service
+    dependency = _get_dependency_context(service)
+    blast_radius = dependency.get("blast_radius") or []
+    depends_on = dependency.get("depends_on") or []
+
+    # Recent incidents for context
+    recent_incidents = []
+    for inc in Incident.objects.filter(
+        models.Q(primary_service=service) | models.Q(application=application_key)
+    ).order_by("-created_at")[:5].values("title", "severity", "status", "opened_at"):
+        recent_incidents.append({
+            "title": inc["title"],
+            "severity": inc["severity"],
+            "status": inc["status"],
+            "opened_at": inc["opened_at"].isoformat(),
+        })
+
+    try:
+        payload = analyze_change_risk_payload(
+            service=service,
+            change_description=change_description,
+            planned_at=planned_at,
+            change_type=change_type,
+            blast_radius=blast_radius,
+            depends_on=depends_on,
+            recent_incidents=recent_incidents,
+            llm_query=query_aide_api,
+        )
+    except RuntimeError as exc:
+        return JsonResponse({"error": "llm_failed", "detail": str(exc)}, status=502)
+    return JsonResponse(payload)
+
+
+# ---------------------------------------------------------------------------
+# M4 — SLA acknowledge endpoint
+# ---------------------------------------------------------------------------
+
+@login_required
+def acknowledge_sla_view(request: HttpRequest, incident_key: str):
+    """Mark the SLA response as acknowledged for an incident."""
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+
+    incident = Incident.objects.filter(incident_key=incident_key).first()
+    if not incident:
+        return JsonResponse({"error": "incident_not_found"}, status=404)
+
+    incident.sla_response_acknowledged_at = timezone.now()
+    incident.save(update_fields=["sla_response_acknowledged_at", "updated_at"])
+
+    IncidentTimelineEvent.objects.create(
+        incident=incident,
+        event_type="sla_acknowledged",
+        title="SLA response acknowledged",
+        detail=f"Acknowledged by {request.user}",
+        payload={},
+    )
+
+    return JsonResponse({"status": "ok", "sla": _compute_sla_status(incident)})
+
+
+# ---------------------------------------------------------------------------
+# M4 — Post-Incident Timeline Narrative
+# ---------------------------------------------------------------------------
+
+@login_required
+def incident_timeline_narrative_view(request: HttpRequest, incident_key: str):
+    """Generate a plain-English post-incident narrative from existing timeline events."""
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+
+    incident = Incident.objects.filter(incident_key=incident_key).first()
+    if not incident:
+        return JsonResponse({"error": "incident_not_found"}, status=404)
+
+    try:
+        payload = generate_timeline_narrative_payload(
+            incident,
+            llm_query=query_aide_api,
+            timeline_event_model=IncidentTimelineEvent,
+        )
+    except RuntimeError as exc:
+        return JsonResponse({"error": "llm_failed", "detail": str(exc)}, status=502)
+    return JsonResponse(payload)
+
+
+@login_required
+def download_timeline_narrative_view(request: HttpRequest, incident_key: str):
+    """Download the latest saved PIR narrative for an incident as CSV."""
+    if request.method != "GET":
+        return JsonResponse({"error": "GET required"}, status=405)
+
+    incident = Incident.objects.filter(incident_key=incident_key).first()
+    if not incident:
+        return JsonResponse({"error": "incident_not_found"}, status=404)
+
+    narrative_event = incident.timeline.filter(event_type="pir_generated").order_by("-created_at").first()
+    if not narrative_event:
+        return JsonResponse({"error": "narrative_not_found", "detail": "Generate a post-incident narrative first."}, status=404)
+
+    narrative = str((narrative_event.payload or {}).get("narrative") or narrative_event.detail or "").strip()
+    if not narrative:
+        return JsonResponse({"error": "narrative_not_found", "detail": "No saved narrative content was found."}, status=404)
+
+    return _csv_download_response(
+        _download_filename("post-incident-narrative", incident_key, "csv"),
+        [
+            {
+                "incident_key": incident.incident_key,
+                "title": narrative_event.title,
+                "created_at": narrative_event.created_at.isoformat(),
+                "narrative": narrative,
+            }
+        ],
+    )

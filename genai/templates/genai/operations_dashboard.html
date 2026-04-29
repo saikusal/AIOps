@@ -1,0 +1,174 @@
+{% extends "genai/app_base.html" %}
+{% block title %}Phase 2 Operations{% endblock %}
+{% block topbar_title %}Phase 2 Operations{% endblock %}
+{% block content %}
+<section style="display:grid; gap:18px;">
+  <article class="panel" style="padding:24px;">
+    <div style="display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap; align-items:flex-start;">
+      <div>
+        <div class="eyebrow">Execution Control Plane</div>
+        <h2 style="margin:0;">Phase 2 Operations Dashboard</h2>
+        <p style="margin:8px 0 0; color:var(--muted); max-width:760px;">
+          Track execution intents, remediation ranking outcomes, replay evaluation scores, and behavior-version history in one place.
+        </p>
+      </div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <a class="pill" href="/admin/genai/executionintent/" target="_blank" rel="noreferrer">Execution Admin</a>
+        <a class="pill" href="/admin/genai/replayevaluation/" target="_blank" rel="noreferrer">Replay Admin</a>
+        <a class="pill" href="/admin/genai/agentbehaviorversion/" target="_blank" rel="noreferrer">Behavior Admin</a>
+      </div>
+    </div>
+  </article>
+
+  <section id="ops-summary-cards" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:16px;"></section>
+
+  <section style="display:grid; grid-template-columns:2fr 1fr; gap:18px;">
+    <article class="panel" style="padding:22px;">
+      <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:center;">
+        <div>
+          <div class="eyebrow">Execution Intents</div>
+          <h3 style="margin:0;">Recent Intents</h3>
+        </div>
+        <span class="pill" id="ops-generated-at">Loading…</span>
+      </div>
+      <div id="ops-recent-intents" style="display:grid; gap:14px; margin-top:16px;"></div>
+    </article>
+
+    <article class="panel" style="padding:22px;">
+      <div class="eyebrow">Ranking</div>
+      <h3 style="margin:0 0 14px;">Top Ranked Services</h3>
+      <div id="ops-ranked-services" style="display:grid; gap:12px;"></div>
+    </article>
+  </section>
+
+  <section style="display:grid; grid-template-columns:1fr 1fr; gap:18px;">
+    <article class="panel" style="padding:22px;">
+      <div class="eyebrow">Replay</div>
+      <h3 style="margin:0 0 14px;">Recent Replay Results</h3>
+      <div id="ops-replay-results" style="display:grid; gap:12px;"></div>
+    </article>
+
+    <article class="panel" style="padding:22px;">
+      <div class="eyebrow">Behavior Versions</div>
+      <h3 style="margin:0 0 14px;">Behavior Version History</h3>
+      <div id="ops-behavior-history" style="display:grid; gap:12px;"></div>
+    </article>
+  </section>
+</section>
+
+<script>
+  function metricCard(label, value, accent) {
+    return `
+      <article class="panel" style="padding:18px; border-color:${accent || 'rgba(30,41,51,0.08)'};">
+        <div style="font-size:0.82rem; text-transform:uppercase; letter-spacing:0.08em; color:var(--muted);">${label}</div>
+        <div style="font-size:1.8rem; font-weight:800; margin-top:8px;">${value}</div>
+      </article>
+    `;
+  }
+
+  function emptyState(message) {
+    return `<div class="pill">${message}</div>`;
+  }
+
+  async function loadOperationsDashboard() {
+    const resp = await fetch("/genai/operations/summary/");
+    const body = await resp.json();
+
+    document.getElementById("ops-generated-at").textContent = new Date(body.generated_at).toLocaleString();
+
+    document.getElementById("ops-summary-cards").innerHTML = [
+      metricCard("Execution Intents", body.totals.execution_intents, "rgba(15,118,110,0.25)"),
+      metricCard("Dry Runs", body.totals.dry_runs, "rgba(59,130,246,0.25)"),
+      metricCard("Approval Required", body.totals.approval_required, "rgba(161,98,7,0.25)"),
+      metricCard("Replay Evaluations", body.totals.replay_evaluations, "rgba(124,58,237,0.18)"),
+      metricCard("Behavior Versions", body.totals.behavior_versions, "rgba(180,35,24,0.18)"),
+      metricCard("Success Rate", `${Math.round((body.outcomes.success_rate || 0) * 100)}%`, "rgba(34,197,94,0.18)"),
+      metricCard("Replay Score", (body.replay.avg_overall_score || 0).toFixed(2), "rgba(14,165,233,0.18)")
+    ].join("");
+
+    const intentsRoot = document.getElementById("ops-recent-intents");
+    if (!body.recent_intents.length) {
+      intentsRoot.innerHTML = emptyState("No execution intents recorded yet.");
+    } else {
+      intentsRoot.innerHTML = body.recent_intents.map((item) => `
+        <article style="border:1px solid var(--line); border-radius:18px; padding:16px; background:rgba(255,255,255,0.72);">
+          <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:center;">
+            <strong>${item.action_type || item.execution_type}</strong>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <span class="pill">${item.status}</span>
+              ${item.dry_run ? '<span class="pill">dry run</span>' : ''}
+              ${item.requires_approval ? '<span class="pill">approval</span>' : ''}
+            </div>
+          </div>
+          <p style="margin:8px 0; color:var(--muted);">
+            service=${item.service || '-'} | env=${item.environment || '-'} | target=${item.target_host || '-'}
+          </p>
+          <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:10px;">
+            <div class="pill">ranking=${item.ranking_score ?? '-'}</div>
+            <div class="pill">verification=${item.verification_status || '-'}</div>
+            <div class="pill">incident=${item.incident_key || '-'}</div>
+            <div class="pill">behavior=${item.behavior_name || '-'}</div>
+          </div>
+          <p style="margin:10px 0 0; color:var(--muted); font-size:0.9rem;">
+            prompt=${item.behavior_versions.prompt_version || '-'} | policy=${item.behavior_versions.policy_version || '-'} | model=${item.behavior_versions.model_version || '-'} | ranking=${item.behavior_versions.ranking_version || '-'}
+          </p>
+        </article>
+      `).join("");
+    }
+
+    const rankedRoot = document.getElementById("ops-ranked-services");
+    rankedRoot.innerHTML = body.top_ranked_services.length
+      ? body.top_ranked_services.map((item) => `
+          <article style="padding:14px 16px; border-radius:16px; background:var(--accent-soft);">
+            <div style="display:flex; justify-content:space-between; gap:12px; align-items:center;">
+              <strong>${item.service}</strong>
+              <span class="pill">${Math.round((item.success_rate || 0) * 100)}%</span>
+            </div>
+            <p style="margin:8px 0 0; color:var(--muted);">samples=${item.sample_size} | avg blast radius=${item.avg_blast_radius}</p>
+          </article>
+        `).join("")
+      : emptyState("No remediation outcomes recorded yet.");
+
+    const replayRoot = document.getElementById("ops-replay-results");
+    replayRoot.innerHTML = body.recent_replay_results.length
+      ? body.recent_replay_results.map((item) => `
+          <article style="padding:14px 16px; border:1px solid var(--line); border-radius:16px;">
+            <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+              <strong>${item.scenario_title || item.scenario_id}</strong>
+              <span class="pill">${item.status}</span>
+            </div>
+            <p style="margin:8px 0 0; color:var(--muted);">
+              overall=${item.overall_score ?? '-'} | correctness=${item.correctness ?? '-'} | safety=${item.safety ?? '-'} | resolution=${item.resolution_rate ?? '-'}
+            </p>
+          </article>
+        `).join("")
+      : emptyState("No replay evaluations recorded yet.");
+
+    const behaviorRoot = document.getElementById("ops-behavior-history");
+    behaviorRoot.innerHTML = body.behavior_history.length
+      ? body.behavior_history.map((item) => `
+          <article style="padding:14px 16px; border:1px solid var(--line); border-radius:16px;">
+            <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+              <strong>${item.name}</strong>
+              <span class="pill">${item.is_active ? 'active' : 'inactive'}</span>
+            </div>
+            <p style="margin:8px 0 0; color:var(--muted);">
+              prompt=${item.prompt_version} | policy=${item.policy_version} | model=${item.model_version}
+            </p>
+            <p style="margin:4px 0 0; color:var(--muted);">
+              evidence=${item.evidence_rules_version} | ranking=${item.ranking_version}
+            </p>
+          </article>
+        `).join("")
+      : emptyState("No behavior versions found yet.");
+  }
+
+  loadOperationsDashboard().catch(() => {
+    document.getElementById("ops-summary-cards").innerHTML = emptyState("Failed to load operations summary.");
+    document.getElementById("ops-recent-intents").innerHTML = emptyState("Failed to load recent intents.");
+    document.getElementById("ops-ranked-services").innerHTML = emptyState("Failed to load ranking data.");
+    document.getElementById("ops-replay-results").innerHTML = emptyState("Failed to load replay results.");
+    document.getElementById("ops-behavior-history").innerHTML = emptyState("Failed to load behavior history.");
+  });
+</script>
+{% endblock %}
