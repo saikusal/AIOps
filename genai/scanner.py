@@ -12,9 +12,7 @@ import gzip
 
 # ====== Configuration ======
 logger = logging.getLogger(__name__)
-AIDE_API_URL = os.getenv("AIDE_API_URL")
-AIDE_API_KEY = os.getenv("AIDE_API_KEY")
-VERIFY_SSL = os.getenv("AIDE_VERIFY_SSL", "true").lower() not in ("false", "0", "no")
+VERIFY_SSL = True  # SSL verification for URL fetching
 
 MAX_FETCH_BYTES = 2 * 1024 * 1024   # 2 MB
 CHUNK_SIZE_WORDS = 300
@@ -124,36 +122,14 @@ def _token_matches_in_text(tokens: List[str], text: str) -> List[str]:
             found.append(token.lower())
     return found
 
-# ====== AiDE call wrapper (similar to previous) ======
+# ====== LLM call wrapper for content moderation ======
 def call_aide_completions(prompt: str, timeout: int = 60) -> Tuple[bool, dict]:
-    if not AIDE_API_KEY or not AIDE_API_URL:
-        return False, {"error": "AIDE_API_URL or AIDE_API_KEY not configured."}
-    headers = {"Authorization": f"Bearer {AIDE_API_KEY}", "Content-Type": "application/json"}
-    payload = {"messages":[{"role":"user","content":prompt}], "temperature":0}
-    try:
-        resp = requests.post(AIDE_API_URL, headers=headers, json=payload, timeout=timeout, verify=VERIFY_SSL)
-    except Exception as e:
-        return False, {"error": f"Request failed: {e}"}
-    # try parse JSON
-    try:
-        body = resp.json()
-    except Exception:
-        return False, {"error": "Non-JSON response from AiDE", "text": getattr(resp, "text", str(resp))}
-    # extract textual reply
-    text = None
-    if isinstance(body, dict):
-        if "choices" in body and body["choices"]:
-            ch = body["choices"][0]
-            if isinstance(ch.get("message"), dict):
-                text = ch["message"].get("content")
-            elif isinstance(ch.get("text"), str):
-                text = ch.get("text")
-        elif "text" in body and isinstance(body.get("text"), str):
-            text = body.get("text")
-    if text is None:
-        return False, {"error": "No textual choice found in AiDE response", "body": body}
+    """Call the vLLM backend for content moderation analysis."""
+    from genai.llm_backend import query_llm
+    ok, _status, text = query_llm(prompt)
+    if not ok:
+        return False, {"error": text or "LLM call failed"}
     txt = text.strip()
-    # try JSON parse
     try:
         parsed = json.loads(txt)
         return True, parsed
@@ -221,7 +197,7 @@ def scan_url_for_unwanted(url: str):
 
     ok, resp = call_aide_completions(prompt)
     if not ok:
-        return {"description": "AI analysis failed.", "verdict": "review", "reasons": ["aide_call_failed"], "severity":"medium", "confidence":0.5, "evidence":[str(resp)[:200]]}
+        return {"description": "AI analysis failed.", "verdict": "review", "reasons": ["llm_call_failed"], "severity":"medium", "confidence":0.5, "evidence":[str(resp)[:200]]}
 
     # If resp is parsed JSON from model, validate fields
     res = resp

@@ -31,7 +31,7 @@ def handle_sql(
     )
     full_prompt = f"{sql_system}\n\nSCHEMA:\n{schema}\n\nQUESTION: {prompt}\nSQL:"
     ok, _status, body = llm_query(full_prompt)
-    logger.info("AIDE raw for SQL prompt: %s", (body or "")[:1000])
+    logger.info("LLM raw for SQL prompt: %s", (body or "")[:1000])
     if not ok:
         return None, {}, "Error: AI service failed.", ""
 
