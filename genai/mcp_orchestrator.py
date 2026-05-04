@@ -8,6 +8,15 @@ from .mcp_registry import MCPRegistry
 from .mcp_services import (
     applications_get_component_snapshot,
     applications_get_graph,
+    code_blast_radius_lookup,
+    code_find_recent_deployments,
+    code_find_related_symbols,
+    code_find_service_owner,
+    code_read_snippet,
+    code_recent_changes_for_component,
+    code_route_to_handler,
+    code_search_context,
+    code_span_to_symbol,
     incidents_get_timeline,
     logs_search,
     metrics_query_service_overview,
@@ -83,6 +92,15 @@ class InvestigationMCPOrchestrator:
         self.registry.register(MCPToolDefinition("traces-mcp", "traces.search", "Fetch recent traces for a service", self._tool_traces_search, endpoint_path="/genai/mcp/traces/search/"))
         self.registry.register(MCPToolDefinition("runbooks-mcp", "runbooks.search", "Search generated incident runbooks", self._tool_runbooks_search, endpoint_path="/genai/mcp/runbooks/search/"))
         self.registry.register(MCPToolDefinition("source-mcp", "source.read_traceback", "Parse Python tracebacks from logs and return live source snippets + SQL schema files for the referenced functions", self._tool_source_read_traceback))
+        self.registry.register(MCPToolDefinition("code-context-mcp", "code.find_service_owner", "Find repository ownership for a runtime service", self._tool_code_find_service_owner, endpoint_path="/genai/mcp/code/service-owner/"))
+        self.registry.register(MCPToolDefinition("code-context-mcp", "code.route_to_handler", "Map a route to likely handler code", self._tool_code_route_to_handler, endpoint_path="/genai/mcp/code/route-handler/"))
+        self.registry.register(MCPToolDefinition("code-context-mcp", "code.span_to_symbol", "Map a trace span to likely code symbol", self._tool_code_span_to_symbol, endpoint_path="/genai/mcp/code/span-symbol/"))
+        self.registry.register(MCPToolDefinition("code-context-mcp", "code.recent_changes_for_component", "Find recent code changes for a component", self._tool_code_recent_changes_for_component, endpoint_path="/genai/mcp/code/recent-changes/"))
+        self.registry.register(MCPToolDefinition("code-context-mcp", "code.find_recent_deployments", "Find recent deployments for a service", self._tool_code_find_recent_deployments, endpoint_path="/genai/mcp/code/recent-deployments/"))
+        self.registry.register(MCPToolDefinition("code-context-mcp", "code.find_related_symbols", "Find related code symbols", self._tool_code_find_related_symbols, endpoint_path="/genai/mcp/code/related-symbols/"))
+        self.registry.register(MCPToolDefinition("code-context-mcp", "code.blast_radius", "Estimate code blast radius", self._tool_code_blast_radius, endpoint_path="/genai/mcp/code/blast-radius/"))
+        self.registry.register(MCPToolDefinition("code-context-mcp", "code.search_context", "Find the most relevant code modules for a question", self._tool_code_search_context, endpoint_path="/genai/mcp/code/search-context/"))
+        self.registry.register(MCPToolDefinition("code-context-mcp", "code.read_snippet", "Read a targeted code snippet for prompt grounding", self._tool_code_read_snippet, endpoint_path="/genai/mcp/code/read-snippet/"))
 
     def start_run(self, scope: Dict[str, str]) -> None:
         incident = self.find_investigation_incident(scope, incident_model=self.incident_model)
@@ -229,4 +247,69 @@ class InvestigationMCPOrchestrator:
             log_messages=log_messages,
             path_prefix_map=self.source_path_map,
             source_root=self.source_root,
+        )
+
+    def _tool_code_find_service_owner(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return code_find_service_owner(
+            service_name=str(params.get("service_name") or ""),
+            application_name=str(params.get("application_name") or ""),
+        )
+
+    def _tool_code_route_to_handler(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return code_route_to_handler(
+            service_name=str(params.get("service_name") or ""),
+            route=str(params.get("route") or ""),
+            http_method=str(params.get("http_method") or ""),
+        )
+
+    def _tool_code_span_to_symbol(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return code_span_to_symbol(
+            service_name=str(params.get("service_name") or ""),
+            span_name=str(params.get("span_name") or ""),
+        )
+
+    def _tool_code_recent_changes_for_component(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return code_recent_changes_for_component(
+            repository=str(params.get("repository") or ""),
+            module_path=str(params.get("module_path") or ""),
+            symbol=str(params.get("symbol") or ""),
+            hours=int(params.get("hours") or 72),
+        )
+
+    def _tool_code_find_recent_deployments(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return code_find_recent_deployments(
+            service_name=str(params.get("service_name") or ""),
+            environment=str(params.get("environment") or ""),
+            version=str(params.get("version") or ""),
+        )
+
+    def _tool_code_find_related_symbols(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return code_find_related_symbols(
+            repository=str(params.get("repository") or ""),
+            symbol=str(params.get("symbol") or ""),
+        )
+
+    def _tool_code_blast_radius(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return code_blast_radius_lookup(
+            repository=str(params.get("repository") or ""),
+            symbol=str(params.get("symbol") or ""),
+            route=str(params.get("route") or ""),
+        )
+
+    def _tool_code_search_context(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return code_search_context(
+            repository=str(params.get("repository") or ""),
+            query=str(params.get("query") or ""),
+            service_name=str(params.get("service_name") or ""),
+            limit=int(params.get("limit") or 6),
+        )
+
+    def _tool_code_read_snippet(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return code_read_snippet(
+            repository=str(params.get("repository") or ""),
+            module_path=str(params.get("module_path") or ""),
+            symbol=str(params.get("symbol") or ""),
+            line_start=int(params.get("line_start") or 0),
+            line_end=int(params.get("line_end") or 0),
+            context_lines=int(params.get("context_lines") or 18),
         )

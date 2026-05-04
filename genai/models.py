@@ -608,3 +608,162 @@ class OperatorFeedback(models.Model):
 
     def __str__(self):
         return f"{self.feedback_type}:{self.service}:{self.created_at.isoformat()}"
+
+
+class RepositoryIndex(models.Model):
+    INDEX_STATUS_CHOICES = (
+        ("pending", "Pending"),
+        ("indexed", "Indexed"),
+        ("failed", "Failed"),
+    )
+
+    repository_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    name = models.CharField(max_length=255)
+    local_path = models.CharField(max_length=1024, unique=True)
+    default_branch = models.CharField(max_length=255, blank=True, default="main")
+    provider = models.CharField(max_length=64, blank=True, default="local")
+    repo_identifier = models.CharField(max_length=255, blank=True, default="")
+    is_active = models.BooleanField(default=True)
+    index_status = models.CharField(max_length=16, choices=INDEX_STATUS_CHOICES, default="pending")
+    last_indexed_at = models.DateTimeField(null=True, blank=True)
+    last_index_error = models.TextField(blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return f"{self.name}:{self.local_path}"
+
+
+class ServiceRepositoryBinding(models.Model):
+    binding_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    service_name = models.CharField(max_length=120, db_index=True)
+    application_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    repository_index = models.ForeignKey(RepositoryIndex, on_delete=models.CASCADE, related_name="service_bindings")
+    team_name = models.CharField(max_length=255, blank=True, default="")
+    ownership_confidence = models.FloatField(default=0.5)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["service_name", "application_name"]
+        unique_together = ("service_name", "application_name", "repository_index")
+
+    def __str__(self):
+        return f"{self.service_name}:{self.repository_index.name}"
+
+
+class RouteBinding(models.Model):
+    binding_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    service_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    repository_index = models.ForeignKey(RepositoryIndex, on_delete=models.CASCADE, related_name="route_bindings")
+    http_method = models.CharField(max_length=16, blank=True, default="ANY")
+    route_pattern = models.CharField(max_length=512, db_index=True)
+    handler_name = models.CharField(max_length=255, blank=True, default="")
+    handler_file_path = models.CharField(max_length=1024, blank=True, default="")
+    line_start = models.PositiveIntegerField(null=True, blank=True)
+    line_end = models.PositiveIntegerField(null=True, blank=True)
+    confidence = models.FloatField(default=0.5)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["route_pattern", "http_method"]
+        unique_together = ("repository_index", "http_method", "route_pattern", "handler_name", "handler_file_path")
+
+    def __str__(self):
+        return f"{self.http_method}:{self.route_pattern}"
+
+
+class SpanBinding(models.Model):
+    binding_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    service_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    repository_index = models.ForeignKey(RepositoryIndex, on_delete=models.CASCADE, related_name="span_bindings")
+    span_name = models.CharField(max_length=255, db_index=True)
+    symbol_name = models.CharField(max_length=255, blank=True, default="")
+    symbol_file_path = models.CharField(max_length=1024, blank=True, default="")
+    line_start = models.PositiveIntegerField(null=True, blank=True)
+    line_end = models.PositiveIntegerField(null=True, blank=True)
+    confidence = models.FloatField(default=0.5)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["span_name"]
+        unique_together = ("repository_index", "span_name", "symbol_name", "symbol_file_path")
+
+    def __str__(self):
+        return f"{self.span_name}:{self.symbol_name}"
+
+
+class DeploymentBinding(models.Model):
+    binding_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    service_name = models.CharField(max_length=120, db_index=True)
+    environment = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    version = models.CharField(max_length=255, db_index=True)
+    repository_index = models.ForeignKey(RepositoryIndex, on_delete=models.CASCADE, related_name="deployment_bindings")
+    commit_sha = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    deployed_at = models.DateTimeField(null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-deployed_at", "-created_at"]
+        unique_together = ("service_name", "environment", "version", "repository_index")
+
+    def __str__(self):
+        return f"{self.service_name}:{self.version}"
+
+
+class CodeChangeRecord(models.Model):
+    change_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    repository_index = models.ForeignKey(RepositoryIndex, on_delete=models.CASCADE, related_name="change_records")
+    commit_sha = models.CharField(max_length=64, db_index=True)
+    author = models.CharField(max_length=255, blank=True, default="")
+    title = models.CharField(max_length=512, blank=True, default="")
+    changed_files = models.JSONField(default=list, blank=True)
+    committed_at = models.DateTimeField(null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-committed_at", "-created_at"]
+        unique_together = ("repository_index", "commit_sha")
+
+    def __str__(self):
+        return f"{self.repository_index.name}:{self.commit_sha[:12]}"
+
+
+class SymbolRelation(models.Model):
+    relation_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    repository_index = models.ForeignKey(RepositoryIndex, on_delete=models.CASCADE, related_name="symbol_relations")
+    source_symbol = models.CharField(max_length=255, db_index=True)
+    source_file_path = models.CharField(max_length=1024, blank=True, default="")
+    target_symbol = models.CharField(max_length=255, db_index=True)
+    target_file_path = models.CharField(max_length=1024, blank=True, default="")
+    relation_type = models.CharField(max_length=64, default="calls")
+    confidence = models.FloatField(default=0.5)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["source_symbol", "target_symbol"]
+        unique_together = (
+            "repository_index",
+            "source_symbol",
+            "source_file_path",
+            "target_symbol",
+            "target_file_path",
+            "relation_type",
+        )
+
+    def __str__(self):
+        return f"{self.source_symbol}->{self.target_symbol}"

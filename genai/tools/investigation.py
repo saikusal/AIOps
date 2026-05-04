@@ -3,6 +3,7 @@ import re
 from datetime import datetime, timezone
 
 from typing import Any, Callable, Dict, List, Optional
+from genai.code_context_extractors import extract_route_hint_from_text
 from genai.mcp_orchestrator import InvestigationMCPOrchestrator
 from genai.multi_step_workflow import (
     build_investigation_workflow,
@@ -54,6 +55,174 @@ _DB_TOKENS = (
     "pg_",
     "sql",
 )
+
+
+def _extract_trace_span_hints(traces: Dict[str, Any]) -> List[str]:
+    hints: List[str] = []
+    for trace in (traces or {}).get("data") or []:
+        if not isinstance(trace, dict):
+            continue
+        for span in trace.get("spans") or []:
+            if not isinstance(span, dict):
+                continue
+            span_name = str(span.get("operationName") or "").strip()
+            if span_name and span_name not in hints:
+                hints.append(span_name)
+    return hints[:5]
+
+
+def _extract_route_hint(question: str, logs: Dict[str, Any]) -> str:
+    route = extract_route_hint_from_text(question or "")
+    if route:
+        return route
+    for message in _extract_log_messages(logs):
+        route = extract_route_hint_from_text(message)
+        if route:
+            return route
+    return ""
+
+
+def _code_context_summary(code_context: Dict[str, Any]) -> str:
+    owner = code_context.get("owner") or {}
+    route_binding = code_context.get("route_binding") or {}
+    span_binding = code_context.get("span_binding") or {}
+    parts: List[str] = []
+    if owner.get("repository"):
+        parts.append(f"Repository {owner.get('repository')} owns service {owner.get('service_name') or ''}.".strip())
+    if route_binding.get("handler"):
+        parts.append(
+            f"Route {route_binding.get('http_method') or ''} {route_binding.get('route') or ''} maps to handler {route_binding.get('handler')} in {route_binding.get('module_path') or 'unknown file'}.".strip()
+        )
+    if span_binding.get("symbol"):
+        parts.append(
+            f"Trace span {span_binding.get('span_name') or ''} maps to symbol {span_binding.get('symbol')} in {span_binding.get('module_path') or 'unknown file'}.".strip()
+        )
+    recent_changes = (code_context.get("recent_changes") or {}).get("recent_changes") or []
+    if recent_changes:
+        parts.append(f"{len(recent_changes)} recent code changes matched the likely failure path.")
+    return " ".join(part for part in parts if part)
+
+
+def _collect_code_snippet_targets(code_context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    targets: List[Dict[str, Any]] = []
+    for key in ("route_binding", "span_binding"):
+        binding = code_context.get(key) or {}
+        if binding.get("module_path"):
+            targets.append(
+                {
+                    "module_path": str(binding.get("module_path") or ""),
+                    "symbol": str(binding.get("handler") or binding.get("symbol") or ""),
+                    "line_start": int(binding.get("line_start") or 0),
+                    "line_end": int(binding.get("line_end") or 0),
+                }
+            )
+    search_matches = (code_context.get("search_context") or {}).get("matches") or []
+    for item in search_matches[:3]:
+        if not isinstance(item, dict) or not item.get("module_path"):
+            continue
+        targets.append(
+            {
+                "module_path": str(item.get("module_path") or ""),
+                "symbol": str(item.get("symbol") or ""),
+                "line_start": int(item.get("line_start") or 0),
+                "line_end": int(item.get("line_end") or 0),
+            }
+        )
+
+    deduped: List[Dict[str, Any]] = []
+    seen = set()
+    for target in targets:
+        key = (target["module_path"], target["symbol"], target["line_start"], target["line_end"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(target)
+    return deduped[:3]
+
+
+def _llm_safe_investigation_context(context: Dict[str, Any]) -> Dict[str, Any]:
+    incident = context.get("incident") or {}
+    component_snapshot = context.get("component_snapshot") or {}
+    dependency_graph = context.get("dependency_graph") or {}
+    metrics = context.get("metrics") or {}
+    logs = context.get("elasticsearch") or {}
+    traces = context.get("jaeger") or {}
+    code_context = context.get("code_context") or {}
+    source_context = context.get("source_context") or {}
+    runbooks = context.get("runbooks") or {}
+    evidence_assessment = context.get("evidence_assessment") or {}
+
+    log_messages = _extract_log_messages(logs)[:4]
+    trace_spans = _extract_trace_span_hints(traces)[:4]
+    prompt_code_context = {
+        "summary": code_context.get("summary") or _code_context_summary(code_context),
+        "owner": code_context.get("owner") or {},
+        "route_binding": code_context.get("route_binding") or {},
+        "span_binding": code_context.get("span_binding") or {},
+        "recent_changes": ((code_context.get("recent_changes") or {}).get("recent_changes") or [])[:4],
+        "recent_deployments": ((code_context.get("recent_deployments") or {}).get("recent_deployments") or [])[:4],
+        "blast_radius": (code_context.get("blast_radius") or {}).get("blast_radius") or {},
+        "search_matches": ((code_context.get("search_context") or {}).get("matches") or [])[:4],
+        "snippets": (code_context.get("snippets") or [])[:3],
+    }
+    prompt_source_context = {
+        "traceback_count": source_context.get("traceback_count") or 0,
+        "files": [
+            {
+                "container_path": item.get("container_path"),
+                "local_path": item.get("local_path"),
+                "function_name": item.get("function_name"),
+                "line_number": item.get("line_number"),
+                "snippet": item.get("snippet"),
+            }
+            for item in (source_context.get("files") or [])[:2]
+            if isinstance(item, dict)
+        ],
+    }
+    return {
+        "scope": context.get("scope") or {},
+        "application": context.get("application") or "",
+        "service_name": context.get("service_name") or "",
+        "target_host": context.get("target_host") or "",
+        "incident": {
+            "incident_key": incident.get("incident_key") or "",
+            "title": incident.get("title") or "",
+            "status": incident.get("status") or "",
+            "summary": incident.get("summary") or "",
+            "reasoning": incident.get("reasoning") or "",
+            "blast_radius": incident.get("blast_radius") or [],
+            "business_impact": incident.get("business_impact") or {},
+        },
+        "component_snapshot": component_snapshot,
+        "dependency_graph": {
+            "depends_on": dependency_graph.get("depends_on") or [],
+            "blast_radius": dependency_graph.get("blast_radius") or [],
+            "summary": dependency_graph.get("summary") or "",
+        },
+        "metrics": metrics,
+        "log_messages": log_messages,
+        "trace_spans": trace_spans,
+        "linked_recommendation": context.get("linked_recommendation") or {},
+        "runbooks": {
+            "count": runbooks.get("count") or 0,
+            "results": (runbooks.get("results") or [])[:2],
+        },
+        "evidence_assessment": evidence_assessment,
+        "code_context": prompt_code_context,
+        "source_context": prompt_source_context,
+    }
+
+
+def _extract_deployment_hint(incident: Optional[Any], linked_recommendation: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    labels = {}
+    if incident and isinstance(getattr(incident, "labels", None), dict):
+        labels.update(incident.labels or {})
+    if isinstance(linked_recommendation, dict) and isinstance(linked_recommendation.get("labels"), dict):
+        labels.update(linked_recommendation.get("labels") or {})
+    return {
+        "environment": str(labels.get("environment") or labels.get("env") or ""),
+        "version": str(labels.get("version") or labels.get("release") or labels.get("image_tag") or ""),
+    }
 
 
 def _component_aliases(component: str) -> List[str]:
@@ -387,6 +556,7 @@ def build_investigation_context(
     traces: Dict[str, Any] = {}
     prometheus_context: Dict[str, Any] = {}
     runbooks: Dict[str, Any] = {}
+    code_context: Dict[str, Any] = {}
 
     application_key = scope.get("application") or ""
     service = scope.get("service") or ""
@@ -507,6 +677,128 @@ def build_investigation_context(
             except Exception:
                 source_context = {}
 
+    route_hint = _extract_route_hint(question, logs)
+    span_hints = _extract_trace_span_hints(traces)
+    deployment_hint = _extract_deployment_hint(incident, linked_recommendation)
+    if mcp_orchestrator and service_name:
+        try:
+            owner = mcp_orchestrator.call_tool(
+                "code.find_service_owner",
+                {"service_name": service_name, "application_name": application_key},
+            ) or {}
+        except Exception:
+            owner = {}
+        if owner:
+            code_context["owner"] = owner
+
+        if route_hint:
+            try:
+                route_binding = mcp_orchestrator.call_tool(
+                    "code.route_to_handler",
+                    {"service_name": service_name, "route": route_hint, "http_method": ""},
+                ) or {}
+            except Exception:
+                route_binding = {}
+            if route_binding:
+                code_context["route_binding"] = route_binding
+
+        if span_hints:
+            try:
+                span_binding = mcp_orchestrator.call_tool(
+                    "code.span_to_symbol",
+                    {"service_name": service_name, "span_name": span_hints[0]},
+                ) or {}
+            except Exception:
+                span_binding = {}
+            if span_binding:
+                code_context["span_binding"] = span_binding
+
+        if deployment_hint.get("environment") or deployment_hint.get("version"):
+            try:
+                recent_deployments = mcp_orchestrator.call_tool(
+                    "code.find_recent_deployments",
+                    {
+                        "service_name": service_name,
+                        "environment": deployment_hint.get("environment") or "",
+                        "version": deployment_hint.get("version") or "",
+                    },
+                ) or {}
+            except Exception:
+                recent_deployments = {}
+            if recent_deployments:
+                code_context["recent_deployments"] = recent_deployments
+
+        repository_name = str(((code_context.get("owner") or {}).get("repository") or ""))
+        module_path = str(((code_context.get("route_binding") or {}).get("module_path") or (code_context.get("span_binding") or {}).get("module_path") or ""))
+        symbol_name = str(((code_context.get("span_binding") or {}).get("symbol") or (code_context.get("route_binding") or {}).get("handler") or ""))
+        if repository_name:
+            try:
+                search_context = mcp_orchestrator.call_tool(
+                    "code.search_context",
+                    {
+                        "repository": repository_name,
+                        "query": question,
+                        "service_name": service_name,
+                        "limit": 6,
+                    },
+                ) or {}
+            except Exception:
+                search_context = {}
+            if search_context:
+                code_context["search_context"] = search_context
+
+            try:
+                recent_changes = mcp_orchestrator.call_tool(
+                    "code.recent_changes_for_component",
+                    {
+                        "repository": repository_name,
+                        "module_path": module_path,
+                        "symbol": symbol_name,
+                        "hours": 72,
+                    },
+                ) or {}
+            except Exception:
+                recent_changes = {}
+            if recent_changes:
+                code_context["recent_changes"] = recent_changes
+
+            if symbol_name:
+                try:
+                    blast_radius = mcp_orchestrator.call_tool(
+                        "code.blast_radius",
+                        {
+                            "repository": repository_name,
+                            "symbol": symbol_name,
+                            "route": route_hint,
+                        },
+                    ) or {}
+                except Exception:
+                    blast_radius = {}
+                if blast_radius:
+                    code_context["blast_radius"] = blast_radius
+
+            snippets: List[Dict[str, Any]] = []
+            for target in _collect_code_snippet_targets(code_context):
+                try:
+                    snippet = mcp_orchestrator.call_tool(
+                        "code.read_snippet",
+                        {
+                            "repository": repository_name,
+                            "module_path": target.get("module_path") or "",
+                            "symbol": target.get("symbol") or "",
+                            "line_start": target.get("line_start") or 0,
+                            "line_end": target.get("line_end") or 0,
+                            "context_lines": 18,
+                        },
+                    ) or {}
+                except Exception:
+                    snippet = {}
+                if snippet.get("ok") and snippet.get("snippet"):
+                    snippets.append(snippet)
+            if snippets:
+                code_context["snippets"] = snippets
+            code_context["summary"] = _code_context_summary(code_context)
+
     context = {
         "scope": scope,
         "incident": timeline_payload,
@@ -519,6 +811,7 @@ def build_investigation_context(
         "elasticsearch": logs,
         "jaeger": traces,
         "source_context": source_context,
+        "code_context": code_context,
         "target_host": target_host,
         "service_name": service_name,
         "application": application_key,
@@ -606,12 +899,14 @@ def run_investigation_route(
             if inc:
                 business_impact = compute_incident_revenue_impact(inc) or {}
 
+    prompt_context = _llm_safe_investigation_context(investigation_context)
+
     prompt = (
         "You are an AIOps incident investigation assistant. "
-        "Use the incident context, metrics, logs, traces, dependency graph, and any available runbook guidance to answer the user's question. "
+        "Use the incident context, metrics, logs, traces, dependency graph, code-context bindings, and any available runbook guidance to answer the user's question. "
         "Provide a concise RCA-oriented answer as JSON with exactly these keys: "
         "'answer', 'confidence', 'supporting_evidence', 'contradicting_evidence', 'next_verification_step', 'follow_up_questions'.\n"
-        "- 'answer': explain the likely root cause, blast radius, strongest evidence, and next best diagnostic step.\n"
+        "- 'answer': explain the likely root cause, blast radius, strongest evidence, what the affected module/handler does, and the next best diagnostic step.\n"
         "- 'confidence': one of 'high', 'medium', or 'low'. Use 'high' only when multiple independent signals agree. Use 'low' when data is missing or ambiguous.\n"
         "- 'supporting_evidence': list of up to 4 short strings describing specific signals that support the root cause (e.g. metric spikes, log errors, trace failures).\n"
         "- 'contradicting_evidence': list of up to 3 short strings describing signals that weaken or contradict the hypothesis (e.g. other services still healthy, no correlated spikes). Empty list if none.\n"
@@ -620,13 +915,17 @@ def run_investigation_route(
         "- ALWAYS include revenue/business impact in 'answer' if available in the context.\n"
         "- If a linked recommendation or diagnostic command exists, mention it directly.\n"
         "- If runbook guidance is available, reference it in 'answer' and mark guidance as runbook-backed.\n"
+        "- If code_context is available, explain the likely repository, handler, symbol, and module responsibility in plain language.\n"
+        "- If code snippets are available, use them to explain what the affected code path appears to do and why it could produce the observed symptoms.\n"
+        "- If recent code changes are available, use them as supporting evidence only when they plausibly touch the failing path.\n"
+        "- When asked about remediation, use the code context to suggest the safest validation target after the fix, such as the route, span, handler, or file path to verify.\n"
         "- Use evidence_assessment as the safety policy. Do not claim a downstream/shared dependency root cause unless dependency_hard_evidence is non-empty.\n"
         "- If safe_action is 'observe' or hard_evidence is empty, explicitly say the current signal may reflect normal traffic/load and that remediation is not justified yet.\n"
         "- If service_hard_evidence exists but dependency_hard_evidence is empty, keep the hypothesis scoped to the impacted component and recommend verification, not dependency remediation.\n"
         "- Do not answer with raw PromQL unless the user explicitly asked for a Prometheus query.\n\n"
         f"RECENT CONVERSATION:\n{conversation_history or 'No prior conversation.'}\n\n"
         f"QUESTION: {question}\n\n"
-        f"INVESTIGATION CONTEXT:\n{json.dumps(investigation_context, indent=2, default=str)[:3500]}\n\n"
+        f"INVESTIGATION CONTEXT:\n{json.dumps(prompt_context, indent=2, default=str)[:5500]}\n\n"
         "Return JSON only."
     )
     ok, _status, body_text = llm_query(prompt)
@@ -657,6 +956,7 @@ def run_investigation_route(
         "target_host": investigation_context.get("target_host"),
         "business_impact": business_impact,
         "cached": False,
+        "code_context": investigation_context.get("code_context") or {},
         "retrieval": investigation_context.get("retrieval") or mcp_orchestrator.tool_trace(),
     }
     response["workflow"] = finalize_investigation_workflow(workflow, response)

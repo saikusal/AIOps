@@ -5,6 +5,7 @@ import { AssistantPage } from "./pages/AssistantPage";
 import { AlertsPage } from "./pages/AlertsPage";
 import { CacheDashboardPage } from "./pages/CacheDashboardPage";
 import { ChangeRiskPage } from "./pages/ChangeRiskPage";
+import { CodeContextPage } from "./pages/CodeContextPage";
 import { DocumentsPage } from "./pages/DocumentsPage";
 import { EnrollTargetPage } from "./pages/EnrollTargetPage";
 import { GraphPage } from "./pages/GraphPage";
@@ -28,6 +29,7 @@ export function App() {
         <Route path="/alerts" element={<AlertsPage />} />
         <Route path="/incidents" element={<IncidentsPage />} />
         <Route path="/topology" element={<ApplicationsPage />} />
+        <Route path="/code-context" element={<CodeContextPage />} />
         <Route path="/genai" element={<AssistantPage />} />
         <Route path="/change-risk" element={<ChangeRiskPage />} />
         <Route path="/automation" element={<DocumentsPage />} />

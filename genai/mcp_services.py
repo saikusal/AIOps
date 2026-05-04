@@ -2,6 +2,18 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+from .code_context_services import (
+    blast_radius as _code_blast_radius,
+    find_recent_deployments as _code_find_recent_deployments,
+    find_related_symbols as _code_find_related_symbols,
+    find_service_owner as _code_find_service_owner,
+    queue_to_consumers as _code_queue_to_consumers,
+    read_code_snippet as _code_read_code_snippet,
+    recent_changes_for_component as _code_recent_changes_for_component,
+    route_to_handler as _code_route_to_handler,
+    search_code_context as _code_search_code_context,
+    span_to_symbol as _code_span_to_symbol,
+)
 
 # ---------------------------------------------------------------------------
 # source_read_traceback
@@ -239,3 +251,58 @@ def runbooks_search(
             }
         )
     return {"count": len(results), "results": results}
+
+
+def code_find_service_owner(*, service_name: str, application_name: str = "") -> Dict[str, Any]:
+    return _code_find_service_owner(service_name=service_name, application_name=application_name)
+
+
+def code_route_to_handler(*, service_name: str, route: str, http_method: str = "") -> Dict[str, Any]:
+    return _code_route_to_handler(service_name=service_name, route=route, http_method=http_method)
+
+
+def code_span_to_symbol(*, service_name: str, span_name: str) -> Dict[str, Any]:
+    return _code_span_to_symbol(service_name=service_name, span_name=span_name)
+
+
+def code_recent_changes_for_component(*, repository: str, module_path: str = "", symbol: str = "", hours: int = 72) -> Dict[str, Any]:
+    return _code_recent_changes_for_component(repository=repository, module_path=module_path, symbol=symbol, hours=hours)
+
+
+def code_find_recent_deployments(*, service_name: str, environment: str = "", version: str = "") -> Dict[str, Any]:
+    return _code_find_recent_deployments(service_name=service_name, environment=environment, version=version)
+
+
+def code_find_related_symbols(*, repository: str, symbol: str) -> Dict[str, Any]:
+    return _code_find_related_symbols(repository=repository, symbol=symbol)
+
+
+def code_blast_radius_lookup(*, repository: str, symbol: str = "", route: str = "") -> Dict[str, Any]:
+    return _code_blast_radius(repository=repository, symbol=symbol, route=route)
+
+
+def code_queue_consumers(*, repository: str, queue_name: str) -> Dict[str, Any]:
+    return _code_queue_to_consumers(repository=repository, queue_name=queue_name)
+
+
+def code_search_context(*, repository: str, query: str, service_name: str = "", limit: int = 6) -> Dict[str, Any]:
+    return _code_search_code_context(repository=repository, query=query, service_name=service_name, limit=limit)
+
+
+def code_read_snippet(
+    *,
+    repository: str,
+    module_path: str = "",
+    symbol: str = "",
+    line_start: int = 0,
+    line_end: int = 0,
+    context_lines: int = 18,
+) -> Dict[str, Any]:
+    return _code_read_code_snippet(
+        repository=repository,
+        module_path=module_path,
+        symbol=symbol,
+        line_start=line_start,
+        line_end=line_end,
+        context_lines=context_lines,
+    )

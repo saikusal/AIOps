@@ -512,6 +512,34 @@ def egap_dispatch(
         action_type, config, environment, service, approval_present
     )
 
+    # §3 AUDIT
+    audit_key = _audit_key(command, target_host, service, action_type)
+    history   = _load_audit_history(audit_key)
+    now_ts    = time.time()
+    recent    = [e for e in history if now_ts - float(e.get("timestamp", 0)) <= config["retry_window_seconds"]]
+    cooldown_remaining_seconds = 0
+    if len(recent) >= config["retry_limit"]:
+        blocked_reasons.append(
+            f"Retry limit reached for action '{action_type}' on service '{service or target_host}'."
+        )
+    if action_type == "restart_service" and config["cooldown_seconds"] > 0:
+        last_success = max(
+            (
+                float(entry.get("timestamp", 0))
+                for entry in recent
+                if bool(entry.get("success"))
+            ),
+            default=0,
+        )
+        if last_success:
+            elapsed = max(0, int(now_ts - last_success))
+            if elapsed < config["cooldown_seconds"]:
+                cooldown_remaining_seconds = config["cooldown_seconds"] - elapsed
+                blocked_reasons.append(
+                    f"Restart cooldown active for service '{service or target_host}'."
+                )
+    trace_id  = str(uuid.uuid4())
+
     decision = "allowed"
     if blocked_reasons:
         decision = "blocked"
@@ -543,13 +571,6 @@ def egap_dispatch(
         "actor":              actor or "system",
     }
 
-    # §3 AUDIT
-    audit_key = _audit_key(command, target_host, service, action_type)
-    history   = _load_audit_history(audit_key)
-    now_ts    = time.time()
-    recent    = [e for e in history if now_ts - float(e.get("timestamp", 0)) <= config["retry_window_seconds"]]
-    trace_id  = str(uuid.uuid4())
-
     audit = {
         "trace_id":     trace_id,
         "action_key":   audit_key,
@@ -563,7 +584,7 @@ def egap_dispatch(
         "required":           bool(approval_reasons),
         "state":              approval_state,
         "approval_satisfied": approval_state == "SATISFIED",
-        "cooldown_remaining_seconds": 0,
+        "cooldown_remaining_seconds": cooldown_remaining_seconds,
     }
 
     # §5 ALERTS
@@ -601,7 +622,7 @@ def egap_dispatch(
         "protected_environment":     protected,
         "service":                   service,
         "critical_service":          critical,
-        "cooldown_remaining_seconds": 0,
+        "cooldown_remaining_seconds": cooldown_remaining_seconds,
         "retry_count":               len(recent),
         "retry_limit":               config["retry_limit"],
         "action_key":                audit_key,

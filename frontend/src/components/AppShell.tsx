@@ -10,6 +10,7 @@ const navItems = [
   { to: "/alerts",            label: "Alerts",                   meta: "Signal Feed · Anomaly Explainer" },
   { to: "/incidents",         label: "Incidents",                meta: "SLA · War Room · PIR" },
   { to: "/topology",          label: "Topology & CMDB",          meta: "Service Graph · Blast Radius" },
+  { to: "/code-context",      label: "Code Context",             meta: "Repo Graph · Runtime To Code" },
   { to: "/genai",             label: "Assistant",                meta: "RCA · AI Chat" },
   { to: "/change-risk",       label: "Change Risk",              meta: "Deploy Risk · Maintenance Window" },
   { to: "/automation",        label: "Knowledge Base",           meta: "Runbooks · Auto-Remediation" },

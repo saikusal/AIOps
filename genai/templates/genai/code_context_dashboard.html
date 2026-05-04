@@ -1,0 +1,411 @@
+{% extends "genai/app_base.html" %}
+{% block title %}Code Context{% endblock %}
+{% block topbar_title %}Code Context Graph{% endblock %}
+{% block extra_head %}
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<style>
+  .eyebrow {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    font-weight: 700;
+  }
+  .metric-strip {
+    display:grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 14px;
+  }
+  .metric-card {
+    padding: 16px 18px;
+    border-radius: 18px;
+    background: rgba(255,255,255,0.72);
+    border: 1px solid var(--line);
+  }
+  .metric-card strong {
+    display:block;
+    font-size: 1.6rem;
+    margin-top: 8px;
+  }
+  .code-grid {
+    display:grid;
+    grid-template-columns: minmax(0, 1.8fr) minmax(320px, 0.9fr);
+    gap: 18px;
+  }
+  .graph-shell {
+    position: relative;
+    overflow: hidden;
+    min-height: 680px;
+    border-radius: 24px;
+    background:
+      radial-gradient(circle at top left, rgba(15, 118, 110, 0.14), transparent 28%),
+      linear-gradient(180deg, rgba(255,255,255,0.96), rgba(250,244,232,0.92));
+  }
+  .graph-toolbar {
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:12px;
+    flex-wrap:wrap;
+    padding: 18px 20px 0;
+  }
+  .graph-stage {
+    height: 600px;
+    width: 100%;
+  }
+  .legend {
+    display:flex;
+    gap:10px;
+    flex-wrap:wrap;
+  }
+  .legend-pill {
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    padding: 8px 12px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.76);
+    border: 1px solid var(--line);
+    font-size: 0.9rem;
+  }
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    display:inline-block;
+  }
+  .control-select {
+    border: 1px solid var(--line);
+    background: rgba(255,255,255,0.88);
+    color: var(--ink);
+    border-radius: 14px;
+    padding: 10px 14px;
+    min-width: 240px;
+  }
+  .detail-card {
+    padding: 20px;
+    border-radius: 24px;
+    background: rgba(255,250,240,0.92);
+    border: 1px solid var(--line);
+    display:grid;
+    gap:16px;
+  }
+  .detail-section {
+    border-top: 1px solid var(--line);
+    padding-top: 14px;
+  }
+  .detail-list {
+    display:grid;
+    gap:10px;
+  }
+  .detail-item {
+    padding: 12px 14px;
+    border-radius: 16px;
+    background: rgba(255,255,255,0.76);
+    border: 1px solid var(--line);
+    font-size: 0.94rem;
+  }
+  .status-badge {
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    padding: 8px 12px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    font-size: 0.92rem;
+    font-weight: 600;
+  }
+  .empty-state {
+    padding: 20px;
+    border-radius: 18px;
+    border: 1px dashed var(--line);
+    color: var(--muted);
+    background: rgba(255,255,255,0.72);
+  }
+  .graph-caption {
+    padding: 0 20px 18px;
+    color: var(--muted);
+    font-size: 0.92rem;
+  }
+  @media (max-width: 1180px) {
+    .code-grid { grid-template-columns: 1fr; }
+    .graph-shell { min-height: 620px; }
+  }
+</style>
+{% endblock %}
+{% block content %}
+<section style="display:grid; gap:18px;">
+  <article class="panel" style="padding:24px;">
+    <div style="display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap; align-items:flex-start;">
+      <div>
+        <div class="eyebrow">Runtime Meets Source</div>
+        <h2 style="margin:0;">Code Context for Incident Investigation</h2>
+        <p style="margin:8px 0 0; color:var(--muted); max-width:840px;">
+          This graph shows how the indexed repository is structured: application, repository, services, routes, spans, files, and recent changes. Use it to move from an incident to the likely code area.
+        </p>
+      </div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <a class="pill" href="/admin/genai/repositoryindex/" target="_blank" rel="noreferrer">Repository Admin</a>
+        <a class="pill" href="/admin/genai/routebinding/" target="_blank" rel="noreferrer">Bindings Admin</a>
+      </div>
+    </div>
+  </article>
+
+  <section class="metric-strip" id="code-metrics"></section>
+
+  <section class="code-grid">
+    <article class="panel graph-shell">
+      <div class="graph-toolbar">
+        <div>
+          <div class="eyebrow">Interactive Topology</div>
+          <h3 style="margin:2px 0 0;">Application and Code Graph</h3>
+        </div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+          <select id="repository-select" class="control-select"></select>
+        </div>
+      </div>
+      <div class="graph-toolbar" style="padding-top:12px;">
+        <div class="legend">
+          <span class="legend-pill"><span class="legend-dot" style="background:#0f766e;"></span>Application</span>
+          <span class="legend-pill"><span class="legend-dot" style="background:#1d4ed8;"></span>Repository</span>
+          <span class="legend-pill"><span class="legend-dot" style="background:#d97706;"></span>Service</span>
+          <span class="legend-pill"><span class="legend-dot" style="background:#7c3aed;"></span>Route / Span</span>
+          <span class="legend-pill"><span class="legend-dot" style="background:#4b5563;"></span>File</span>
+          <span class="legend-pill"><span class="legend-dot" style="background:#b42318;"></span>Recent Change</span>
+        </div>
+      </div>
+      <svg id="code-graph" class="graph-stage"></svg>
+      <div class="graph-caption">
+        Drag nodes to inspect relationships. Click a node to lock details on the right. Scroll to zoom. The current model is Python-first and optimized for incident RCA, not generic code browsing.
+      </div>
+    </article>
+
+    <aside class="detail-card">
+      <div>
+        <div class="eyebrow">Selection</div>
+        <h3 id="detail-title" style="margin:4px 0 0;">No node selected</h3>
+        <p id="detail-subtitle" style="margin:8px 0 0; color:var(--muted);">Choose a node in the graph to inspect code-context details.</p>
+      </div>
+
+      <div>
+        <span id="detail-badge" class="status-badge">Awaiting selection</span>
+      </div>
+
+      <div class="detail-section">
+        <div class="eyebrow">Why It Matters</div>
+        <div id="detail-why" class="detail-item">This panel explains how the selected element connects runtime signals to source code.</div>
+      </div>
+
+      <div class="detail-section">
+        <div class="eyebrow">Metadata</div>
+        <div id="detail-metadata" class="detail-list">
+          <div class="empty-state">No metadata yet.</div>
+        </div>
+      </div>
+
+      <div class="detail-section">
+        <div class="eyebrow">Suggested Reading Path</div>
+        <div id="detail-hints" class="detail-list">
+          <div class="detail-item">Start from a service or route node to understand the likely incident entrypoint.</div>
+          <div class="detail-item">Follow route and span nodes into files to narrow the suspected code area.</div>
+          <div class="detail-item">Use recent change nodes to see whether a deploy window may explain the current issue.</div>
+        </div>
+      </div>
+    </aside>
+  </section>
+</section>
+
+<script>
+  const typePalette = {
+    application: "#0f766e",
+    repository: "#1d4ed8",
+    service: "#d97706",
+    route: "#7c3aed",
+    span: "#8b5cf6",
+    file: "#4b5563",
+    change: "#b42318"
+  };
+
+  function metricCard(label, value) {
+    return `
+      <article class="metric-card">
+        <div class="eyebrow">${label}</div>
+        <strong>${value}</strong>
+      </article>
+    `;
+  }
+
+  function prettyType(type) {
+    return (type || "node").replace(/_/g, " ");
+  }
+
+  function renderMetadata(metadata) {
+    const entries = Object.entries(metadata || {}).filter(([, value]) => value !== null && value !== "" && value !== undefined && (!Array.isArray(value) || value.length));
+    if (!entries.length) {
+      return '<div class="empty-state">No metadata available for this node.</div>';
+    }
+    return entries.map(([key, value]) => {
+      const display = Array.isArray(value) ? value.join(", ") : (typeof value === "object" ? JSON.stringify(value) : String(value));
+      return `<div class="detail-item"><strong>${key}</strong><div style="margin-top:6px; color:var(--muted); word-break:break-word;">${display}</div></div>`;
+    }).join("");
+  }
+
+  function updateDetails(node) {
+    if (!node) {
+      document.getElementById("detail-title").textContent = "No node selected";
+      document.getElementById("detail-subtitle").textContent = "Choose a node in the graph to inspect code-context details.";
+      document.getElementById("detail-badge").textContent = "Awaiting selection";
+      document.getElementById("detail-why").textContent = "This panel explains how the selected element connects runtime signals to source code.";
+      document.getElementById("detail-metadata").innerHTML = '<div class="empty-state">No metadata yet.</div>';
+      return;
+    }
+    document.getElementById("detail-title").textContent = node.label || node.id;
+    document.getElementById("detail-subtitle").textContent = `Type: ${prettyType(node.type)}`;
+    document.getElementById("detail-badge").textContent = `${prettyType(node.type)} node`;
+    const whyByType = {
+      application: "Application nodes show the runtime product boundary. They are the best starting point for non-technical stakeholders.",
+      repository: "Repository nodes represent the source boundary the platform has indexed. They connect runtime services to local code.",
+      service: "Service nodes are the main bridge between incidents and source code ownership.",
+      route: "Route nodes show likely request entrypoints. Incidents involving latency or 5xx errors often start here.",
+      span: "Span nodes connect tracing evidence to likely source symbols.",
+      file: "File nodes narrow the investigation to a concrete code location.",
+      change: "Recent change nodes help determine whether a deployment window likely caused the issue."
+    };
+    document.getElementById("detail-why").textContent = whyByType[node.type] || "This node is part of the indexed code-context graph.";
+    document.getElementById("detail-metadata").innerHTML = renderMetadata(node.metadata || {});
+  }
+
+  function renderGraph(payload) {
+    const svg = d3.select("#code-graph");
+    svg.selectAll("*").remove();
+    const width = svg.node().clientWidth || 1200;
+    const height = svg.node().clientHeight || 600;
+
+    const zoomLayer = svg.append("g");
+    svg.call(
+      d3.zoom()
+        .scaleExtent([0.45, 2.5])
+        .on("zoom", (event) => zoomLayer.attr("transform", event.transform))
+    );
+
+    const defs = svg.append("defs");
+    const glow = defs.append("filter").attr("id", "nodeGlow");
+    glow.append("feGaussianBlur").attr("stdDeviation", "3").attr("result", "coloredBlur");
+    const merge = glow.append("feMerge");
+    merge.append("feMergeNode").attr("in", "coloredBlur");
+    merge.append("feMergeNode").attr("in", "SourceGraphic");
+
+    const links = payload.links.map((item) => ({...item}));
+    const nodes = payload.nodes.map((item) => ({...item}));
+
+    const simulation = d3.forceSimulation(nodes)
+      .force("link", d3.forceLink(links).id((d) => d.id).distance((d) => 90 + (2 - Math.min(d.weight || 1, 2)) * 35).strength(0.18))
+      .force("charge", d3.forceManyBody().strength((d) => d.type === "application" ? -900 : d.type === "repository" ? -620 : -260))
+      .force("center", d3.forceCenter(width / 2, height / 2))
+      .force("collision", d3.forceCollide().radius((d) => (d.size || 12) + 9));
+
+    const link = zoomLayer.append("g")
+      .attr("stroke", "rgba(30, 41, 51, 0.20)")
+      .attr("stroke-width", 1.2)
+      .selectAll("line")
+      .data(links)
+      .join("line")
+      .attr("opacity", 0.8);
+
+    const node = zoomLayer.append("g")
+      .selectAll("g")
+      .data(nodes)
+      .join("g")
+      .style("cursor", "pointer")
+      .call(
+        d3.drag()
+          .on("start", (event, d) => {
+            if (!event.active) simulation.alphaTarget(0.2).restart();
+            d.fx = d.x;
+            d.fy = d.y;
+          })
+          .on("drag", (event, d) => {
+            d.fx = event.x;
+            d.fy = event.y;
+          })
+          .on("end", (event, d) => {
+            if (!event.active) simulation.alphaTarget(0);
+            d.fx = null;
+            d.fy = null;
+          })
+      );
+
+    node.append("circle")
+      .attr("r", (d) => d.size || 12)
+      .attr("fill", (d) => typePalette[d.type] || "#475569")
+      .attr("stroke", "#ffffff")
+      .attr("stroke-width", 2)
+      .style("filter", "url(#nodeGlow)");
+
+    node.append("text")
+      .text((d) => d.label)
+      .attr("text-anchor", "middle")
+      .attr("dy", (d) => (d.size || 12) + 16)
+      .attr("font-size", 12)
+      .attr("font-weight", 600)
+      .attr("fill", "#1e2933")
+      .style("pointer-events", "none");
+
+    node.on("click", (_, d) => updateDetails(d));
+
+    simulation.on("tick", () => {
+      link
+        .attr("x1", (d) => d.source.x)
+        .attr("y1", (d) => d.source.y)
+        .attr("x2", (d) => d.target.x)
+        .attr("y2", (d) => d.target.y);
+
+      node.attr("transform", (d) => `translate(${d.x},${d.y})`);
+    });
+  }
+
+  async function loadGraph(selectedRepository = "") {
+    const qs = new URLSearchParams();
+    if (selectedRepository) qs.set("repository", selectedRepository);
+    const resp = await fetch(`/genai/code-context/graph/?${qs.toString()}`);
+    const payload = await resp.json();
+
+    document.getElementById("code-metrics").innerHTML = [
+      metricCard("Services", payload.summary.service_count || 0),
+      metricCard("Routes", payload.summary.route_count || 0),
+      metricCard("Spans", payload.summary.span_count || 0),
+      metricCard("Recent Changes", payload.summary.change_count || 0),
+      metricCard("Relations", payload.summary.relation_count || 0)
+    ].join("");
+
+    const select = document.getElementById("repository-select");
+    select.innerHTML = (payload.repository_options || []).map((item) => `
+      <option value="${item.name}" ${payload.repository && payload.repository.name === item.name ? "selected" : ""}>
+        ${item.name}${item.application_names && item.application_names.length ? ` (${item.application_names.join(", ")})` : ""}
+      </option>
+    `).join("");
+    select.onchange = (event) => loadGraph(event.target.value);
+
+    renderGraph(payload);
+    updateDetails(
+      payload.repository
+        ? {
+            label: payload.repository.name,
+            type: "repository",
+            metadata: {
+              local_path: payload.repository.local_path,
+              default_branch: payload.repository.default_branch,
+              index_status: payload.repository.index_status,
+              last_indexed_at: payload.repository.last_indexed_at
+            }
+          }
+        : null
+    );
+  }
+
+  loadGraph().catch(() => {
+    document.getElementById("code-metrics").innerHTML = '<div class="empty-state">Failed to load code-context graph.</div>';
+    document.getElementById("code-graph").outerHTML = '<div class="empty-state" style="margin:20px;">Unable to render graph data.</div>';
+  });
+</script>
+{% endblock %}

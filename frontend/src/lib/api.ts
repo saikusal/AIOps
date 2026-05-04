@@ -112,6 +112,50 @@ export type GraphPayload = {
   evidence?: Record<string, unknown>;
 };
 
+export type CodeContextGraphNode = {
+  id: string;
+  label: string;
+  type: string;
+  size: number;
+  risk: string;
+  metadata: Record<string, unknown>;
+};
+
+export type CodeContextGraphLink = {
+  source: string;
+  target: string;
+  label: string;
+  weight: number;
+};
+
+export type CodeContextRepositoryOption = {
+  name: string;
+  application_names: string[];
+  indexed_at?: string | null;
+  index_status: string;
+};
+
+export type CodeContextGraphPayload = {
+  repository: {
+    name: string;
+    local_path: string;
+    default_branch: string;
+    index_status: string;
+    last_indexed_at?: string | null;
+  } | null;
+  application: string;
+  nodes: CodeContextGraphNode[];
+  links: CodeContextGraphLink[];
+  repository_options: CodeContextRepositoryOption[];
+  summary: {
+    service_count: number;
+    route_count: number;
+    span_count: number;
+    change_count: number;
+    relation_count: number;
+  };
+};
+
 export type ApplicationComponent = {
   application: string;
   service: string;
@@ -443,6 +487,17 @@ export async function fetchApplicationGraph(applicationKey: string): Promise<Gra
 
 export async function fetchIncidentGraph(incidentKey: string): Promise<GraphPayload> {
   return fetchJson<GraphPayload>(`/genai/incidents/${incidentKey}/graph/`);
+}
+
+export async function fetchCodeContextGraph(params?: {
+  application?: string;
+  repository?: string;
+}): Promise<CodeContextGraphPayload> {
+  const query = new URLSearchParams();
+  if (params?.application) query.set("application", params.application);
+  if (params?.repository) query.set("repository", params.repository);
+  const suffix = query.toString() ? `?${query}` : "";
+  return fetchJson<CodeContextGraphPayload>(`/genai/code-context/graph/${suffix}`);
 }
 
 export async function fetchApplicationOverview(): Promise<ApplicationOverview[]> {

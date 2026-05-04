@@ -151,6 +151,7 @@
         <a class="nav-link-item {% if active_nav == 'assistant' %}active{% endif %}" href="{% url 'genai:assistant_app' %}">Assistant</a>
         <a class="nav-link-item {% if active_nav == 'investigations' %}active{% endif %}" href="{% url 'genai:investigations_dashboard' %}" target="_blank" rel="noreferrer">Investigations</a>
         <a class="nav-link-item {% if active_nav == 'operations' %}active{% endif %}" href="{% url 'genai:operations_dashboard' %}" target="_blank" rel="noreferrer">Operations</a>
+        <a class="nav-link-item {% if active_nav == 'code_context' %}active{% endif %}" href="{% url 'genai:code_context_dashboard' %}" target="_blank" rel="noreferrer">Code Context</a>
         <a class="nav-link-item {% if active_nav == 'applications' %}active{% endif %}" href="{% url 'genai:applications_dashboard' %}" target="_blank" rel="noreferrer">Applications</a>
         <a class="nav-link-item {% if active_nav == 'incidents' %}active{% endif %}" href="{% url 'genai:incidents_dashboard' %}" target="_blank" rel="noreferrer">Incidents</a>
         <a class="nav-link-item {% if active_nav == 'alerts' %}active{% endif %}" href="{% url 'genai:alerts_dashboard' %}" target="_blank" rel="noreferrer">Alert Recommendations</a>

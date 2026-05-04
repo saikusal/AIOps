@@ -161,6 +161,9 @@ function ComponentCard({ application, component, alert }: { application: string;
         <Link className="shell__link shell__link--small" to={`/graph/application/${encodeURIComponent(application)}`}>
           App Graph
         </Link>
+        <Link className="shell__link shell__link--small" to={`/code-context?application=${encodeURIComponent(application)}`}>
+          Code Context
+        </Link>
         {alert ? (
           <Link className="shell__link shell__link--small" to={`/graph/${encodeURIComponent(alert.alert_id)}`}>
             Open Graph
@@ -288,6 +291,9 @@ export function ApplicationsPage() {
                 </Link>
                 <Link className="shell__link shell__link--small" to={`/graph/application/${encodeURIComponent(application.application)}`}>
                   Topology Graph
+                </Link>
+                <Link className="shell__link shell__link--small" to={`/code-context?application=${encodeURIComponent(application.application)}`}>
+                  Code Context
                 </Link>
                 {findAlertForService(alerts, application.application, application.application) ? (
                   <Link

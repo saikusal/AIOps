@@ -28,6 +28,7 @@ from django.conf import settings
 from django.shortcuts import redirect, render
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.clickjacking import xframe_options_exempt
+from django.views.decorators.http import require_GET
 from django.db import connection, models
 from django.core.cache import cache
 from django.utils import timezone
@@ -38,6 +39,7 @@ from .models import (
     AgentBehaviorVersion,
     ChatMessage,
     ChatSession,
+    CodeChangeRecord,
     DiscoveredService,
     EnrollmentToken,
     ExecutionIntent,
@@ -49,9 +51,14 @@ from .models import (
     RemediationOutcome,
     ReplayEvaluation,
     ReplayScenario,
+    RepositoryIndex,
+    RouteBinding,
     Runbook,
     SLAPolicy,
     ServicePrediction,
+    ServiceRepositoryBinding,
+    SpanBinding,
+    SymbolRelation,
     Target,
     TargetComponent,
     TargetHeartbeat,
@@ -82,6 +89,15 @@ from .mcp_services import (
     applications_get_component_snapshot as applications_get_component_snapshot_service,
     applications_get_graph as applications_get_graph_service,
     applications_get_overview as applications_get_overview_service,
+    code_blast_radius_lookup as code_blast_radius_lookup_service,
+    code_find_recent_deployments as code_find_recent_deployments_service,
+    code_find_related_symbols as code_find_related_symbols_service,
+    code_find_service_owner as code_find_service_owner_service,
+    code_read_snippet as code_read_snippet_service,
+    code_recent_changes_for_component as code_recent_changes_for_component_service,
+    code_route_to_handler as code_route_to_handler_service,
+    code_search_context as code_search_context_service,
+    code_span_to_symbol as code_span_to_symbol_service,
     incidents_get_summary as incidents_get_summary_service,
     incidents_get_timeline as incidents_get_timeline_service,
     logs_search as logs_search_service,
@@ -93,6 +109,7 @@ from .mcp_services import (
 )
 from .policy_engine import evaluate_execution_policy, record_execution_attempt
 from .behavior_versions import current_behavior_version_payload
+from .code_context_ingestion import auto_register_target_code_context, ensure_builtin_repository_indexes
 from .execution_safety import (
     action_signature as execution_action_signature,
     context_fingerprint as execution_context_fingerprint,
@@ -4379,6 +4396,19 @@ def applications_dashboard_view(request):
 
 
 @login_required
+def code_context_dashboard_view(request: HttpRequest):
+    return render(request, "genai/code_context_dashboard.html", {"active_nav": "code_context"})
+
+
+@login_required
+def code_context_graph_view(request: HttpRequest):
+    application = (request.GET.get("application") or "").strip()
+    repository = (request.GET.get("repository") or "").strip()
+    payload = _code_context_graph_payload(application=application, repository_name=repository)
+    return JsonResponse(payload)
+
+
+@login_required
 def applications_overview_view(request: HttpRequest):
     return JsonResponse(_build_application_overview())
 
@@ -4544,6 +4574,116 @@ def mcp_runbooks_search_view(request: HttpRequest):
         query=query,
         incident_model=Incident,
         runbook_model=Runbook,
+    )
+    return JsonResponse(payload)
+
+
+@require_GET
+def mcp_code_service_owner_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    payload = code_find_service_owner_service(
+        service_name=request.GET.get("service_name", ""),
+        application_name=request.GET.get("application_name", ""),
+    )
+    return JsonResponse(payload)
+
+
+@require_GET
+def mcp_code_route_handler_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    payload = code_route_to_handler_service(
+        service_name=request.GET.get("service_name", ""),
+        route=request.GET.get("route", ""),
+        http_method=request.GET.get("http_method", ""),
+    )
+    return JsonResponse(payload)
+
+
+@require_GET
+def mcp_code_span_symbol_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    payload = code_span_to_symbol_service(
+        service_name=request.GET.get("service_name", ""),
+        span_name=request.GET.get("span_name", ""),
+    )
+    return JsonResponse(payload)
+
+
+@require_GET
+def mcp_code_recent_changes_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    payload = code_recent_changes_for_component_service(
+        repository=request.GET.get("repository", ""),
+        module_path=request.GET.get("module_path", ""),
+        symbol=request.GET.get("symbol", ""),
+        hours=int(request.GET.get("hours", "72") or "72"),
+    )
+    return JsonResponse(payload)
+
+
+@require_GET
+def mcp_code_recent_deployments_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    payload = code_find_recent_deployments_service(
+        service_name=request.GET.get("service_name", ""),
+        environment=request.GET.get("environment", ""),
+        version=request.GET.get("version", ""),
+    )
+    return JsonResponse(payload)
+
+
+@require_GET
+def mcp_code_related_symbols_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    payload = code_find_related_symbols_service(
+        repository=request.GET.get("repository", ""),
+        symbol=request.GET.get("symbol", ""),
+    )
+    return JsonResponse(payload)
+
+
+@require_GET
+def mcp_code_blast_radius_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    payload = code_blast_radius_lookup_service(
+        repository=request.GET.get("repository", ""),
+        symbol=request.GET.get("symbol", ""),
+        route=request.GET.get("route", ""),
+    )
+    return JsonResponse(payload)
+
+
+@require_GET
+def mcp_code_search_context_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    payload = code_search_context_service(
+        repository=request.GET.get("repository", ""),
+        query=request.GET.get("query", ""),
+        service_name=request.GET.get("service_name", ""),
+        limit=int(request.GET.get("limit", "6") or "6"),
+    )
+    return JsonResponse(payload)
+
+
+@require_GET
+def mcp_code_read_snippet_view(request: HttpRequest):
+    if not _is_authorized_mcp_request(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    payload = code_read_snippet_service(
+        repository=request.GET.get("repository", ""),
+        module_path=request.GET.get("module_path", ""),
+        symbol=request.GET.get("symbol", ""),
+        line_start=int(request.GET.get("line_start", "0") or "0"),
+        line_end=int(request.GET.get("line_end", "0") or "0"),
+        context_lines=int(request.GET.get("context_lines", "18") or "18"),
     )
     return JsonResponse(payload)
 
@@ -6032,6 +6172,10 @@ def fleet_enroll_view(request: HttpRequest):
                 name=str(component_name),
                 defaults={"status": "healthy"},
             )
+        try:
+            auto_register_target_code_context(target)
+        except Exception as exc:
+            logger.warning("Code-context auto-registration failed during enroll for %s: %s", target.target_id, exc)
         return JsonResponse({"target": _serialize_target(target), "profile": _serialize_profile(target.profile) if target.profile else None})
     except Exception as exc:
         logger.exception("fleet_enroll_view error: %s", exc)
@@ -6068,7 +6212,8 @@ def fleet_heartbeat_view(request: HttpRequest, target_id: str):
                     "metadata_json": component.get("metadata_json") or {},
                 },
             )
-        for service in body.get("discovered_services") or []:
+        discovered_services_payload = body.get("discovered_services") or []
+        for service in discovered_services_payload:
             service_name = str(service.get("service_name") or "").strip()
             if not service_name:
                 continue
@@ -6083,6 +6228,10 @@ def fleet_heartbeat_view(request: HttpRequest, target_id: str):
                     "metadata_json": service.get("metadata_json") or {},
                 },
             )
+        try:
+            auto_register_target_code_context(target, discovered_services=discovered_services_payload)
+        except Exception as exc:
+            logger.warning("Code-context auto-registration failed during heartbeat for %s: %s", target.target_id, exc)
         return JsonResponse({"status": "ok", "target": _serialize_target(target)})
     except Exception as exc:
         logger.exception("fleet_heartbeat_view error: %s", exc)
@@ -6928,3 +7077,226 @@ def download_timeline_narrative_view(request: HttpRequest, incident_key: str):
             }
         ],
     )
+def _code_context_graph_payload(*, application: str = "", repository_name: str = "") -> Dict[str, Any]:
+    ensure_builtin_repository_indexes()
+    repositories = RepositoryIndex.objects.filter(is_active=True).order_by("name")
+    if repository_name:
+        repository = repositories.filter(name=repository_name).first()
+    elif application:
+        repository = repositories.filter(service_bindings__application_name=application).distinct().first()
+    else:
+        repository = repositories.first()
+
+    repository_options = [
+        {
+            "name": repo.name,
+            "application_names": sorted(
+                {
+                    binding.application_name
+                    for binding in repo.service_bindings.all()
+                    if binding.application_name
+                }
+            ),
+            "indexed_at": repo.last_indexed_at.isoformat() if repo.last_indexed_at else None,
+            "index_status": repo.index_status,
+        }
+        for repo in repositories.prefetch_related("service_bindings")
+    ]
+    if not repository:
+        return {
+            "repository": None,
+            "application": application,
+            "nodes": [],
+            "links": [],
+            "repository_options": repository_options,
+            "summary": {"service_count": 0, "route_count": 0, "span_count": 0, "change_count": 0, "relation_count": 0},
+        }
+
+    service_bindings = list(ServiceRepositoryBinding.objects.filter(repository_index=repository).order_by("service_name"))
+    route_bindings = list(RouteBinding.objects.filter(repository_index=repository).order_by("route_pattern")[:80])
+    span_bindings = list(SpanBinding.objects.filter(repository_index=repository).order_by("span_name")[:80])
+    relations = list(SymbolRelation.objects.filter(repository_index=repository).order_by("-confidence", "source_symbol")[:120])
+    changes = list(CodeChangeRecord.objects.filter(repository_index=repository).order_by("-committed_at", "-created_at")[:10])
+
+    application_name = application or next((binding.application_name for binding in service_bindings if binding.application_name), "")
+    nodes: List[Dict[str, Any]] = []
+    links: List[Dict[str, Any]] = []
+    seen_nodes = set()
+
+    def add_node(node_id: str, *, label: str, node_type: str, size: int = 18, risk: str = "normal", metadata: Optional[Dict[str, Any]] = None) -> None:
+        if node_id in seen_nodes:
+            return
+        seen_nodes.add(node_id)
+        nodes.append(
+            {
+                "id": node_id,
+                "label": label,
+                "type": node_type,
+                "size": size,
+                "risk": risk,
+                "metadata": metadata or {},
+            }
+        )
+
+    def add_link(source: str, target: str, *, label: str = "", weight: float = 1.0) -> None:
+        links.append({"source": source, "target": target, "label": label, "weight": weight})
+
+    app_node_id = f"app:{application_name or repository.name}"
+    add_node(
+        app_node_id,
+        label=application_name or repository.name,
+        node_type="application",
+        size=34,
+        risk="focus",
+        metadata={
+            "application": application_name,
+            "repository": repository.name,
+            "repository_path": repository.local_path,
+            "index_status": repository.index_status,
+        },
+    )
+    repo_node_id = f"repo:{repository.name}"
+    add_node(
+        repo_node_id,
+        label=repository.name,
+        node_type="repository",
+        size=28,
+        risk="normal",
+        metadata={
+            "local_path": repository.local_path,
+            "default_branch": repository.default_branch,
+            "last_indexed_at": repository.last_indexed_at.isoformat() if repository.last_indexed_at else None,
+            "route_count": route_bindings.__len__(),
+            "span_count": span_bindings.__len__(),
+            "relation_count": relations.__len__(),
+        },
+    )
+    add_link(app_node_id, repo_node_id, label="source", weight=2.4)
+
+    file_to_node: Dict[str, str] = {}
+    for binding in service_bindings:
+        service_node = f"service:{binding.service_name}"
+        add_node(
+            service_node,
+            label=binding.service_name,
+            node_type="service",
+            size=22,
+            risk="normal",
+            metadata={
+                "application_name": binding.application_name,
+                "team_name": binding.team_name,
+                "ownership_confidence": binding.ownership_confidence,
+            },
+        )
+        add_link(repo_node_id, service_node, label="owns", weight=2.0)
+
+    for route in route_bindings:
+        service_node = f"service:{route.service_name}" if route.service_name else repo_node_id
+        route_node = f"route:{route.http_method}:{route.route_pattern}:{route.handler_name}"
+        add_node(
+            route_node,
+            label=f"{route.http_method} {route.route_pattern}",
+            node_type="route",
+            size=18,
+            risk="normal",
+            metadata={
+                "handler_name": route.handler_name,
+                "file_path": route.handler_file_path,
+                "confidence": route.confidence,
+                "matched_by": (route.metadata or {}).get("matched_by") or "",
+            },
+        )
+        add_link(service_node, route_node, label="serves", weight=1.6)
+        if route.handler_file_path:
+            file_node = file_to_node.setdefault(route.handler_file_path, f"file:{route.handler_file_path}")
+            add_node(
+                file_node,
+                label=route.handler_file_path.split("/")[-1],
+                node_type="file",
+                size=14,
+                risk="normal",
+                metadata={"file_path": route.handler_file_path},
+            )
+            add_link(route_node, file_node, label="implemented_in", weight=1.3)
+
+    for span in span_bindings:
+        service_node = f"service:{span.service_name}" if span.service_name else repo_node_id
+        span_node = f"span:{span.span_name}:{span.symbol_name}"
+        add_node(
+            span_node,
+            label=span.span_name,
+            node_type="span",
+            size=16,
+            risk="normal",
+            metadata={
+                "symbol_name": span.symbol_name,
+                "file_path": span.symbol_file_path,
+                "confidence": span.confidence,
+                "matched_by": (span.metadata or {}).get("matched_by") or "",
+            },
+        )
+        add_link(service_node, span_node, label="observed_as", weight=1.5)
+        if span.symbol_file_path:
+            file_node = file_to_node.setdefault(span.symbol_file_path, f"file:{span.symbol_file_path}")
+            add_node(
+                file_node,
+                label=span.symbol_file_path.split("/")[-1],
+                node_type="file",
+                size=14,
+                risk="normal",
+                metadata={"file_path": span.symbol_file_path},
+            )
+            add_link(span_node, file_node, label="defined_in", weight=1.2)
+
+    for relation in relations:
+        source_file = relation.source_file_path or ""
+        target_file = relation.target_file_path or ""
+        if not source_file or not target_file:
+            continue
+        source_node = file_to_node.setdefault(source_file, f"file:{source_file}")
+        target_node = file_to_node.setdefault(target_file, f"file:{target_file}")
+        add_node(source_node, label=source_file.split("/")[-1], node_type="file", size=14, metadata={"file_path": source_file})
+        add_node(target_node, label=target_file.split("/")[-1], node_type="file", size=14, metadata={"file_path": target_file})
+        add_link(source_node, target_node, label=relation.relation_type, weight=max(0.8, relation.confidence))
+
+    for change in changes:
+        change_node = f"change:{change.commit_sha}"
+        add_node(
+            change_node,
+            label=(change.commit_sha or "")[:7],
+            node_type="change",
+            size=14,
+            risk="warning",
+            metadata={
+                "author": change.author,
+                "title": change.title,
+                "committed_at": change.committed_at.isoformat() if change.committed_at else None,
+                "changed_files": change.changed_files,
+            },
+        )
+        add_link(repo_node_id, change_node, label="recent_change", weight=1.0)
+        for file_path in (change.changed_files or [])[:6]:
+            file_node = file_to_node.setdefault(file_path, f"file:{file_path}")
+            add_node(file_node, label=file_path.split("/")[-1], node_type="file", size=14, metadata={"file_path": file_path})
+            add_link(change_node, file_node, label="touched", weight=0.9)
+
+    return {
+        "repository": {
+            "name": repository.name,
+            "local_path": repository.local_path,
+            "default_branch": repository.default_branch,
+            "index_status": repository.index_status,
+            "last_indexed_at": repository.last_indexed_at.isoformat() if repository.last_indexed_at else None,
+        },
+        "application": application_name,
+        "nodes": nodes,
+        "links": links,
+        "repository_options": repository_options,
+        "summary": {
+            "service_count": len(service_bindings),
+            "route_count": len(route_bindings),
+            "span_count": len(span_bindings),
+            "change_count": len(changes),
+            "relation_count": len(relations),
+        },
+    }
