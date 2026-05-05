@@ -13,7 +13,7 @@ Related diagram sources:
 
 ## 1. System Overview
 
-The platform has four interacting planes:
+The platform currently has four interacting planes:
 
 1. **Control plane**
    Django application for incidents, investigations, runbooks, approvals, policies, fleet onboarding, and MCP-style evidence gathering.
@@ -27,34 +27,34 @@ The platform has four interacting planes:
 ## 2. High-Level Architecture
 
 ```text
-                         +---------------------------+
-                         |       User / Operator     |
-                         +-------------+-------------+
+             +-------------------------------------------------------------------+
+             |                 Customer Self-Hosted Environment                   |
+             +-------------------------------------------------------------------+
                                        |
-                     +-----------------+-----------------+
-                     |                                   |
-                     v                                   v
-        +---------------------------+       +---------------------------+
-        | React Product UI          |       | Django Control Plane      |
-        | frontend/                 |       | genai + doc_search        |
-        | :8089                     |       | :8000                     |
-        +---------------------------+       +-------------+-------------+
-                                                          |
-                         +--------------------------------+--------------------------------+
-                         |                |                |               |                |
-                         v                v                v               v                v
-                   +-----------+   +-----------+   +-------------+  +-----------+   +------------+
-                   |PostgreSQL |   |   Redis   |   | Local vLLM  |  |  Agents   |   | Code       |
-                   | incidents |   | cache     |   | Qwen model  |  | control/db|   | Context    |
-                   | metadata  |   | sessions  |   | no egress   |  | execution |   | Engine     |
-                   +-----------+   +-----------+   +-------------+  +-----------+   +------------+
-                                                                                           |
-                                                                                           v
-                                                                              +---------------------------+
-                                                                              | Local Repositories        |
-                                                                              | routes / spans / commits  |
-                                                                              | snippets / ownership      |
-                                                                              +---------------------------+
+                +----------------------+----------------------+
+                |                                             |
+                v                                             v
+   +---------------------------+                 +-------------------------------+
+   | Control Plane Host        |                 | Monitored Linux Servers       |
+   | Docker Compose today      |                 | external targets              |
+   | Kubernetes packaging next |                 | onboarded over SSH            |
+   +-------------+-------------+                 +---------------+---------------+
+                 |                                               |
+       +---------+---------+                                     |
+       |                   |                                     |
+       v                   v                                     v
+ +-------------+   +---------------+                +-----------------------------+
+ | Django + UI |   | Local vLLM    |                | aiops-agent                 |
+ | incidents   |   | Qwen via vLLM |                | otelcol + node_exporter     |
+ | fleet       |   | no AI egress  |                | logs + heartbeat            |
+ | code ctx    |   +---------------+                | optional Docker runtime      |
+ +------+------+                                        +-------------+------------+
+        |                                                             |
+        v                                                             v
+ +-------------+   +---------------+                     +--------------------------+
+ | Postgres    |   | Observability |                     | applications / containers|
+ | Redis       |   | Prom/AM/JGR/ES|                     | processes / services     |
+ +-------------+   +---------------+                     +--------------------------+
 ```
 
 ## 3. Control Plane
@@ -81,6 +81,25 @@ Important entry points:
 - [genai/urls.py](./genai/urls.py)
 - [genai/views.py](./genai/views.py)
 - [genai/mcp_orchestrator.py](./genai/mcp_orchestrator.py)
+
+### 3.1 Deployment Shape
+
+The current supported control-plane deployment is:
+
+- one customer-managed Linux host
+- Docker Compose for service packaging and startup
+- local Postgres, Redis, observability components, and `vLLM`
+
+The next packaging target is:
+
+- Kubernetes deployment for the control plane itself
+- most likely via Helm charts and environment-specific values
+
+That distinction matters:
+
+- `Docker Compose` is the current control-plane deployment mechanism
+- customer servers being monitored do not need to run your platform containers
+- larger enterprise environments can later run the same control plane on Kubernetes
 
 ## 4. Air-Gapped Inference Plane
 
@@ -129,7 +148,75 @@ investigations -> Django fetches scoped telemetry -> local LLM reasons on retrie
 
 This is deliberate: the model does not own direct uncontrolled access to monitoring systems. The application retrieves evidence and decides what to send to the model.
 
-## 6. Code-Context Engine
+## 6. Fleet Onboarding and Remote Collection
+
+The onboarding module is implemented today as a Linux-first remote enrollment flow.
+
+Relevant pieces:
+
+- [genai/models.py](./genai/models.py)
+- [genai/views.py](./genai/views.py)
+- `/genai/fleet/onboarding/...`
+- `/genai/fleet/enroll/...`
+- `/genai/fleet/install/linux/`
+
+### 6.1 Current Linux Flow
+
+```text
+1. Operator creates an onboarding request with host, user, and PEM key.
+2. Control plane validates SSH reachability.
+3. Control plane runs a generated Linux bootstrap script remotely.
+4. The host installs aiops-agent, OpenTelemetry Collector, and node_exporter.
+5. The host enrolls back into Fleet with token-based registration.
+6. Periodic heartbeat reports component health and discovered host-side services.
+```
+
+Current seeded profiles are Linux-specific and include components such as:
+
+- `AIOps Supervisor`
+- `OpenTelemetry Collector`
+- `node_exporter`
+- `log shipper`
+- `discovery helper`
+
+### 6.2 Dockerized Applications On Linux Hosts
+
+When the customer application is running in Docker on a Linux server, the target model remains host-centric:
+
+- the target is still the Linux server
+- Docker is a runtime attribute of that server
+- containers become discovered workloads underneath the host target
+
+The current codebase already supports Docker-oriented remediation commands and a Fleet model that can receive `discovered_services`, but the Linux heartbeat script does not yet enumerate customer containers. Today it reports the installed collectors themselves.
+
+The intended Docker auto-discovery flow is:
+
+```text
+1. Onboard the Linux host with the existing SSH/bootstrap path.
+2. Detect whether Docker is present and reachable.
+3. Enumerate running containers, image names, labels, ports, and health.
+4. Publish each container as a discovered service or workload.
+5. Feed that runtime inventory into topology, investigation scope, and code-context binding.
+```
+
+That is the right extension point for Docker-on-Linux environments. It should not require a separate cluster onboarding path.
+
+### 6.3 Kubernetes Status
+
+Kubernetes onboarding is not implemented yet.
+
+There are two separate Kubernetes workstreams:
+
+1. deploy the control plane itself on Kubernetes
+2. onboard customer Kubernetes clusters as monitored targets
+
+Those should be treated separately from Linux host onboarding because Kubernetes needs:
+
+- cluster registration rather than SSH login
+- RBAC-scoped API access rather than per-host bootstrap
+- Helm or operator-based collectors rather than a shell installer
+
+## 7. Code-Context Engine
 
 This is one of the core differentiators of the platform.
 
@@ -139,7 +226,7 @@ The code-context engine links operational entities back to local source code. It
 - [genai/code_context_services.py](./genai/code_context_services.py)
 - [genai/mcp_services.py](./genai/mcp_services.py)
 
-### 6.1 Indexed Entities
+### 7.1 Indexed Entities
 
 The local index stores:
 
@@ -163,7 +250,7 @@ Core models:
 
 These models live in [genai/models.py](./genai/models.py).
 
-### 6.2 What It Enables
+### 7.2 What It Enables
 
 During an incident or assistant query, the platform can answer:
 
@@ -174,7 +261,7 @@ During an incident or assistant query, the platform can answer:
 - which related symbols expand the code blast radius
 - which snippet should be shown as direct source evidence
 
-### 6.3 Sync Flow
+### 7.3 Sync Flow
 
 The index is populated from local repository paths.
 
@@ -195,7 +282,7 @@ Code:
 
 - [genai/management/commands/sync_code_context.py](./genai/management/commands/sync_code_context.py)
 
-## 7. Investigation Orchestration
+## 8. Investigation Orchestration
 
 The assistant investigation path uses an internal MCP-style orchestration layer.
 
@@ -221,7 +308,7 @@ Registered evidence tools include:
 
 This orchestration is implemented in [genai/mcp_orchestrator.py](./genai/mcp_orchestrator.py).
 
-### 7.1 Investigation Flow
+### 8.1 Investigation Flow
 
 ```text
 1. User asks a question or opens an incident.
@@ -232,7 +319,7 @@ This orchestration is implemented in [genai/mcp_orchestrator.py](./genai/mcp_orc
 6. The answer is stored with retrieval trace and surfaced to UI.
 ```
 
-### 7.2 Why This Matters
+### 8.2 Why This Matters
 
 This design avoids the weakest common pattern in generic AI observability tools:
 
@@ -250,7 +337,7 @@ Instead, the platform can move from:
 
 inside the same investigation loop.
 
-## 8. Application Topology and Blast Radius
+## 9. Application Topology and Blast Radius
 
 There are two blast-radius lenses in the current product:
 
@@ -277,7 +364,7 @@ The code-context layer adds a second dimension:
 - likely affected handlers
 - recent commits on the path
 
-## 9. Alert Ingestion and Recommendation Flow
+## 10. Alert Ingestion and Recommendation Flow
 
 Current implemented flow:
 
@@ -305,7 +392,7 @@ Key point:
 
 That is the basis of the self-hosted, air-gapped product pitch.
 
-## 10. Controlled Remediation Flow
+## 11. Controlled Remediation Flow
 
 The platform separates reasoning from execution.
 
@@ -327,7 +414,7 @@ Relevant modules:
 - [genai/typed_actions.py](./genai/typed_actions.py)
 - [agent/agent_server.py](./agent/agent_server.py)
 
-## 11. Frontend Surfaces
+## 12. Frontend Surfaces
 
 There are multiple UI surfaces in the repo:
 
@@ -358,7 +445,7 @@ Important files:
 
 - [opsmitra-site](./opsmitra-site)
 
-## 12. Demo and Chaos Plane
+## 13. Demo and Chaos Plane
 
 The demo environment exists to show realistic incident propagation across shared dependencies.
 
@@ -388,7 +475,7 @@ This plane is useful because it produces:
 - realistic logs, traces, and metrics
 - reproducible failure paths for code-aware investigation
 
-## 13. Design Positioning
+## 14. Design Positioning
 
 The strongest way to describe the platform is:
 
@@ -397,7 +484,7 @@ The strongest way to describe the platform is:
 That positioning depends on four claims being true in the implementation:
 
 1. **self-hosted**
-   The stack runs under Docker Compose with local services and local data stores.
+   The stack currently runs under Docker Compose with local services and local data stores, with Kubernetes packaging planned next.
 2. **air-gapped AI**
    Inference is served by local `vLLM`, not an external AI SaaS endpoint.
 3. **code-aware**

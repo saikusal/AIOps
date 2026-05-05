@@ -6083,11 +6083,159 @@ def _serialize_profile(profile: TelemetryProfile) -> Dict[str, Any]:
     }
 
 
-def _serialize_target(target: Target) -> Dict[str, Any]:
+def _sorted_discovered_services(target: Target) -> List[DiscoveredService]:
+    return sorted(
+        list(target.discovered_services.all()),
+        key=lambda service: (
+            service.metadata_json.get("runtime") != "docker",
+            service.service_name.lower(),
+            service.port or 0,
+        ),
+    )
+
+
+def _resolve_owner_for_discovered_service(service: DiscoveredService, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    candidate_names: List[str] = []
+    for raw_name in (
+        service.service_name,
+        service.process_name,
+        metadata.get("container_name"),
+        metadata.get("unit_name"),
+        metadata.get("application_name"),
+    ):
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        normalized_variants = [
+            name,
+            name.replace(".service", ""),
+            name.replace("_", "-"),
+            name.replace("-", "_"),
+        ]
+        for variant in normalized_variants:
+            cleaned = variant.strip()
+            if cleaned and cleaned not in candidate_names:
+                candidate_names.append(cleaned)
+    application_name = str(metadata.get("application_name") or "").strip()
+    for candidate in candidate_names:
+        owner_payload = code_find_service_owner_service(
+            service_name=candidate,
+            application_name=application_name,
+        )
+        if owner_payload.get("ok"):
+            return owner_payload
+    return {}
+
+
+def _categorize_discovered_service(item: Dict[str, Any]) -> str:
+    runtime = str(item.get("runtime") or "")
+    owner = item.get("owner") or {}
+    metadata = item.get("metadata_json") or {}
+    process_name = str(item.get("process_name") or "").lower()
+    service_name = str(item.get("service_name") or "").lower()
+
+    if owner:
+        return "application"
+    if runtime == "docker":
+        return "container"
+    if str(metadata.get("service_manager") or "") == "systemd":
+        if any(token in process_name or token in service_name for token in ("app", "api", "web", "worker", "gateway", "service")):
+            return "application"
+        return "support"
+    return "support"
+
+
+def _serialize_execution_intent(intent: ExecutionIntent) -> Dict[str, Any]:
+    response_json = intent.response_json or {}
+    return {
+        "intent_id": intent.intent_id,
+        "execution_type": intent.execution_type,
+        "action_type": intent.action_type,
+        "service": intent.service,
+        "target_host": intent.target_host,
+        "status": intent.status,
+        "dry_run": intent.dry_run,
+        "requires_approval": intent.requires_approval,
+        "command": intent.command,
+        "created_at": intent.created_at.isoformat() if intent.created_at else None,
+        "completed_at": intent.completed_at.isoformat() if intent.completed_at else None,
+        "typed_action_summary": response_json.get("typed_action_summary") or "",
+        "final_answer": response_json.get("final_answer") or "",
+    }
+
+
+def _recent_execution_history_for_target(target: Target, limit: int = 10) -> List[Dict[str, Any]]:
+    aliases = {
+        value.strip()
+        for value in (target.hostname, target.name, target.target_id, target.ip_address)
+        if str(value or "").strip()
+    }
+    if not aliases:
+        return []
+    intents = (
+        ExecutionIntent.objects.filter(target_host__in=aliases)
+        .order_by("-created_at")[:limit]
+    )
+    return [_serialize_execution_intent(intent) for intent in intents]
+
+
+def _build_target_runtime_payload(target: Target) -> Dict[str, Any]:
     components = list(target.components.all().order_by("name"))
-    discovered_count = target.discovered_services.count()
+    discovered_services = _sorted_discovered_services(target)
+    discovered_count = len(discovered_services)
     if not discovered_count:
         discovered_count = int(target.metadata_json.get("discovered_service_count") or 0)
+    docker_workloads = []
+    host_services = []
+    for service in discovered_services:
+        metadata = service.metadata_json or {}
+        owner_payload = _resolve_owner_for_discovered_service(service, metadata)
+        item = {
+            "service_name": service.service_name,
+            "process_name": service.process_name,
+            "port": service.port,
+            "status": service.status,
+            "runtime": metadata.get("runtime") or ("docker" if service.process_name == "docker" else "host"),
+            "image": metadata.get("image") or "",
+            "container_name": metadata.get("container_name") or "",
+            "metadata_json": metadata,
+            "owner": owner_payload if owner_payload.get("ok") else {},
+        }
+        item["category"] = _categorize_discovered_service(item)
+        if item["runtime"] == "docker":
+            docker_workloads.append(item)
+        else:
+            host_services.append(item)
+    metadata = target.metadata_json or {}
+    container_runtime = metadata.get("container_runtime") or ("docker" if docker_workloads else "none")
+    docker_container_count = int(metadata.get("docker_container_count") or len(docker_workloads))
+    host_application_services = [item for item in host_services if item.get("category") == "application"]
+    host_support_services = [item for item in host_services if item.get("category") != "application"]
+    return {
+        "components": [
+            {"name": component.name, "status": component.status}
+            for component in components
+        ],
+        "discovered_service_count": discovered_count,
+        "runtime_summary": {
+            "container_runtime": container_runtime,
+            "docker_available": bool(metadata.get("docker_available") or docker_workloads),
+            "docker_container_count": docker_container_count,
+            "host_service_count": len(host_services),
+            "host_application_service_count": len(host_application_services),
+            "host_support_service_count": len(host_support_services),
+            "docker_error": metadata.get("docker_error") or "",
+        },
+        "workload_preview": docker_workloads[:4],
+        "docker_workloads": docker_workloads,
+        "host_services": host_services,
+        "host_application_services": host_application_services,
+        "host_support_services": host_support_services,
+    }
+
+
+def _serialize_target(target: Target) -> Dict[str, Any]:
+    runtime_payload = _build_target_runtime_payload(target)
     return {
         "target_id": target.target_id,
         "name": target.name,
@@ -6098,11 +6246,46 @@ def _serialize_target(target: Target) -> Dict[str, Any]:
         "last_heartbeat": target.last_heartbeat_at.isoformat() if target.last_heartbeat_at else "not connected yet",
         "profile_name": target.profile.name if target.profile else "Unassigned",
         "collector_status": target.collector_status,
-        "discovered_service_count": discovered_count,
-        "components": [
-            {"name": component.name, "status": component.status}
-            for component in components
-        ],
+        **runtime_payload,
+    }
+
+
+def _serialize_target_detail(target: Target) -> Dict[str, Any]:
+    runtime_payload = _build_target_runtime_payload(target)
+    return {
+        "target_id": target.target_id,
+        "name": target.name,
+        "target_type": target.target_type,
+        "environment": target.environment,
+        "hostname": target.hostname,
+        "ip_address": target.ip_address,
+        "os_name": target.os_name,
+        "os_version": target.os_version,
+        "status": target.status,
+        "last_heartbeat": target.last_heartbeat_at.isoformat() if target.last_heartbeat_at else None,
+        "profile_name": target.profile.name if target.profile else "Unassigned",
+        "collector_status": target.collector_status,
+        "metadata_json": target.metadata_json or {},
+        "recent_execution_history": _recent_execution_history_for_target(target),
+        **runtime_payload,
+    }
+
+
+def _fleet_install_prereqs(target_type: str = "linux") -> Dict[str, Any]:
+    missing_requirements: List[str] = []
+    warnings: List[str] = []
+    normalized_target_type = (target_type or "linux").strip().lower()
+    current_agent_secret = (os.getenv("AGENT_SECRET_TOKEN") or AGENT_SECRET_TOKEN or "").strip()
+
+    if normalized_target_type == "linux" and not current_agent_secret:
+        missing_requirements.append(
+            "AGENT_SECRET_TOKEN is not configured on the control plane, so onboarded Linux hosts cannot start the aiops-command-agent securely."
+        )
+
+    return {
+        "control_plane_ready": not missing_requirements,
+        "missing_requirements": missing_requirements,
+        "warnings": warnings,
     }
 
 
@@ -6116,6 +6299,17 @@ def fleet_targets_view(request: HttpRequest):
     _ensure_fleet_profiles()
     targets = Target.objects.select_related("profile").prefetch_related("components", "discovered_services").all()
     return JsonResponse({"count": targets.count(), "results": [_serialize_target(target) for target in targets]})
+
+
+@login_required
+def fleet_target_detail_view(request: HttpRequest, target_id: str):
+    if request.method != "GET":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    _ensure_fleet_profiles()
+    target = Target.objects.select_related("profile").prefetch_related("components", "discovered_services").filter(target_id=target_id).first()
+    if not target:
+        return JsonResponse({"error": "Unknown target"}, status=404)
+    return JsonResponse(_serialize_target_detail(target))
 
 
 @login_required
@@ -6149,6 +6343,7 @@ def fleet_enroll_blueprint_view(request: HttpRequest):
         "Enroll back into the control plane and start heartbeat reporting.",
         "Begin discovery so services can populate Fleet, Applications, and Graphs.",
     ]
+    prereqs = _fleet_install_prereqs(target_type)
     return JsonResponse(
         {
             "target_type": target_type,
@@ -6157,6 +6352,7 @@ def fleet_enroll_blueprint_view(request: HttpRequest):
             "install_command": install_command,
             "components": profile.components or [],
             "next_steps": next_steps,
+            **prereqs,
         }
     )
 
@@ -6486,6 +6682,15 @@ def fleet_onboarding_install_view(request: HttpRequest, onboarding_id: str):
     if onboarding.connectivity_status != "reachable":
         return JsonResponse({"error": "Connectivity must be validated before install"}, status=400)
     try:
+        prereqs = _fleet_install_prereqs(onboarding.target_type)
+        if not prereqs["control_plane_ready"]:
+            return JsonResponse(
+                {
+                    "error": "Control plane is not ready for remote install.",
+                    **prereqs,
+                },
+                status=400,
+            )
         token_value = f"lnx_{uuid.uuid4().hex[:24]}"
         token = EnrollmentToken.objects.create(
             token=token_value,
@@ -6532,6 +6737,18 @@ def fleet_onboarding_install_view(request: HttpRequest, onboarding_id: str):
 @xframe_options_exempt
 def fleet_linux_install_script_view(request: HttpRequest):
     otlp_endpoint = _public_otlp_grpc_endpoint(request)
+    agent_server_source = ""
+    agent_allowed_commands_source = ""
+    try:
+        agent_server_path = os.path.join(settings.BASE_DIR, "agent", "agent_server.py")
+        with open(agent_server_path, "r", encoding="utf-8") as handle:
+            agent_server_source = handle.read().rstrip()
+        allowed_commands_path = os.path.join(settings.BASE_DIR, "agent", "allowed_commands.json")
+        with open(allowed_commands_path, "r", encoding="utf-8") as handle:
+            agent_allowed_commands_source = handle.read().rstrip()
+    except OSError as exc:
+        logger.exception("Unable to load embedded agent assets for fleet installer: %s", exc)
+        return JsonResponse({"error": "Unable to load Linux installer assets", "detail": str(exc)}, status=500)
     script = f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -6543,6 +6760,8 @@ TARGET_HOSTNAME=""
 OTLP_ENDPOINT="{otlp_endpoint}"
 OTELCOL_VERSION="{AIOPS_OTELCOL_VERSION}"
 NODE_EXPORTER_VERSION="{AIOPS_NODE_EXPORTER_VERSION}"
+AGENT_AUTH_TOKEN="{AGENT_SECRET_TOKEN or ''}"
+AGENT_PORT="{AGENT_PORT}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -6578,6 +6797,11 @@ done
 
 if [[ -z "$CONTROL_PLANE" || -z "$TOKEN" || -z "$OTLP_ENDPOINT" ]]; then
   echo "Missing --control-plane, --token, or --otlp-endpoint" >&2
+  exit 1
+fi
+
+if [[ -z "$AGENT_AUTH_TOKEN" ]]; then
+  echo "AGENT_AUTH_TOKEN is not configured on the control plane." >&2
   exit 1
 fi
 
@@ -6639,8 +6863,21 @@ CONTROL_PLANE=$CONTROL_PLANE
 TOKEN=$TOKEN
 PROFILE=$PROFILE
 OTLP_ENDPOINT=$OTLP_ENDPOINT
+AGENT_AUTH_TOKEN=$AGENT_AUTH_TOKEN
+AGENT_PORT=$AGENT_PORT
+AGENT_ALLOWED_COMMANDS_FILE=/opt/aiops-agent/allowed_commands.json
 ENV
   chmod 600 /etc/aiops-agent/enrollment.env
+
+  cat > /opt/aiops-agent/agent_server.py <<'PYTHON'
+{agent_server_source}
+PYTHON
+  chmod 755 /opt/aiops-agent/agent_server.py
+
+  cat > /opt/aiops-agent/allowed_commands.json <<'JSON'
+{agent_allowed_commands_source}
+JSON
+  chmod 644 /opt/aiops-agent/allowed_commands.json
 
   cat > /etc/otelcol-contrib/config.yaml <<COLLECTOR
 receivers:
@@ -6721,6 +6958,25 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 OTEL
+
+  cat > /etc/systemd/system/aiops-command-agent.service <<AGENT
+[Unit]
+Description=AIOps Remote Command Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=root
+Group=root
+WorkingDirectory=/opt/aiops-agent
+EnvironmentFile=/etc/aiops-agent/enrollment.env
+ExecStart=/usr/bin/env python3 /opt/aiops-agent/agent_server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+AGENT
 }}
 
 enroll_target() {{
@@ -6749,7 +7005,8 @@ enroll_target() {{
   "components": [
     "AIOps Supervisor",
     "OpenTelemetry Collector",
-    "node_exporter"
+    "node_exporter",
+    "aiops-command-agent"
   ],
   "metadata_json": {{
     "profile": "$PROFILE",
@@ -6780,26 +7037,356 @@ HOSTNAME_VALUE="${{TARGET_HOSTNAME:-$(hostname)}}"
 PRIMARY_IP="$(hostname -I 2>/dev/null | awk '{{print $1}}')"
 NODE_STATUS=$(systemctl is-active node_exporter 2>/dev/null || echo unknown)
 OTEL_STATUS=$(systemctl is-active otelcol-contrib 2>/dev/null || echo unknown)
-PAYLOAD=$(cat <<JSON
-{{
-  "status": "connected",
-  "collector_status": "$OTEL_STATUS",
-  "components": [
-    {{"name": "AIOps Supervisor", "status": "healthy", "version": "phase3"}},
-    {{"name": "OpenTelemetry Collector", "status": "$OTEL_STATUS", "version": "$OTELCOL_VERSION"}},
-    {{"name": "node_exporter", "status": "$NODE_STATUS", "version": "$NODE_EXPORTER_VERSION"}}
-  ],
-  "discovered_services": [
-    {{"service_name": "node_exporter", "process_name": "node_exporter", "port": 9100, "status": "observed"}},
-    {{"service_name": "otelcol-contrib", "process_name": "otelcol-contrib", "port": 4317, "status": "observed"}}
-  ],
-  "metadata_json": {{
-    "profile": "$PROFILE",
-    "host": "$HOSTNAME_VALUE",
-    "ip": "$PRIMARY_IP"
-  }}
-}}
-JSON
+AGENT_STATUS=$(systemctl is-active aiops-command-agent 2>/dev/null || echo unknown)
+export TARGET_ID HOSTNAME_VALUE PRIMARY_IP NODE_STATUS OTEL_STATUS AGENT_STATUS OTELCOL_VERSION NODE_EXPORTER_VERSION PROFILE AGENT_PORT
+PAYLOAD=$(python3 <<'PYTHON'
+import json
+import os
+import re
+import shutil
+import subprocess
+
+
+def _docker_runtime_snapshot():
+    docker_binary = shutil.which("docker")
+    socket_path = "/var/run/docker.sock"
+    snapshot = dict(
+        available=bool(docker_binary and os.path.exists(socket_path)),
+        binary=docker_binary or "",
+        socket_path=socket_path,
+        error="",
+        containers=[],
+    )
+    if not docker_binary:
+        snapshot["error"] = "docker binary not found"
+        return snapshot
+    if not os.path.exists(socket_path):
+        snapshot["error"] = "docker socket not found"
+        return snapshot
+    try:
+        ps_result = subprocess.run(
+            [docker_binary, "ps", "-q"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if ps_result.returncode != 0:
+            snapshot["error"] = (ps_result.stderr or ps_result.stdout or "docker ps failed").strip()
+            return snapshot
+        container_ids = [line.strip() for line in (ps_result.stdout or "").splitlines() if line.strip()]
+        if not container_ids:
+            return snapshot
+        inspect_result = subprocess.run(
+            [docker_binary, "inspect", *container_ids],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if inspect_result.returncode != 0:
+            snapshot["error"] = (inspect_result.stderr or inspect_result.stdout or "docker inspect failed").strip()
+            return snapshot
+        snapshot["containers"] = json.loads(inspect_result.stdout or "[]")
+    except Exception as exc:
+        snapshot["error"] = str(exc)
+    return snapshot
+
+
+def _container_port_details(container):
+    port_bindings = ((container.get("NetworkSettings") or dict()).get("Ports") or dict())
+    published_ports = []
+    selected_port = None
+    for container_port, bindings in port_bindings.items():
+        try:
+            container_port_number = int(str(container_port).split("/", 1)[0])
+        except (TypeError, ValueError):
+            container_port_number = None
+        if bindings:
+            for binding in bindings:
+                host_port_raw = binding.get("HostPort")
+                try:
+                    host_port = int(host_port_raw) if host_port_raw else None
+                except (TypeError, ValueError):
+                    host_port = None
+                published_ports.append(
+                    dict(
+                        container_port=container_port_number,
+                        host_port=host_port,
+                        host_ip=binding.get("HostIp") or "",
+                    )
+                )
+                if selected_port is None:
+                    selected_port = host_port or container_port_number
+        elif container_port_number is not None:
+            published_ports.append(
+                dict(
+                    container_port=container_port_number,
+                    host_port=None,
+                    host_ip="",
+                )
+            )
+            if selected_port is None:
+                selected_port = container_port_number
+    return selected_port, published_ports
+
+
+def _normalize_service_name(raw_value):
+    value = (raw_value or "").strip()
+    if value.endswith(".service"):
+        value = value[:-8]
+    return value.replace("@", "-").strip()
+
+
+def _ignored_host_service(name):
+    normalized = _normalize_service_name(name).lower()
+    if not normalized:
+        return True
+    ignored = set([
+        "node_exporter",
+        "otelcol-contrib",
+        "aiops-command-agent",
+        "systemd",
+        "systemd-journald",
+        "systemd-logind",
+        "systemd-networkd",
+        "systemd-resolved",
+        "systemd-timesyncd",
+        "dbus",
+        "dbus-daemon",
+        "networkmanager",
+        "polkit",
+        "polkitd",
+        "rsyslog",
+        "rsyslogd",
+        "sshd",
+        "cron",
+        "crond",
+        "agetty",
+        "containerd",
+        "containerd-shim",
+        "dockerd",
+        "docker-proxy",
+        "snapd",
+        "system.slice",
+    ])
+    return normalized in ignored
+
+
+def _host_runtime_snapshot():
+    snapshot = dict(
+        systemd_services=[],
+        listening_services=[],
+        errors=[],
+    )
+    systemctl_binary = shutil.which("systemctl")
+    if systemctl_binary:
+        try:
+            result = subprocess.run(
+                [systemctl_binary, "list-units", "--type=service", "--state=running", "--no-legend", "--no-pager"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            if result.returncode == 0:
+                for line in (result.stdout or "").splitlines():
+                    parts = line.split()
+                    if not parts:
+                        continue
+                    unit_name = parts[0]
+                    service_name = _normalize_service_name(unit_name)
+                    if _ignored_host_service(service_name):
+                        continue
+                    snapshot["systemd_services"].append(
+                        dict(
+                            service_name=service_name,
+                            process_name=service_name,
+                            port=None,
+                            status="running",
+                            metadata_json=dict(runtime="host", service_manager="systemd", unit_name=unit_name),
+                        )
+                    )
+            else:
+                snapshot["errors"].append((result.stderr or result.stdout or "systemctl list-units failed").strip())
+        except Exception as exc:
+            snapshot["errors"].append(str(exc))
+
+    ss_binary = shutil.which("ss")
+    if ss_binary:
+        try:
+            result = subprocess.run(
+                [ss_binary, "-tulpnH"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            if result.returncode == 0:
+                known_systemd = dict()
+                for entry in snapshot["systemd_services"]:
+                    if entry.get("service_name"):
+                        known_systemd[entry.get("service_name")] = entry
+                for line in (result.stdout or "").splitlines():
+                    parts = line.split()
+                    if len(parts) < 6:
+                        continue
+                    local_address = parts[4]
+                    process_blob = " ".join(parts[6:]) if len(parts) > 6 else ""
+                    process_match = re.search(r'\\("([^"]+)"', process_blob)
+                    process_name = _normalize_service_name(process_match.group(1) if process_match else "")
+                    if _ignored_host_service(process_name):
+                        continue
+                    port = None
+                    if ":" in local_address:
+                        maybe_port = local_address.rsplit(":", 1)[-1].strip("[]")
+                        if maybe_port.isdigit():
+                            port = int(maybe_port)
+                    if port is None:
+                        continue
+                    matched_service = None
+                    for service_name in known_systemd.keys():
+                        if not service_name:
+                            continue
+                        if process_name == service_name or process_name in service_name or service_name in process_name:
+                            matched_service = service_name
+                            break
+                    logical_name = matched_service or process_name or ("host-port-" + str(port))
+                    snapshot["listening_services"].append(
+                        dict(
+                            service_name=logical_name,
+                            process_name=process_name or logical_name,
+                            port=port,
+                            status="observed",
+                            metadata_json=dict(
+                                runtime="host",
+                                service_manager="systemd" if matched_service else "process",
+                                listener_protocol=parts[0],
+                                listener_state=parts[1] if len(parts) > 1 else "",
+                                local_address=local_address,
+                            ),
+                        )
+                    )
+            else:
+                snapshot["errors"].append((result.stderr or result.stdout or "ss discovery failed").strip())
+        except Exception as exc:
+            snapshot["errors"].append(str(exc))
+    return snapshot
+
+
+docker_snapshot = _docker_runtime_snapshot()
+host_snapshot = _host_runtime_snapshot()
+discovered_services = [
+    dict(
+        service_name="node_exporter",
+        process_name="node_exporter",
+        port=9100,
+        status="observed",
+    ),
+    dict(
+        service_name="otelcol-contrib",
+        process_name="otelcol-contrib",
+        port=4317,
+        status="observed",
+    ),
+    dict(
+        service_name="aiops-command-agent",
+        process_name="agent_server.py",
+        port=int(os.environ.get("AGENT_PORT") or "9999"),
+        status="observed",
+    ),
+]
+
+host_service_index = dict()
+for entry in discovered_services:
+    host_service_index[str(entry.get("service_name")) + ":" + str(entry.get("port") or "na")] = entry
+
+for entry in host_snapshot["systemd_services"] + host_snapshot["listening_services"]:
+    key = str(entry.get("service_name")) + ":" + str(entry.get("port") or "na")
+    if key in host_service_index:
+        existing = host_service_index[key]
+        existing_metadata = existing.get("metadata_json") or dict()
+        new_metadata = entry.get("metadata_json") or dict()
+        existing_metadata.update(new_metadata)
+        existing["metadata_json"] = existing_metadata
+        if entry.get("process_name") and (
+            not existing.get("process_name") or existing.get("process_name") == existing.get("service_name")
+        ):
+            existing["process_name"] = entry.get("process_name")
+        if entry.get("port") and not existing.get("port"):
+            existing["port"] = entry.get("port")
+        if entry.get("status") == "running":
+            existing["status"] = "running"
+        continue
+    host_service_index[key] = entry
+    discovered_services.append(entry)
+
+for container in docker_snapshot["containers"]:
+    config = container.get("Config") or dict()
+    labels = config.get("Labels") or dict()
+    state = container.get("State") or dict()
+    health = state.get("Health") or dict()
+    container_name = (container.get("Name") or "").lstrip("/") or (container.get("Id") or "")[:12] or "docker-container"
+    logical_service = labels.get("com.docker.compose.service") or container_name
+    status = health.get("Status") or state.get("Status") or "observed"
+    port, published_ports = _container_port_details(container)
+    discovered_services.append(
+        dict(
+            service_name=logical_service,
+            process_name="docker",
+            port=port,
+            status=status,
+            metadata_json=dict(
+                runtime="docker",
+                container_name=container_name,
+                container_id=(container.get("Id") or "")[:12],
+                image=config.get("Image") or "",
+                labels=labels,
+                state_status=state.get("Status") or "",
+                health_status=health.get("Status") or "",
+                published_ports=published_ports,
+                networks=list(((container.get("NetworkSettings") or dict()).get("Networks") or dict()).keys()),
+            ),
+        )
+    )
+
+payload = dict(
+    status="connected",
+    collector_status=os.environ.get("OTEL_STATUS") or "unknown",
+    components=[
+        dict(name="AIOps Supervisor", status="healthy", version="phase3"),
+        dict(
+            name="OpenTelemetry Collector",
+            status=os.environ.get("OTEL_STATUS") or "unknown",
+            version=os.environ.get("OTELCOL_VERSION") or "",
+        ),
+        dict(
+            name="node_exporter",
+            status=os.environ.get("NODE_STATUS") or "unknown",
+            version=os.environ.get("NODE_EXPORTER_VERSION") or "",
+        ),
+        dict(
+            name="aiops-command-agent",
+            status=os.environ.get("AGENT_STATUS") or "unknown",
+            version="embedded-python-agent",
+        ),
+    ],
+    discovered_services=discovered_services,
+    metadata_json=dict(
+        profile=os.environ.get("PROFILE") or "",
+        host=os.environ.get("HOSTNAME_VALUE") or "",
+        ip=os.environ.get("PRIMARY_IP") or "",
+        container_runtime="docker" if docker_snapshot["available"] else "none",
+        docker_available=docker_snapshot["available"],
+        docker_container_count=len(docker_snapshot["containers"]),
+        docker_error=docker_snapshot["error"],
+        host_systemd_service_count=len(host_snapshot["systemd_services"]),
+        host_listening_service_count=len(host_snapshot["listening_services"]),
+        host_discovery_errors=host_snapshot["errors"],
+    ),
+)
+print(json.dumps(payload))
+PYTHON
 )
 
 curl -fsS -X POST "$CONTROL_PLANE/genai/fleet/targets/$TARGET_ID/heartbeat/" \
@@ -6811,7 +7398,7 @@ HEARTBEAT
   cat > /etc/systemd/system/aiops-heartbeat.service <<HB
 [Unit]
 Description=AIOps Target Heartbeat
-After=network-online.target otelcol-contrib.service node_exporter.service
+After=network-online.target otelcol-contrib.service node_exporter.service aiops-command-agent.service
 Wants=network-online.target
 
 [Service]
@@ -6837,6 +7424,7 @@ start_services() {{
   systemctl daemon-reload
   systemctl enable --now node_exporter.service
   systemctl enable --now otelcol-contrib.service
+  systemctl enable --now aiops-command-agent.service
   systemctl enable --now aiops-heartbeat.timer
   /usr/local/bin/aiops-heartbeat.sh || true
 }}
@@ -6849,7 +7437,7 @@ write_configs
 enroll_target
 start_services
 
-echo "Installed node_exporter and otelcol-contrib, wrote systemd services, enrolled the host, and enabled heartbeat."
+echo "Installed node_exporter, otelcol-contrib, and aiops-command-agent, wrote systemd services, enrolled the host, and enabled heartbeat."
 """
     return HttpResponse(script, content_type="text/plain")
 

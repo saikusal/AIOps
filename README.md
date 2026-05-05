@@ -44,26 +44,29 @@ The implemented stack already supports that story:
 ## Architecture Summary
 
 ```text
-┌──────────────────────────────── YOUR NETWORK ────────────────────────────────┐
+┌──────────────────────────────── CUSTOMER NETWORK ────────────────────────────┐
 │                                                                              │
-│  User / Operator                                                             │
-│       │                                                                      │
+│  Control Plane Host                                                          │
 │       ├── React UI (frontend/, :8089)                                        │
-│       └── Django control plane (genai + doc_search, :8000)                   │
-│                    │                                                         │
-│                    ├── PostgreSQL + Redis                                    │
-│                    ├── Prometheus / Alertmanager / Jaeger / Elasticsearch    │
-│                    ├── vLLM + Qwen (local inference, no telemetry egress)    │
-│                    ├── control-agent / db-agent                              │
-│                    └── Code-context engine                                   │
-│                        ├── local repository indexes                          │
-│                        ├── service -> repo ownership                         │
-│                        ├── route -> handler mapping                          │
-│                        ├── span -> symbol mapping                            │
-│                        └── recent commit / snippet enrichment                │
+│       ├── Django control plane (genai + doc_search, :8000)                   │
+│       ├── PostgreSQL + Redis                                                 │
+│       ├── Prometheus / Alertmanager / Jaeger / Elasticsearch                 │
+│       ├── vLLM + Qwen (local inference, no telemetry egress)                 │
+│       ├── control-agent / db-agent                                           │
+│       └── Code-context engine                                                │
+│           ├── local repository indexes                                       │
+│           ├── service -> repo ownership                                      │
+│           ├── route -> handler mapping                                       │
+│           ├── span -> symbol mapping                                         │
+│           └── recent commit / snippet enrichment                             │
 │                                                                              │
-│  Demo application plane                                                      │
-│       frontend -> gateway -> app-orders / app-inventory / app-billing -> db │
+│  Monitored Linux Servers                                                     │
+│       ├── aiops-agent                                                        │
+│       ├── OpenTelemetry Collector                                            │
+│       ├── node_exporter                                                      │
+│       ├── log shipping / discovery                                           │
+│       └── optional Docker runtime                                            │
+│           └── applications and containers                                    │
 │                                                                              │
 └────────────────────────────── No external AI calls ──────────────────────────┘
 ```
@@ -158,6 +161,17 @@ Relevant code:
 
 ## Deployment
 
+### Deployment Model
+
+The current product shape is:
+
+- **Today**: self-host the control plane on a customer Linux server using Docker Compose.
+- **Today**: onboard customer Linux servers by installing collectors and an AIOps agent bundle over SSH.
+- **Next**: package the control plane for Kubernetes-based customer environments.
+- **Later**: add first-class Kubernetes onboarding for monitored customer clusters.
+
+This means the product is already self-hosted and centralized, but the monitored estate can be much larger than the single host that runs the control plane.
+
 ### Prerequisites
 
 - Docker + Docker Compose
@@ -221,6 +235,43 @@ For a single named repository:
 ```bash
 docker compose exec web python manage.py sync_code_context --repository customer-portal-demo
 ```
+
+## Fleet Onboarding
+
+The implemented onboarding path is Linux-first.
+
+- the control plane generates an enrollment token and Linux bootstrap command
+- the bootstrap installs `OpenTelemetry Collector`, `node_exporter`, and the AIOps heartbeat/service bundle
+- the target enrolls back into the control plane and starts periodic heartbeat reporting
+- discovered target metadata is used to enrich fleet inventory and code-context registration
+
+Relevant backend endpoints and logic:
+
+- [genai/urls.py](./genai/urls.py)
+- [genai/views.py](./genai/views.py)
+- [genai/models.py](./genai/models.py)
+
+## Docker Workloads On Linux Hosts
+
+If the customer application runs as Docker containers on Linux servers, the onboarding model still starts at the Linux host.
+
+- **Primary target**: the Linux server
+- **Runtime on that target**: Docker
+- **Workloads to discover**: containers, images, ports, health, and logs
+
+The current implementation already supports Linux host enrollment and safe Docker-oriented remediation commands, but it does **not** yet perform full Docker workload auto-discovery during heartbeat. Today the heartbeat reports the installed host-side collectors back to Fleet.
+
+The next step for Docker-aware discovery is:
+
+1. inspect the local Docker runtime from the installed agent
+2. enumerate running containers, image names, ports, labels, and health state
+3. publish those containers as `discovered_services`
+4. map container and service metadata into topology and code-context registration
+
+That keeps the model simple:
+
+- Docker on Linux is treated as a Linux target with an additional runtime discovery layer
+- Kubernetes will be treated separately as a cluster-level onboarding path
 
 ## Main URLs
 

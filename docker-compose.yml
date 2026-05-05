@@ -230,7 +230,7 @@ services:
       context: .
       dockerfile: agent/db-agent.Dockerfile
     environment:
-      AGENT_AUTH_TOKEN: ${AGENT_SECRET_TOKEN:-}
+      AGENT_AUTH_TOKEN: ${AGENT_SECRET_TOKEN:-87959db4d697a53b056f07b4edb5a2618ad0408a4d808b0865d65d06be02fe24}
       AGENT_ALLOWED_COMMANDS_FILE: /app/db_allowed_commands.json
       AGENT_PORT: 9999
       PGPASSWORD: ${POSTGRES_PASSWORD:-password}

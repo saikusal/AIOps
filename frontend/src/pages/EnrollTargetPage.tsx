@@ -48,6 +48,8 @@ export function EnrollTargetPage() {
 
   const profiles = profilesQuery.data || [];
   const onboardingRequests = onboardingQuery.data || [];
+  const blueprint = blueprintQuery.data;
+  const controlPlaneReady = blueprint?.control_plane_ready ?? false;
 
   const activeProfile = useMemo(
     () => profiles.find((profile) => profile.slug === profileName) || profiles[0],
@@ -264,10 +266,33 @@ export function EnrollTargetPage() {
             <p>Unable to generate enrollment instructions right now.</p>
           ) : (
             <>
+              {!blueprint?.control_plane_ready ? (
+                <div className="checklist-panel" style={{ marginBottom: "1rem" }}>
+                  <div className="eyebrow">Control Plane Action Required</div>
+                  <p>The control plane is not ready to install the Linux execution bundle yet.</p>
+                  <ul>
+                    {(blueprint?.missing_requirements || []).map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {(blueprint?.warnings || []).length > 0 ? (
+                <div className="checklist-panel" style={{ marginBottom: "1rem" }}>
+                  <div className="eyebrow">Warnings</div>
+                  <ul>
+                    {(blueprint?.warnings || []).map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
               <div className="fleet-card__meta-grid">
                 <div>
                   <span>Target Type</span>
-                  <strong>{blueprintQuery.data.target_type}</strong>
+                  <strong>{blueprint?.target_type || targetType}</strong>
                 </div>
                 <div>
                   <span>Profile</span>
@@ -275,23 +300,23 @@ export function EnrollTargetPage() {
                 </div>
                 <div>
                   <span>Enrollment Token</span>
-                  <strong>{blueprintQuery.data.token_preview}</strong>
+                  <strong>{blueprint?.token_preview || "pending"}</strong>
                 </div>
                 <div>
-                  <span>Install Mode</span>
-                  <strong>{blueprintQuery.data.install_mode}</strong>
+                  <span>Control Plane</span>
+                  <strong>{blueprint?.control_plane_ready ? "ready" : "action required"}</strong>
                 </div>
               </div>
 
               <div className="code-panel">
                 <div className="eyebrow">Generated Command</div>
-                <pre>{blueprintQuery.data.install_command}</pre>
+                <pre>{blueprint?.install_command || ""}</pre>
               </div>
 
               <div className="checklist-panel">
                 <div className="eyebrow">What this will install</div>
                 <ul>
-                  {blueprintQuery.data.components.map((component) => (
+                  {(blueprint?.components || []).map((component) => (
                     <li key={component}>{component}</li>
                   ))}
                 </ul>
@@ -381,11 +406,18 @@ export function EnrollTargetPage() {
                       type="button"
                       className="action-button action-button--secondary"
                       onClick={() => installMutation.mutate(activeOnboarding.onboarding_id)}
-                      disabled={installMutation.isPending || activeOnboarding.connectivity_status !== "reachable"}
+                      disabled={installMutation.isPending || activeOnboarding.connectivity_status !== "reachable" || !controlPlaneReady}
                     >
                       {installMutation.isPending ? "Installing..." : "Run Remote Install"}
                     </button>
                   </div>
+
+                  {!controlPlaneReady ? (
+                    <div className="checklist-panel">
+                      <div className="eyebrow">Install Blocked</div>
+                      <p>Fix the control-plane prerequisites shown in the Enrollment Blueprint before running remote install.</p>
+                    </div>
+                  ) : null}
 
                   <div className="checklist-panel">
                     <div className="eyebrow">Connectivity Result</div>

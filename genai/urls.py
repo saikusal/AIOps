@@ -60,6 +60,7 @@ urlpatterns = [
     path('anomaly-explain/', views.explain_anomaly_view, name='explain_anomaly'),
     path('change-risk/', views.change_risk_view, name='change_risk'),
     path('fleet/targets/', views.fleet_targets_view, name='fleet_targets'),
+    path('fleet/targets/<str:target_id>/', views.fleet_target_detail_view, name='fleet_target_detail'),
     path('fleet/profiles/', views.fleet_profiles_view, name='fleet_profiles'),
     path('fleet/enroll-blueprint/', views.fleet_enroll_blueprint_view, name='fleet_enroll_blueprint'),
     path('fleet/enroll/', views.fleet_enroll_view, name='fleet_enroll'),

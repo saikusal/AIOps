@@ -8,6 +8,7 @@ import { ChangeRiskPage } from "./pages/ChangeRiskPage";
 import { CodeContextPage } from "./pages/CodeContextPage";
 import { DocumentsPage } from "./pages/DocumentsPage";
 import { EnrollTargetPage } from "./pages/EnrollTargetPage";
+import { FleetTargetPage } from "./pages/FleetTargetPage";
 import { GraphPage } from "./pages/GraphPage";
 import { IngestionPage } from "./pages/IngestionPage";
 import { IncidentsPage } from "./pages/IncidentsPage";
@@ -25,6 +26,7 @@ export function App() {
         <Route path="/" element={<Navigate to="/domain-onboarding" replace />} />
         <Route path="/domain-onboarding" element={<EnrollTargetPage />} />
         <Route path="/ingestion" element={<IngestionPage />} />
+        <Route path="/fleet/targets/:targetId" element={<FleetTargetPage />} />
         <Route path="/intelligence" element={<PredictionsPage />} />
         <Route path="/alerts" element={<AlertsPage />} />
         <Route path="/incidents" element={<IncidentsPage />} />

@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 from unittest.mock import patch
 
-from django.test import SimpleTestCase, TestCase
+from django.test import RequestFactory, SimpleTestCase, TestCase
 
 from genai.code_context_extractors import extract_python_artifacts
 from genai.code_context_ingestion import auto_register_target_code_context, ensure_builtin_repository_indexes, sync_repository_index
@@ -43,7 +43,8 @@ from genai.policy_engine import (
 )
 from genai.replay_evaluation import build_replay_scores
 from genai.typed_actions import command_from_typed_action, infer_typed_action
-from genai.models import CodeChangeRecord, RepositoryIndex, RouteBinding, ServiceRepositoryBinding, SpanBinding, SymbolRelation, Target
+from genai.models import CodeChangeRecord, DiscoveredService, RepositoryIndex, RouteBinding, ServiceRepositoryBinding, SpanBinding, SymbolRelation, Target
+from genai.views import _fleet_install_prereqs, _serialize_target, fleet_linux_install_script_view
 
 
 class MCPClientTests(SimpleTestCase):
@@ -665,3 +666,77 @@ def health():
         owner = find_service_owner(service_name="app-orders", application_name="customer-portal")
         self.assertTrue(owner["ok"])
         self.assertEqual(owner["repository"], "customer-portal-demo")
+
+
+class FleetInstallScriptTests(SimpleTestCase):
+    @patch.dict("os.environ", {"AGENT_SECRET_TOKEN": ""}, clear=False)
+    def test_fleet_install_prereqs_require_agent_secret_token_for_linux(self):
+        prereqs = _fleet_install_prereqs("linux")
+        self.assertFalse(prereqs["control_plane_ready"])
+        self.assertTrue(prereqs["missing_requirements"])
+
+    def test_linux_install_script_includes_optional_docker_discovery(self):
+        request = RequestFactory().get("/genai/fleet/install/linux/")
+        response = fleet_linux_install_script_view(request)
+        script = response.content.decode("utf-8")
+
+        self.assertIn('shutil.which("docker")', script)
+        self.assertIn('docker socket not found', script)
+        self.assertIn('docker_container_count=', script)
+        self.assertIn('docker inspect', script)
+        self.assertIn('["docker", "restart"]', script)
+        self.assertIn('systemctl_binary = shutil.which("systemctl")', script)
+        self.assertIn('"list-units", "--type=service", "--state=running"', script)
+        self.assertIn('ss_binary = shutil.which("ss")', script)
+        self.assertIn('"-tulpnH"', script)
+        self.assertIn('container_runtime="docker"', script)
+        self.assertIn('AGENT_AUTH_TOKEN=', script)
+        self.assertIn('aiops-command-agent.service', script)
+        self.assertIn('/opt/aiops-agent/agent_server.py', script)
+
+
+class FleetSerializationTests(TestCase):
+    def test_serialize_target_surfaces_docker_runtime_summary_and_workloads(self):
+        target = Target.objects.create(
+            name="orders-host",
+            target_type="linux",
+            environment="production",
+            hostname="orders-host-1",
+            status="connected",
+            collector_status="healthy",
+            metadata_json={
+                "container_runtime": "docker",
+                "docker_available": True,
+                "docker_container_count": 2,
+            },
+        )
+        DiscoveredService.objects.create(
+            target=target,
+            service_name="node_exporter",
+            process_name="node_exporter",
+            port=9100,
+            status="observed",
+            metadata_json={},
+        )
+        DiscoveredService.objects.create(
+            target=target,
+            service_name="app-orders",
+            process_name="docker",
+            port=8080,
+            status="running",
+            metadata_json={
+                "runtime": "docker",
+                "container_name": "aiops-app-orders",
+                "image": "customer/orders:2026.05.05",
+            },
+        )
+
+        payload = _serialize_target(target)
+
+        self.assertEqual(payload["discovered_service_count"], 2)
+        self.assertEqual(payload["runtime_summary"]["container_runtime"], "docker")
+        self.assertTrue(payload["runtime_summary"]["docker_available"])
+        self.assertEqual(payload["runtime_summary"]["docker_container_count"], 2)
+        self.assertEqual(payload["runtime_summary"]["host_service_count"], 1)
+        self.assertEqual(len(payload["workload_preview"]), 1)
+        self.assertEqual(payload["workload_preview"][0]["service_name"], "app-orders")

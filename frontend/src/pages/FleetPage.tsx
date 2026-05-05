@@ -10,6 +10,10 @@ function healthTone(status: string) {
   return "critical";
 }
 
+function runtimeLabel(containerRuntime: string) {
+  return containerRuntime === "docker" ? "Docker runtime" : "Host runtime";
+}
+
 export function FleetPage() {
   const refreshQueryOptions = useRefreshQueryOptions();
   const fleetQuery = useQuery({
@@ -62,9 +66,9 @@ export function FleetPage() {
               <p>Targets currently heartbeating and sending control-plane status.</p>
             </article>
             <article className="fleet-summary-card fleet-summary-card--accent">
-              <span>Discovered Services</span>
-              <strong>{targets.reduce((sum, target) => sum + target.discovered_service_count, 0)}</strong>
-              <p>Services discovered across enrolled Linux targets in the Phase 1 model.</p>
+              <span>Docker Workloads</span>
+              <strong>{targets.reduce((sum, target) => sum + target.runtime_summary.docker_container_count, 0)}</strong>
+              <p>Containers discovered across Linux targets that expose a Docker runtime.</p>
             </article>
           </section>
 
@@ -74,7 +78,11 @@ export function FleetPage() {
                 <div className="fleet-card__top">
                   <div>
                     <div className="eyebrow">{target.target_type}</div>
-                    <h3>{target.name}</h3>
+                    <h3>
+                      <Link className="shell__link shell__link--small" to={`/fleet/targets/${encodeURIComponent(target.target_id)}`}>
+                        {target.name}
+                      </Link>
+                    </h3>
                     <p>{target.hostname} · {target.environment}</p>
                   </div>
                   <span className={`fleet-status fleet-status--${healthTone(target.status)}`}>{target.status}</span>
@@ -94,8 +102,8 @@ export function FleetPage() {
                     <strong>{target.discovered_service_count}</strong>
                   </div>
                   <div>
-                    <span>Collector</span>
-                    <strong>{target.collector_status}</strong>
+                    <span>Runtime</span>
+                    <strong>{runtimeLabel(target.runtime_summary.container_runtime)}</strong>
                   </div>
                 </div>
 
@@ -107,7 +115,35 @@ export function FleetPage() {
                   ))}
                 </div>
 
+                <div className="fleet-card__components">
+                  <span className={`fleet-pill fleet-pill--${healthTone(target.collector_status)}`}>
+                    Collector: {target.collector_status}
+                  </span>
+                  <span className={`fleet-pill fleet-pill--${target.runtime_summary.docker_available ? "healthy" : "warning"}`}>
+                    Docker: {target.runtime_summary.docker_available ? `${target.runtime_summary.docker_container_count} containers` : "not detected"}
+                  </span>
+                </div>
+
+                {target.workload_preview.length > 0 ? (
+                  <div className="checklist-panel" style={{ marginTop: "1rem" }}>
+                    <div className="eyebrow">Docker Workloads</div>
+                    <ul>
+                      {target.workload_preview.map((workload) => (
+                        <li key={`${target.target_id}-${workload.container_name || workload.service_name}`}>
+                          {workload.service_name}
+                          {workload.port ? ` :${workload.port}` : ""}
+                          {workload.image ? ` · ${workload.image}` : ""}
+                          {` · ${workload.status}`}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
                 <div className="page-card__meta">
+                  <Link className="shell__link shell__link--small" to={`/fleet/targets/${encodeURIComponent(target.target_id)}`}>
+                    View Runtime
+                  </Link>
                   <Link className="shell__link shell__link--small" to="/enroll">
                     Enroll Another Target
                   </Link>

@@ -729,6 +729,27 @@ export type FleetComponentStatus = {
   status: string;
 };
 
+export type FleetRuntimeSummary = {
+  container_runtime: string;
+  docker_available: boolean;
+  docker_container_count: number;
+  host_service_count: number;
+  host_application_service_count: number;
+  host_support_service_count: number;
+  docker_error: string;
+};
+
+export type FleetWorkloadPreview = {
+  service_name: string;
+  process_name: string;
+  port?: number | null;
+  status: string;
+  runtime: string;
+  image: string;
+  container_name: string;
+  category?: string;
+};
+
 export type FleetTarget = {
   target_id: string;
   name: string;
@@ -740,7 +761,40 @@ export type FleetTarget = {
   profile_name: string;
   collector_status: string;
   discovered_service_count: number;
+  runtime_summary: FleetRuntimeSummary;
+  workload_preview: FleetWorkloadPreview[];
   components: FleetComponentStatus[];
+};
+
+export type FleetDiscoveredService = FleetWorkloadPreview & {
+  metadata_json?: Record<string, unknown>;
+  owner?: Record<string, unknown>;
+};
+
+export type FleetTargetDetail = FleetTarget & {
+  ip_address: string;
+  os_name: string;
+  os_version: string;
+  metadata_json: Record<string, unknown>;
+  docker_workloads: FleetDiscoveredService[];
+  host_services: FleetDiscoveredService[];
+  host_application_services: FleetDiscoveredService[];
+  host_support_services: FleetDiscoveredService[];
+  recent_execution_history: Array<{
+    intent_id: string;
+    execution_type: string;
+    action_type: string;
+    service: string;
+    target_host: string;
+    status: string;
+    dry_run: boolean;
+    requires_approval: boolean;
+    command: string;
+    created_at?: string | null;
+    completed_at?: string | null;
+    typed_action_summary?: string;
+    final_answer?: string;
+  }>;
 };
 
 export type TelemetryProfile = {
@@ -759,6 +813,9 @@ export type EnrollmentBlueprint = {
   install_command: string;
   components: string[];
   next_steps: string[];
+  control_plane_ready: boolean;
+  missing_requirements: string[];
+  warnings: string[];
 };
 
 export type OnboardingRequest = {
@@ -797,6 +854,10 @@ type FleetOnboardingResponse = {
 export async function fetchFleetTargets(): Promise<FleetTarget[]> {
   const payload = await fetchJson<FleetTargetsResponse>("/genai/fleet/targets/");
   return payload.results || [];
+}
+
+export async function fetchFleetTargetDetail(targetId: string): Promise<FleetTargetDetail> {
+  return fetchJson<FleetTargetDetail>(`/genai/fleet/targets/${encodeURIComponent(targetId)}/`);
 }
 
 export async function fetchTelemetryProfiles(): Promise<TelemetryProfile[]> {

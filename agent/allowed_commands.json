@@ -12,7 +12,9 @@
     ["ip", "-s", "link"],
     ["dmesg", "--ctime", "--level=err,warn"],
     ["docker", "logs"],
+    ["docker", "inspect"],
     ["docker", "ps"],
+    ["docker", "restart"],
     ["kubectl", "get"],
     ["kubectl", "describe"],
     ["kubectl", "logs"]
