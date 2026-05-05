@@ -123,7 +123,7 @@ def _token_matches_in_text(tokens: List[str], text: str) -> List[str]:
     return found
 
 # ====== LLM call wrapper for content moderation ======
-def call_aide_completions(prompt: str, timeout: int = 60) -> Tuple[bool, dict]:
+def call_llm_completions(prompt: str, timeout: int = 60) -> Tuple[bool, dict]:
     """Call the vLLM backend for content moderation analysis."""
     from genai.llm_backend import query_llm
     ok, _status, text = query_llm(prompt)
@@ -191,11 +191,11 @@ def scan_url_for_unwanted(url: str):
     if not text_clean or len(text_clean) < 100:
         return {"description": "Page was empty or too short to analyze.", "verdict":"review", "reasons":["no_text_fetched"], "severity":"low", "confidence":0.35, "evidence":[]}
 
-    # Build chunks and call AiDE moderation for deeper check
+    # Build chunks and call the local LLM for deeper moderation analysis
     chunks = chunk_text(text_clean)
     prompt = build_moderation_prompt(title, url, chunks[:TOP_K_CHUNKS])
 
-    ok, resp = call_aide_completions(prompt)
+    ok, resp = call_llm_completions(prompt)
     if not ok:
         return {"description": "AI analysis failed.", "verdict": "review", "reasons": ["llm_call_failed"], "severity":"medium", "confidence":0.5, "evidence":[str(resp)[:200]]}
 

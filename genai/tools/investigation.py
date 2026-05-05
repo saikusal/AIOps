@@ -29,6 +29,57 @@ def extract_investigation_scope(question: str, body: Dict[str, Any]) -> Dict[str
     return scope
 
 
+def _infer_runtime_entities_from_question(
+    question: str,
+    *,
+    build_application_overview: Callable[..., Dict[str, Any]],
+) -> Dict[str, str]:
+    text = (question or "").lower()
+    if not text:
+        return {"application": "", "service": ""}
+
+    try:
+        overview = build_application_overview(include_ai=False, include_predictions=False)
+    except Exception:
+        return {"application": "", "service": ""}
+
+    best_application = ""
+    best_service = ""
+    best_score = 0
+
+    for application in overview.get("results", []):
+        if not isinstance(application, dict):
+            continue
+        app_key = str(application.get("application") or "")
+        app_title = str(application.get("title") or "")
+        app_tokens = {app_key.lower(), app_title.lower()}
+        app_score = sum(3 for token in app_tokens if token and token in text)
+        if app_score > best_score and app_key:
+            best_score = app_score
+            best_application = app_key
+
+        for component in application.get("components", []):
+            if not isinstance(component, dict):
+                continue
+            service_name = str(component.get("service") or "")
+            target_host = str(component.get("target_host") or "")
+            title = str(component.get("title") or "")
+            tokens = {
+                service_name.lower(),
+                target_host.lower(),
+                title.lower(),
+                service_name.lower().replace("-", " "),
+                service_name.lower().replace("app-", ""),
+            }
+            score = sum(4 if token == service_name.lower() else 3 for token in tokens if token and token in text)
+            if score > best_score and service_name:
+                best_score = score
+                best_service = service_name
+                best_application = app_key or best_application
+
+    return {"application": best_application, "service": best_service}
+
+
 _ACTIVE_INCIDENT_PHRASES = [
     "active incident", "current incident", "latest incident", "the incident",
     "open incident", "ongoing incident", "rca for", "rca", "blast radius",
@@ -560,6 +611,13 @@ def build_investigation_context(
 
     application_key = scope.get("application") or ""
     service = scope.get("service") or ""
+    if not application_key or not service:
+        inferred_scope = _infer_runtime_entities_from_question(
+            question,
+            build_application_overview=build_application_overview,
+        )
+        application_key = application_key or inferred_scope.get("application") or ""
+        service = service or inferred_scope.get("service") or ""
 
     timeline_payload = incident_timeline_payload(incident) if incident else None
     if incident:
@@ -680,7 +738,7 @@ def build_investigation_context(
     route_hint = _extract_route_hint(question, logs)
     span_hints = _extract_trace_span_hints(traces)
     deployment_hint = _extract_deployment_hint(incident, linked_recommendation)
-    if mcp_orchestrator and service_name:
+    if mcp_orchestrator and (service_name or route_hint):
         try:
             owner = mcp_orchestrator.call_tool(
                 "code.find_service_owner",
@@ -701,6 +759,19 @@ def build_investigation_context(
                 route_binding = {}
             if route_binding:
                 code_context["route_binding"] = route_binding
+                if not service_name:
+                    service_name = str(route_binding.get("service_name") or service_name or "")
+                if not owner and route_binding.get("repository"):
+                    owner = {
+                        "ok": True,
+                        "repository": route_binding.get("repository"),
+                        "service_name": service_name,
+                        "application_name": application_key,
+                        "repository_path": "",
+                        "ownership_confidence": route_binding.get("confidence") or 0.5,
+                        "metadata": {"matched_by": "route_binding_repository"},
+                    }
+                    code_context["owner"] = owner
 
         if span_hints:
             try:
@@ -728,7 +799,7 @@ def build_investigation_context(
             if recent_deployments:
                 code_context["recent_deployments"] = recent_deployments
 
-        repository_name = str(((code_context.get("owner") or {}).get("repository") or ""))
+        repository_name = str(((code_context.get("owner") or {}).get("repository") or (code_context.get("route_binding") or {}).get("repository") or ""))
         module_path = str(((code_context.get("route_binding") or {}).get("module_path") or (code_context.get("span_binding") or {}).get("module_path") or ""))
         symbol_name = str(((code_context.get("span_binding") or {}).get("symbol") or (code_context.get("route_binding") or {}).get("handler") or ""))
         if repository_name:

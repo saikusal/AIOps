@@ -15,8 +15,8 @@ Tool layer:
 - MCP servers for telemetry and operations data
 
 Model layer:
-- current AiDE integration first
-- later swappable with local or alternate model gateways
+- current local Qwen via vLLM integration
+- later swappable with alternate self-hosted local models
 
 ## MCP Servers To Build First
 

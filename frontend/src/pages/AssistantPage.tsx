@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   fetchChatSessions,
   initChatSession,
   resetChatSession,
   sendChatMessage,
+  type ChatReply,
   type ChatMessage,
 } from "../lib/api";
 import { useRefreshQueryOptions } from "../lib/refresh";
@@ -19,7 +20,142 @@ type RcaMeta = {
   supporting_evidence?: string[];
   contradicting_evidence?: string[];
   next_verification_step?: string;
+  target_host?: string;
+  business_impact?: Record<string, unknown>;
+  code_context?: Record<string, unknown>;
+  retrieval?: Record<string, unknown>;
 };
+
+function safeRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function safeList(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object" && !Array.isArray(entry)) : [];
+}
+
+function formatCurrency(value: unknown, currency = "INR") {
+  const numeric = typeof value === "number" ? value : Number(value || 0);
+  return new Intl.NumberFormat("en-US", { style: "currency", currency, maximumFractionDigits: 0 }).format(numeric);
+}
+
+function CodeContextPanel({ meta }: { meta: RcaMeta }) {
+  const codeContext = safeRecord(meta.code_context);
+  const owner = safeRecord(codeContext.owner);
+  const routeBinding = safeRecord(codeContext.route_binding);
+  const spanBinding = safeRecord(codeContext.span_binding);
+  const blastRadius = safeRecord(safeRecord(codeContext.blast_radius).blast_radius);
+  const snippets = safeList(codeContext.snippets);
+  const recentChanges = safeList(safeRecord(codeContext.recent_changes).recent_changes);
+  const searchMatches = safeList(safeRecord(codeContext.search_context).matches);
+  const retrieval = safeRecord(meta.retrieval);
+  const toolCalls = Array.isArray(retrieval.tool_calls) ? retrieval.tool_calls.filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object") : [];
+  const businessImpact = safeRecord(meta.business_impact);
+
+  if (!Object.keys(codeContext).length && !Object.keys(businessImpact).length) {
+    return null;
+  }
+
+  return (
+    <div className="assistant-code-context">
+      <div className="assistant-code-context__header">
+        <span className="assistant-code-context__badge">CODE-AWARE INVESTIGATION</span>
+        {owner.repository ? (
+          <div className="assistant-code-context__links">
+            <Link className="shell__link shell__link--small" to={`/code-context?repository=${encodeURIComponent(String(owner.repository))}`}>
+              Open Code Graph
+            </Link>
+            {typeof owner.application_name === "string" && owner.application_name ? (
+              <Link className="shell__link shell__link--small" to={`/topology`}>
+                Open Topology
+              </Link>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+
+      <div className="assistant-code-context__grid">
+        <div className="assistant-code-context__card">
+          <span>Repository</span>
+          <strong>{String(owner.repository || "—")}</strong>
+          <small>{String(owner.repository_path || routeBinding.module_path || spanBinding.module_path || "No repository mapping yet.")}</small>
+        </div>
+        <div className="assistant-code-context__card">
+          <span>Handler / Symbol</span>
+          <strong>{String(routeBinding.handler || spanBinding.symbol || "—")}</strong>
+          <small>{String(routeBinding.route || spanBinding.span_name || "No route/span binding yet.")}</small>
+        </div>
+        <div className="assistant-code-context__card">
+          <span>Blast Radius</span>
+          <strong>{String(blastRadius.risk_level || "—")}</strong>
+          <small>{typeof blastRadius.affected_symbol_count === "number" ? `${blastRadius.affected_symbol_count} related symbols` : "No code blast-radius estimate yet."}</small>
+        </div>
+        <div className="assistant-code-context__card">
+          <span>Business Impact</span>
+          <strong>
+            {Object.keys(businessImpact).length
+              ? formatCurrency(businessImpact.current_estimated_revenue_lost ?? businessImpact.revenue_lost, String(businessImpact.currency || "INR"))
+              : "—"}
+          </strong>
+          <small>{String(businessImpact.impact_level || businessImpact.data_source || "No quantified business impact yet.")}</small>
+        </div>
+      </div>
+
+      {recentChanges.length > 0 ? (
+        <div className="assistant-code-context__section">
+          <span>Recent Changes On The Failure Path</span>
+          <ul>
+            {recentChanges.slice(0, 3).map((change, index) => (
+              <li key={`change-${index}`}>
+                <strong>{String(change.commit_sha || "").slice(0, 7) || "change"}</strong>
+                <span>{String(change.title || "Untitled change")}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {searchMatches.length > 0 ? (
+        <div className="assistant-code-context__section">
+          <span>Relevant Modules</span>
+          <ul>
+            {searchMatches.slice(0, 3).map((match, index) => (
+              <li key={`match-${index}`}>
+                <strong>{String(match.label || match.symbol || "module")}</strong>
+                <span>{String(match.module_path || "unknown path")}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {snippets.length > 0 ? (
+        <div className="assistant-code-context__section">
+          <span>Snippet Evidence</span>
+          {snippets.slice(0, 2).map((snippet, index) => (
+            <article key={`snippet-${index}`} className="assistant-code-context__snippet">
+              <strong>{String(snippet.module_path || snippet.symbol || "code snippet")}</strong>
+              <pre>{String(snippet.snippet || "")}</pre>
+            </article>
+          ))}
+        </div>
+      ) : null}
+
+      {toolCalls.length > 0 ? (
+        <div className="assistant-code-context__trace">
+          <span>Retrieval Trace</span>
+          <div className="assistant-code-context__trace-list">
+            {toolCalls.slice(0, 8).map((tool, index) => (
+              <code key={`tool-${index}`}>
+                {String(tool.tool_name || "tool")} · {String(tool.latency_ms || 0)}ms
+              </code>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function RcaPanel({ meta }: { meta: RcaMeta }) {
   const level = meta.confidence ?? "medium";
@@ -155,24 +291,28 @@ export function AssistantPage() {
       setPendingQuestion("");
       setMessages((current) => [
         ...current,
-        {
-          id: Date.now() + 1,
-          role: "assistant",
-          content: payload.answer || "No answer returned.",
-          created_at: new Date().toISOString(),
-          metadata: {
-            follow_up_questions: payload.follow_up_questions,
-            confidence: payload.confidence,
-            confidence_reason: payload.confidence_reason,
-            decision_policy: payload.decision_policy,
-            hard_evidence: payload.hard_evidence,
-            missing_evidence: payload.missing_evidence,
-            supporting_evidence: payload.supporting_evidence,
-            contradicting_evidence: payload.contradicting_evidence,
-            next_verification_step: payload.next_verification_step,
-          },
-        },
-      ]);
+                {
+                  id: Date.now() + 1,
+                  role: "assistant",
+                  content: payload.answer || "No answer returned.",
+                  created_at: new Date().toISOString(),
+                  metadata: {
+                    follow_up_questions: payload.follow_up_questions,
+                    confidence: payload.confidence,
+                    confidence_reason: payload.confidence_reason,
+                    decision_policy: payload.decision_policy,
+                    hard_evidence: payload.hard_evidence,
+                    missing_evidence: payload.missing_evidence,
+                    supporting_evidence: payload.supporting_evidence,
+                    contradicting_evidence: payload.contradicting_evidence,
+                    next_verification_step: payload.next_verification_step,
+                    target_host: payload.target_host,
+                    business_impact: payload.business_impact,
+                    code_context: payload.code_context,
+                    retrieval: payload.retrieval,
+                  },
+                },
+              ]);
       if (payload.session_id) {
         setActiveSessionId(payload.session_id);
       }
@@ -295,7 +435,10 @@ export function AssistantPage() {
                 <div className="assistant-message__role">{message.role}</div>
                 <div className="assistant-message__content">{renderMessageContent(message.content)}</div>
                 {message.role === "assistant" && Boolean(message.metadata?.confidence) && (
-                  <RcaPanel meta={message.metadata as RcaMeta} />
+                  <>
+                    <RcaPanel meta={message.metadata as RcaMeta} />
+                    <CodeContextPanel meta={message.metadata as RcaMeta} />
+                  </>
                 )}
               </article>
             ))}

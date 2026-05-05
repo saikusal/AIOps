@@ -59,10 +59,13 @@ logger = logging.getLogger("doc_search")
 logger.setLevel(logging.INFO)
 
 # Config (env)
-AIDE_API_URL = os.getenv("AIDE_API_URL")  # completions endpoint (completions route)
-AIDE_API_KEY = os.getenv("AIDE_API_KEY")
-VERIFY_SSL = os.getenv("AIDE_VERIFY_SSL", "true").lower() not in ("false", "0", "no")
-AIDE_TIMEOUT = int(os.getenv("AIDE_TIMEOUT", "60"))
+VLLM_API_URL = os.getenv("VLLM_API_URL")
+VLLM_API_KEY = os.getenv("VLLM_API_KEY")
+VLLM_MODEL_NAME = os.getenv("VLLM_MODEL_NAME", "qwen32b")
+VLLM_VISION_MODEL_NAME = os.getenv("VLLM_VISION_MODEL_NAME", VLLM_MODEL_NAME)
+VLLM_EMBEDDING_URL = os.getenv("VLLM_EMBEDDING_URL", "")
+VERIFY_SSL = os.getenv("VLLM_VERIFY_SSL", "true").lower() not in ("false", "0", "no")
+VLLM_TIMEOUT = int(os.getenv("VLLM_TIMEOUT", "60"))
 
 CONFLUENCE_BASE = os.getenv("CONFLUENCE_BASE")  # e.g. https://your-org.atlassian.net/wiki
 CONFLUENCE_USER = os.getenv("CONFLUENCE_USER")
@@ -325,14 +328,16 @@ def _extract_text_from_doc_bytes(document: Document, data: bytes) -> str:
     return ""
 
 
-def call_aide_vision_completions(prompt: str, base64_images: List[str], timeout: int = 120):
+def call_vllm_vision_completions(prompt: str, base64_images: List[str], timeout: int = 120):
     """
-    Wrapper to call a vision-enabled AiDE completions endpoint.
+    Wrapper to call a vision-enabled vLLM completions endpoint.
     """
-    if not AIDE_API_URL or not AIDE_API_KEY:
-        return False, {"error": "AIDE_API_URL or AIDE_API_KEY not configured"}
+    if not VLLM_API_URL:
+        return False, {"error": "VLLM_API_URL not configured"}
     
-    headers = {"Authorization": f"Bearer {AIDE_API_KEY}", "Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json"}
+    if VLLM_API_KEY:
+        headers["Authorization"] = f"Bearer {VLLM_API_KEY}"
     
     # Construct the messages payload with images
     messages = [
@@ -351,14 +356,12 @@ def call_aide_vision_completions(prompt: str, base64_images: List[str], timeout:
             }
         })
 
-    # NOTE: This assumes your vision model is available at the same base URL.
-    # You may need a different URL or model name.
-    payload = {"messages": messages, "model": "aide-vision"} 
+    payload = {"messages": messages, "model": VLLM_VISION_MODEL_NAME}
 
     try:
-        r = requests.post(AIDE_API_URL, headers=headers, json=payload, timeout=timeout, verify=VERIFY_SSL)
+        r = requests.post(VLLM_API_URL, headers=headers, json=payload, timeout=timeout, verify=VERIFY_SSL)
     except Exception as e:
-        logger.exception("AIDE Vision request error: %s", e)
+        logger.exception("vLLM vision request error: %s", e)
         return False, {"error": str(e)}
 
     try:
@@ -367,7 +370,7 @@ def call_aide_vision_completions(prompt: str, base64_images: List[str], timeout:
         return False, {"error": f"Non-json response {r.status_code}", "text": r.text[:2000]}
 
     if r.status_code >= 400:
-        return False, {"error": f"AIDE Vision HTTP {r.status_code}", "body": j}
+        return False, {"error": f"vLLM vision HTTP {r.status_code}", "body": j}
 
     try:
         if isinstance(j, dict) and "choices" in j and j["choices"]:
@@ -426,7 +429,7 @@ def _analyze_visual_media(document: Document, data: bytes, ext: str, max_frames=
         return ""
 
     prompt = "Describe the content of this image/these video frames in detail. What is happening? What objects are visible? If there is text, transcribe it."
-    ok, resp = call_aide_vision_completions(prompt, base64_images)
+    ok, resp = call_vllm_vision_completions(prompt, base64_images)
 
     if not ok:
         logger.error(f"Vision AI analysis failed for doc {document.id}: {resp.get('error')}")
@@ -570,8 +573,8 @@ def query_tfidf(vectorizer, matrix, chunks, query, top_k=4):
         results.append((int(i), chunks[int(i)], float(sims[int(i)])))
     return results
 
-# ----------------- AiDE calls -----------------
-def get_embedding_aide(text: str, api_url: str, api_key: str, verify: bool = True) -> Tuple[bool, dict]:
+# ----------------- vLLM / local model helpers -----------------
+def get_embedding_vllm(text: str, api_url: str, api_key: str, verify: bool = True) -> Tuple[bool, dict]:
     """
     Call embedding endpoint. Returns (ok, parsed_json_or_error_str)
     """
@@ -602,20 +605,19 @@ def extract_embedding_from_response(data) -> List[float]:
             return list(data["embedding"])
     return None
 
-def call_aide_completions(prompt: str, timeout: int = None):
+def call_llm_completions(prompt: str, timeout: int = None):
     """
-    Wrapper to call the main AiDE API, which includes fallback logic.
+    Wrapper to call the main local vLLM API.
     This avoids circular imports by importing locally.
     """
-    from genai.views import query_aide_api
+    from genai.views import query_llm
 
-    ok, status, body_text = query_aide_api(prompt)
+    ok, status, body_text = query_llm(prompt)
 
     if not ok:
-        # The query_aide_api function already logs the error details.
-        return False, {"error": f"AIDE call failed with status {status}", "detail": body_text}
+        return False, {"error": f"LLM call failed with status {status}", "detail": body_text}
     
-    # The successful response from query_aide_api is the text content.
+    # The successful response from query_llm is the text content.
     # We wrap it in a dict to match the original expected format of this function.
     return True, {"text": body_text}
 
@@ -906,10 +908,10 @@ def search_documents(request: HttpRequest):
     if not use_documents:
         logger.info("search_documents -> GENERAL LLM path for query: %s", query)
         prompt = f"You are a helpful assistant.\n\nQUESTION: {query}\n\nANSWER:"
-        ok, resp = call_aide_completions(prompt)
+        ok, resp = call_llm_completions(prompt)
         if not ok:
-            logger.error("AIDE completion failed (general): %s", resp)
-            return JsonResponse({"error": "AIDE_completion_failed", "detail": resp}, status=500)
+            logger.error("LLM completion failed (general): %s", resp)
+            return JsonResponse({"error": "llm_completion_failed", "detail": resp}, status=500)
         answer_text = resp.get("text") if isinstance(resp, dict) else str(resp)
         return JsonResponse({"question": query, "answer": answer_text, "sources": [], "raw_model": resp})
 
@@ -1002,10 +1004,10 @@ def search_documents(request: HttpRequest):
     else:
         prompt = "You may supplement your answer with general knowledge if the context is insufficient.\n" + base_prompt
 
-    ok, resp = call_aide_completions(prompt)
+    ok, resp = call_llm_completions(prompt)
     if not ok:
-        logger.error("AIDE completion failed (RAG): %s", resp)
-        return JsonResponse({"error": "AIDE_completion_failed", "detail": resp}, status=500)
+        logger.error("LLM completion failed (RAG): %s", resp)
+        return JsonResponse({"error": "llm_completion_failed", "detail": resp}, status=500)
 
     try:
         # The response should be a JSON string.

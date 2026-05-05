@@ -219,7 +219,7 @@ Then:
 - observe frontend slowdown
 - watch Prometheus / Alertmanager
 - open AIOps recommendations
-- let AiDE analyze RCA
+- let the local Qwen model analyze RCA
 
 Recover:
 

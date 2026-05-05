@@ -12,7 +12,7 @@ The backend remains responsible for:
 - session management
 - incidents
 - predictions
-- AiDE integration
+- local Qwen via vLLM integration
 - document search / RAG
 - alert ingestion
 - command orchestration

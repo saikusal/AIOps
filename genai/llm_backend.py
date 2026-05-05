@@ -5,8 +5,6 @@ Calls the self-hosted vLLM endpoint (OpenAI-compatible API).
 Returns the same signature used throughout the codebase:
     (ok: bool, status_code: int, text: str)
 
-Backward-compatible alias:
-    query_aide_api = query_llm   (existing callers continue to work)
 """
 
 import json
@@ -141,7 +139,3 @@ def _query_vllm(prompt: str) -> Tuple[bool, int, str]:
 def query_llm(prompt: str) -> Tuple[bool, int, str]:
     """Call vLLM. Returns (ok, status_code, text)."""
     return _query_vllm(prompt)
-
-
-# Backward-compatible alias — existing callers use query_aide_api(prompt)
-query_aide_api = query_llm

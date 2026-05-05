@@ -286,6 +286,9 @@ export type ChatReply = {
   workflow?: WorkflowStage[];
   suggested_command?: string;
   target_host?: string;
+  business_impact?: Record<string, unknown>;
+  code_context?: Record<string, unknown>;
+  retrieval?: Record<string, unknown>;
   is_destructive?: boolean;
   preview_text?: string;
   generated_sql?: string;

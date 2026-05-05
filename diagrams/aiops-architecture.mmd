@@ -1,16 +1,28 @@
 flowchart LR
-    user[User Browser]
-    google[Google OAuth]
+    user[User / Operator]
+    oauth[Google OAuth]
 
-    subgraph ui[AIOps Control Plane]
+    subgraph ui[Experience Plane]
+        react[React Product UI]
+        django_ui[Django Template UI]
+    end
+
+    subgraph control[AIOps Control Plane]
         web[Django Web App<br/>genai + doc_search]
         pg[(PostgreSQL)]
         redis[(Redis)]
-        aide[AiDE LLM]
-        agent[App Agents / db-agent]
+        vllm[Self-Hosted vLLM<br/>Qwen Local Model]
+        agents[control-agent / db-agent]
+        codectx[Code Context Engine]
     end
 
-    subgraph demo[Demo Application Plane]
+    subgraph repos[Local Source Plane]
+        repo[(Local Repositories)]
+        gitmeta[Recent Git Changes]
+        bindings[Routes / Spans / Symbols]
+    end
+
+    subgraph app[Application Plane]
         frontend[Frontend Nginx]
         gateway[Gateway Nginx]
         orders[app-orders]
@@ -33,13 +45,23 @@ flowchart LR
         ngxexp[Nginx Exporters]
     end
 
-    google --> web
-    user --> web
+    user --> react
+    user --> django_ui
+    react --> web
+    django_ui --> web
+    oauth --> web
 
     web --> pg
     web --> redis
-    web --> aide
-    web --> agent
+    web --> vllm
+    web --> agents
+    web --> codectx
+
+    codectx --> repo
+    codectx --> gitmeta
+    codectx --> bindings
+    repo --> gitmeta
+    repo --> bindings
 
     user --> frontend
     frontend --> gateway
@@ -51,15 +73,15 @@ flowchart LR
     billing --> toxiproxy
     toxiproxy --> db
 
-    web --> prometheus
-    web --> jaeger
-    web --> elastic
-
     alertmanager --> web
     prometheus --> alertmanager
     grafana --> prometheus
     grafana --> jaeger
     grafana --> elastic
+
+    web --> prometheus
+    web --> jaeger
+    web --> elastic
 
     web --> otel
     orders --> otel

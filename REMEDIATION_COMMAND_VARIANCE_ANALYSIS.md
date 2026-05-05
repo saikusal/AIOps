@@ -44,11 +44,11 @@ The system stores alert recommendations in cache (line 3829-3854: `_store_recent
 VLLM_TEMPERATURE = float(os.getenv("VLLM_TEMPERATURE", "0.0"))  # Changed from 0.1 to 0.0
 ```
 
-**Change 2:** Add temperature parameter to AIDE API (Line 103)
+**Change 2:** Add temperature parameter to the vLLM request payload (Line 103)
 ```python
 payload = {
     "messages": [{"role": "user", "content": prompt}],
-    "temperature": 0.0,  # Add explicit temperature for AIDE
+    "temperature": 0.0,  # Add explicit temperature for vLLM
 }
 ```
 
@@ -109,7 +109,7 @@ def _log_remediation_variance(alert_name: str, target_host: str,
 ## Implementation Checklist
 
 - [ ] **Step 1:** Update `VLLM_TEMPERATURE` default to `0.0` in `.env` or `llm_backend.py` Line 50
-- [ ] **Step 2:** Add temperature parameter to AIDE payload in `llm_backend.py` Lines 100-105
+- [ ] **Step 2:** Add temperature parameter to the vLLM payload in `llm_backend.py` Lines 100-105
 - [ ] **Step 3:** Add caching helper functions in `genai/views.py` 
 - [ ] **Step 4:** Integrate cache checking in `analyze_command_output()` 
 - [ ] **Step 5:** Add variance logging for monitoring/debugging
@@ -123,7 +123,7 @@ Add/Update `.env`:
 # Force deterministic remediation
 VLLM_TEMPERATURE=0.0
 VLLM_MAX_TOKENS=2048
-AIDE_API_URL_TEMPERATURE=0.0  # If AIDE API supports it
+VLLM_TEMPERATURE=0.0
 ```
 
 ## Verification Plan

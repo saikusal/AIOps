@@ -521,7 +521,7 @@
     <section class="hero">
       <h1>Alert Recommendations</h1>
       <p>
-        This view shows recent AiDE recommendations generated from Prometheus and Alertmanager alerts.
+        This view shows recent local AI recommendations generated from Prometheus and Alertmanager alerts.
         When a recommendation contains a target app container and an executable command, you can trigger the in-container agent directly from here.
       </p>
       <div class="meta">
@@ -731,7 +731,7 @@
         name: source,
         type: "source",
         subtitle: "Suspected root cause",
-        description: "This node is the current best root-cause candidate from AiDE's analysis.",
+        description: "This node is the current best root-cause candidate from the local model's analysis.",
         x: centerX,
         y: centerY,
         radius: isFocusedGraph ? 66 : 56,

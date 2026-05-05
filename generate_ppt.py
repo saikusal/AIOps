@@ -182,7 +182,7 @@ cards = [
     ("🔭  Unified Observability", ACCENT_BLUE,
      "Applications, services, incidents, alerts, predictions, and topology in one React control plane"),
     ("🤖  AI-Guided Response", ACCENT_CYAN,
-     "AiDE LLM integration for root cause analysis, diagnostic planning, and remediation command generation"),
+     "Self-hosted Qwen via vLLM for root cause analysis, diagnostic planning, and remediation command generation"),
     ("📡  Real-time Signals", ACCENT_PURPLE,
      "Prometheus metrics, Alertmanager webhooks, Elasticsearch logs, and Jaeger traces stitched together"),
     ("🛡️  Incident Lifecycle", ACCENT_RED,
@@ -286,7 +286,7 @@ steps = [
     ("2\nAlertmanager\nWebhook POST", ACCENT_RED),
     ("3\n/genai/alerts\n/ingest/", ACCENT_BLUE),
     ("4\nNormalize\nPayload", ACCENT_CYAN),
-    ("5\nAiDE LLM\nRCA Call", ACCENT_PURPLE),
+    ("5\nQwen vLLM\nRCA Call", ACCENT_PURPLE),
     ("6\nStore in Redis\nCache", ACCENT_GREEN),
     ("7\nFrontend\npoll /recent/", ACCENT_BLUE),
 ]
@@ -338,11 +338,11 @@ add_text(slide, "Root cause of stale UI bug → Redis key `aiops_recent_alert_re
 # ═══════════════════════════════════════════════════════════════════════════════
 slide = blank_slide()
 section_header(slide, "AI INTEGRATION", "AI-Guided Diagnosis & Remediation",
-               "AiDE LLM drives root cause analysis, diagnostic commands, and remediation planning", ACCENT_PURPLE)
+               "Self-hosted Qwen on vLLM drives root cause analysis, diagnostic commands, and remediation planning", ACCENT_PURPLE)
 
 flow = [
     ("Alert Context\nCollection",     "Prometheus metrics\nElasticsearch logs\nJaeger traces",    ACCENT_AMBER),
-    ("AiDE LLM\nRCA Call",            "Structured prompt:\nAlert + metrics + logs\n→ JSON response", ACCENT_PURPLE),
+    ("Qwen vLLM\nRCA Call",            "Structured prompt:\nAlert + metrics + logs\n→ JSON response", ACCENT_PURPLE),
     ("Diagnostic Plan\nExtraction",   "root_cause · evidence\nimpact · resolution\nremediation_cmd",  ACCENT_CYAN),
     ("Command\nDelegation",           "DB-agent or\nControl-agent\nover HTTP",                     ACCENT_BLUE),
     ("Output\nAnalysis",              "Post-command\nAI analysis call\n→ final_answer",             ACCENT_GREEN),
@@ -367,7 +367,7 @@ for i, (title, detail, color) in enumerate(flow):
     add_text(slide, detail, bx + Inches(0.15), by + Inches(0.75), bw * 2.05 - Inches(0.3), Inches(1.3),
              size=Pt(11), color=OFF_WHITE)
 
-add_text(slide, "Dual AiDE endpoint support (primary + secondary) with retry/backoff and SSL toggle",
+add_text(slide, "Self-hosted vLLM endpoint with local model configuration and controlled retry behavior",
          Inches(0.2), Inches(7.0), Inches(12.9), Inches(0.35),
          size=Pt(10), italic=True, color=MUTED)
 
@@ -408,7 +408,7 @@ stages = [
     ("Incident Created", ACCENT_RED,
      "_correlate_alert_to_incident() — dedup by fingerprint, create or reuse"),
     ("AI Analysis", ACCENT_PURPLE,
-     "collect_alert_context() → AiDE RCA → diagnostic plan extracted"),
+     "collect_alert_context() → Qwen RCA → diagnostic plan extracted"),
     ("Timeline Events", ACCENT_BLUE,
      "IncidentTimelineEvent records each command + analysis step"),
     ("Resolution", ACCENT_GREEN,
@@ -667,8 +667,8 @@ categories = [
         "Toxiproxy (chaos testing)",
     ]),
     ("AI", ACCENT_AMBER, [
-        "AiDE LLM API (primary)",
-        "AiDE secondary endpoint",
+        "vLLM API endpoint",
+        "Local Qwen model",
         "Retry + backoff adapter",
         "Structured JSON prompts",
         "better-profanity filter",
@@ -705,7 +705,7 @@ section_header(slide, "SECURITY", "Security & Repo Hygiene",
 
 done = [
     ("Secrets Removed from History",
-     "git filter-branch stripped GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, AIDE_API_KEY from all commits. Force-pushed clean main.", ACCENT_GREEN),
+     "git filter-branch stripped GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and deprecated model secrets from all commits. Force-pushed clean main.", ACCENT_GREEN),
     ("docker-compose.yml Sanitised",
      "All credentials replaced with ${ENV_VAR} references. Defaults are empty or safe placeholders.", ACCENT_GREEN),
     (".env Pattern Added",

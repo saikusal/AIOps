@@ -346,7 +346,7 @@
             <div class="pill">Active alerts: ${entry.active_alert_count || 0}</div>
             <div class="pill">Predicted incident risk next ${entry.prediction?.predicted_window_minutes || 15}m: ${entry.prediction ? Math.round((entry.prediction.risk_score || 0) * 100) : 0}%</div>
           </div>
-          <div class="section-title">AiDE Insight</div>
+          <div class="section-title">AI Insight</div>
           <p>${entry.ai_insight || "-"}</p>
           <div class="section-title">Blast Radius</div>
           <div class="tiny-list">
@@ -370,7 +370,7 @@
                   <h3>${component.title}</h3>
                   <div class="status ${statusClass(component.status)}">${component.status}</div>
                   <div class="subtle">Target host: ${component.target_host}</div>
-                  <div class="section-title">AiDE Insight</div>
+                  <div class="section-title">AI Insight</div>
                   <p>${component.ai_insight || "-"}</p>
                   <div class="section-title">Prediction</div>
                   <p>${component.prediction ? `${component.prediction.prediction_status} incident risk (${Math.round((component.prediction.risk_score || 0) * 100)}%) in the next ${component.prediction.predicted_window_minutes || 15} minutes` : "Prediction unavailable"}</p>

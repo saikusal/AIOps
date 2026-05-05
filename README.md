@@ -1,184 +1,172 @@
 # AIOps Platform
 
-> **Air-gapped AI Operations. Your data never leaves your infrastructure.**
+> **Air-gapped, self-hosted, code-aware incident operations.**
 
-An enterprise-grade, self-hosted AIOps observability and incident management platform powered by open-source LLMs running entirely within your own environment — no internet connection required, no data sent to third parties.
+This project is an AIOps control plane for teams that want AI-assisted incident investigation and remediation without sending telemetry or source context to external SaaS platforms.
 
----
+The product pitch is simple:
 
-## The Core USP: Truly Air-Gapped AI
+- **Self-hosted**: runs inside your environment on your own infrastructure.
+- **Air-gapped AI**: inference is served locally through `vLLM`.
+- **Code-context aware**: incidents are grounded not only in metrics, logs, and traces, but also in repository ownership, route handlers, spans, symbols, recent commits, and source snippets.
 
-Most AI-powered observability tools require sending your operational data — logs, metrics, traces, incident details, error messages — to external cloud APIs. This creates:
+## What Makes This Different
 
-- **Security exposure** — sensitive infrastructure telemetry transmitted to third-party services
-- **Compliance risk** — violations of data residency, GDPR, PCI-DSS, or internal data classification policies
-- **Dependency risk** — outages when the external AI service is unavailable
-- **Egress cost** — continuous data transfer charges at scale
+Most observability copilots can summarize dashboards. This platform is aimed at the next step:
 
-**This platform eliminates all of the above.**
+1. ingest alerts and correlate incidents,
+2. retrieve telemetry evidence,
+3. map the failure back to code,
+4. suggest the safest validation or remediation path,
+5. optionally execute allowlisted actions through controlled agents.
 
-The AI engine runs on your own hardware using **[Qwen2.5-7B-Instruct-AWQ](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-AWQ)** served locally via **[vLLM](https://github.com/vllm-project/vllm)**. Every inference call — incident RCA, blast radius analysis, remediation suggestions, post-mortem analysis — executes entirely within your network perimeter. Zero bytes of operational data leave the server.
+The implemented stack already supports that story:
 
----
+- local LLM inference in [genai/llm_backend.py](./genai/llm_backend.py)
+- MCP-style investigation tooling in [genai/mcp_orchestrator.py](./genai/mcp_orchestrator.py)
+- local code indexing and enrichment in [genai/code_context_ingestion.py](./genai/code_context_ingestion.py)
+- runtime-to-code lookups in [genai/code_context_services.py](./genai/code_context_services.py)
+- code-aware assistant and graph UX in [frontend/src/pages/AssistantPage.tsx](./frontend/src/pages/AssistantPage.tsx) and [frontend/src/pages/CodeContextPage.tsx](./frontend/src/pages/CodeContextPage.tsx)
 
-## Dual-LLM Architecture: Local-First with Optional Fallback
+## Core Capabilities
 
-All AI calls go through vLLM — a self-hosted, air-gapped inference server running Qwen2.5 on your GPU. No external API keys required, no data leaves the server.
-
-| Mode | LLM | Internet Required | Data Leaves Server | GPU Required |
-|---|---|---|---|---|
-| `vllm` | Qwen2.5-7B-Instruct-AWQ | ❌ No | ❌ Never | ✅ Yes (A10G / similar) |
-
-- All AI calls go to the local Qwen model running in a vLLM container on your GPU server. No network egress.
-- The same call path (`query_llm()`) is used across all features: investigation, RCA, command analysis, remediation planning, post-mortem generation.
-
----
-
-## What the Platform Does
-
-Operators get a single workspace for the entire incident lifecycle:
-
-| Capability | Description |
+| Capability | What it does |
 |---|---|
-| **Correlated Incident Workspace** | Alerts correlated into incidents with timeline, graph view, and AI-generated RCA |
-| **AI Investigation** | Ask free-form questions about any incident; AI fetches telemetry context and explains root cause |
-| **Blast Radius Mapping** | Dependency graph-aware impact analysis across services, databases, and infrastructure |
-| **Guided Remediation** | AI proposes concrete remediation commands; operators approve, and the control agent executes them |
-| **Diagnostic Execution** | Run allowlisted diagnostic commands on remote agents with AI analysis of the output |
-| **Post-Remediation Analysis** | Automated AI commentary on whether the remediation resolved the issue |
-| **Predictions & Risk Scoring** | Service-level risk scoring and incident probability forecasting |
-| **Document-Backed Guidance** | Upload runbooks; retrieval-augmented answers grounded in your own operational knowledge |
-| **Revenue Impact Tracking** | Business impact calculation attached to every incident |
+| **Incident correlation** | Groups related alerts into incidents with timeline, severity, blast radius, and investigation context. |
+| **AI investigation** | Pulls metrics, logs, traces, runbooks, topology, and code context into a single grounded answer. |
+| **Code-context awareness** | Resolves service ownership, route handlers, spans, related symbols, recent deployments, and recent commits. |
+| **Source evidence retrieval** | Reads local source snippets and traceback-linked files for prompt grounding. |
+| **Topology + blast radius** | Combines application dependency graph context with code blast radius and runtime impact. |
+| **Guided remediation** | Produces typed actions and approval-aware remediation plans, then delegates execution to agents. |
+| **Prediction + risk** | Tracks service risk scores and short-horizon incident probability. |
+| **Runbook grounding** | Searches uploaded operational documents through `doc_search/`. |
 
----
+## Architecture Summary
 
-## Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                  YOUR NETWORK PERIMETER                  │
-│                                                          │
-│  ┌──────────────┐    ┌──────────────┐                    │
-│  │  React UI    │───▶│  Django API  │                    │
-│  │  (port 8089) │    │  (port 8000) │                    │
-│  └──────────────┘    └──────┬───────┘                    │
-│                             │                            │
-│          ┌──────────────────┼──────────────────┐         │
-│          │                  │                  │         │
-│  ┌───────▼──────┐  ┌────────▼──────┐  ┌───────▼──────┐  │
-│  │   vLLM +     │  │  Prometheus   │  │  PostgreSQL   │  │
-│  │  Qwen2.5-7B  │  │  VictoriaM.   │  │  + Redis     │  │
-│  │  (port 8001) │  │  Grafana      │  │               │  │
-│  │  ← LOCAL AI  │  │  Jaeger       │  │               │  │
-│  └──────────────┘  │  Elasticsearch│  └───────────────┘  │
-│                    └───────────────┘                      │
-│  ┌──────────────┐  ┌───────────────┐                      │
-│  │ control-agent│  │   db-agent    │                      │
-│  │ (port 9999)  │  │  (port 9998)  │                      │
-│  └──────────────┘  └───────────────┘                      │
-│                                                          │
-│                    ← No egress. Ever. →                  │
-└─────────────────────────────────────────────────────────┘
+```text
+┌──────────────────────────────── YOUR NETWORK ────────────────────────────────┐
+│                                                                              │
+│  User / Operator                                                             │
+│       │                                                                      │
+│       ├── React UI (frontend/, :8089)                                        │
+│       └── Django control plane (genai + doc_search, :8000)                   │
+│                    │                                                         │
+│                    ├── PostgreSQL + Redis                                    │
+│                    ├── Prometheus / Alertmanager / Jaeger / Elasticsearch    │
+│                    ├── vLLM + Qwen (local inference, no telemetry egress)    │
+│                    ├── control-agent / db-agent                              │
+│                    └── Code-context engine                                   │
+│                        ├── local repository indexes                          │
+│                        ├── service -> repo ownership                         │
+│                        ├── route -> handler mapping                          │
+│                        ├── span -> symbol mapping                            │
+│                        └── recent commit / snippet enrichment                │
+│                                                                              │
+│  Demo application plane                                                      │
+│       frontend -> gateway -> app-orders / app-inventory / app-billing -> db │
+│                                                                              │
+└────────────────────────────── No external AI calls ──────────────────────────┘
 ```
 
----
-
-## Tech Stack
-
-### Backend
-- Python · Django · Django ORM · PostgreSQL · Redis (Valkey)
-
-### AI / Inference Layer (Air-Gapped)
-- **[vLLM](https://github.com/vllm-project/vllm)** — high-throughput LLM serving engine
-- **[Qwen2.5-7B-Instruct-AWQ](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-AWQ)** — quantized open-source instruction model, 8K–32K context, runs on a single A10G (24 GB)
-- AWQ 4-bit quantization — ~4–5 GB VRAM for weights, enabling 16K+ context on modest GPU hardware
-- OpenAI-compatible API via vLLM — zero application-layer changes needed to switch models
-
-### Investigation & Orchestration
-- Prompt-based orchestration in `genai/`
-- Document-backed retrieval in `doc_search/`
-- Prediction workflows in `genai/predictions.py`
-- Atomic cross-worker incident counters via Redis
-
-### Frontend
-- React · TypeScript · Vite · TanStack Query · React Router
-- React Three Fiber / Three.js for dependency graph views
-
-### Observability Stack
-- Prometheus · VictoriaMetrics · Alertmanager · Grafana
-- OpenTelemetry Collector · Jaeger (distributed tracing)
-- Elasticsearch + Filebeat (log aggregation)
-- node-exporter · postgres-exporter · nginx exporters
-
-### Automation / Execution
-- `control-agent` — Docker command execution (container restarts, status checks)
-- `db-agent` — PostgreSQL diagnostics
-- Allowlisted command execution with auth token enforcement
-
-### Demo / Chaos
-- Nginx frontend and gateway · Flask demo microservices
-- Toxiproxy for fault injection · PostgreSQL
-
-### Packaging / Runtime
-- Docker · Docker Compose · Nginx
-
----
+For the full write-up, see [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ## Repository Layout
 
 ```text
-aiops_platform/     Django project settings and app wiring
-genai/              AI assistant, incidents, predictions, execution flows
-  llm_backend.py    LLM abstraction layer (vLLM / Qwen)
-doc_search/         Document upload, processing, and retrieval
-frontend/           React frontend (Vite + TypeScript)
-demo/               Demo application, chaos tooling, dependency graph
-agent/              Secure execution agents and allowlists
-  control-agent.Dockerfile
-  agent_server.py
-  control_allowed_commands.json
-Observability/      Grafana provisioning and dashboards
-filebeat/           Log shipping configuration
-diagrams/           Architecture diagram sources
-docker-compose.yml  Full stack orchestration
+aiops_platform/     Django project settings and wiring
+genai/              incidents, investigation flows, MCP services, remediation logic
+doc_search/         document ingestion and retrieval
+frontend/           React/Vite product UI
+opsmitra-site/      Next.js marketing site
+agent/              allowlisted remote execution agents
+demo/               demo application, dependencies, and chaos tooling
+Observability/      Grafana dashboards and provisioning
+diagrams/           Mermaid and draw.io architecture sources
+docker-compose.yml  stack orchestration
 ```
 
----
+## Key Runtime Areas
 
-## Key Product Areas
+### 1. Self-Hosted LLM Inference
 
-### 1. Air-Gapped Investigation Assistant
-Free-form AI chat grounded in live telemetry context (metrics, logs, traces, incident data). All inference runs locally. Includes revenue/business impact alongside technical RCA.
+All model calls are routed through `vLLM` using the OpenAI-compatible `/v1/chat/completions` interface.
 
-### 2. Correlated Incident Workspace
-Alerts correlated into incidents enriched with timeline, dependency graph, blast radius, AI-generated root cause, and remediation recommendation — all locally computed.
+- local endpoint configured by `VLLM_API_URL`
+- local model name configured by `VLLM_MODEL_NAME`
+- current backend implementation lives in [genai/llm_backend.py](./genai/llm_backend.py)
 
-### 3. Guided Remediation with Agent Execution
-AI proposes remediation commands, operators approve, the `control-agent` executes them. Post-execution AI analysis confirms resolution. No human needs to SSH.
+The main positioning is local reasoning on local data. No production telemetry needs to leave the environment to generate investigations, explanations, or remediation advice.
 
-### 4. Application & Service Health
-Service portfolios with component health scoring, AI insight summaries, prediction risk, and graph entry points.
+### 2. Code-Context Engine
 
-### 5. Dependency Graph (3D)
-Live topology graphs powered by React Three Fiber — application dependencies, incident blast radius, alert-linked graph traversal.
+The code-context layer is a first-class part of the product story, not a side feature.
 
-### 6. Predictions & Risk Scoring
-Service-level anomaly risk scoring and incident probability forecasting.
+It indexes local repositories into Django models such as:
 
-### 7. Document-Backed Runbooks
-Upload operational runbooks; the platform uses retrieval-augmented generation to answer operator questions grounded in your own documentation.
+- `RepositoryIndex`
+- `ServiceRepositoryBinding`
+- `RouteBinding`
+- `SpanBinding`
+- `DeploymentBinding`
+- `CodeChangeRecord`
+- `SymbolRelation`
 
----
+That enables the platform to answer questions like:
+
+- Which repository owns `app-orders`?
+- Which handler likely serves `/health` or `/orders/create`?
+- Which symbol matches a failing trace span?
+- What changed recently on the suspected failure path?
+- Which source files or related symbols are in the blast radius?
+
+The implementation is in:
+
+- [genai/code_context_ingestion.py](./genai/code_context_ingestion.py)
+- [genai/code_context_services.py](./genai/code_context_services.py)
+- [genai/mcp_services.py](./genai/mcp_services.py)
+- [genai/mcp_orchestrator.py](./genai/mcp_orchestrator.py)
+
+### 3. Investigation Orchestration
+
+Investigation requests are routed through MCP-style internal tools that gather evidence from:
+
+- incidents
+- application topology
+- metrics
+- logs
+- traces
+- runbooks
+- traceback-linked source
+- code-context services
+
+This allows the assistant to reason over curated evidence rather than raw unrestricted access.
+
+### 4. Controlled Execution
+
+Execution is separated from reasoning.
+
+- the assistant proposes typed actions
+- the policy layer decides what is allowed or requires approval
+- `control-agent` and `db-agent` execute only allowlisted commands
+
+Relevant code:
+
+- [genai/policy_engine.py](./genai/policy_engine.py)
+- [genai/execution_safety.py](./genai/execution_safety.py)
+- [genai/typed_actions.py](./genai/typed_actions.py)
+- [agent/agent_server.py](./agent/agent_server.py)
 
 ## Deployment
 
 ### Prerequisites
 
 - Docker + Docker Compose
-- NVIDIA GPU (A10G 24 GB recommended; any 16 GB+ VRAM Ampere/Ada GPU works) for `vllm` mode
-- NVIDIA drivers + `nvidia-container-toolkit` installed on the host
+- NVIDIA GPU for local `vLLM` serving
+- `nvidia-container-toolkit` on the host
 
-### 1. Start vLLM (run once, separate from Compose)
+### 1. Start `vLLM`
+
+Run the local model server separately from Compose:
 
 ```bash
 docker run -d \
@@ -196,100 +184,91 @@ docker run -d \
   --trust-remote-code
 ```
 
-> First run downloads ~4 GB from HuggingFace. After that, the model is cached in `~/.cache/huggingface` and vLLM starts in seconds.
-
 ### 2. Configure Environment
 
 ```bash
 cp .env.example .env
 ```
 
-**Minimum required values in `.env`:**
+Minimum values to review:
 
 ```bash
-# --- LLM (vLLM / Qwen, air-gapped) ---
-VLLM_API_URL=http://172.17.0.1:8001/v1/chat/completions   # Docker bridge IP → host vLLM
+POSTGRES_PASSWORD=change-me
+AGENT_SECRET_TOKEN=replace-with-a-long-random-secret
+VLLM_API_URL=http://172.17.0.1:8001/v1/chat/completions
 VLLM_MODEL_NAME=qwen32b
-VLLM_MAX_TOKENS=4096
-VLLM_MAX_MODEL_LEN=16384
-
-# --- Core ---
-POSTGRES_PASSWORD=your_secure_password
-AGENT_SECRET_TOKEN=your_secure_agent_token
-SSO_ENABLED=false   # set true + provide GOOGLE_CLIENT_ID/SECRET for SSO
-
-# --- Public access (for EC2 / remote deployment) ---
-DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,<your-server-ip>
-DJANGO_CSRF_TRUSTED_ORIGINS=http://<your-server-ip>:8000
-AIOPS_PUBLIC_BASE_URL=http://<your-server-ip>:8000
+AIOPS_CODE_CONTEXT_ENABLED=true
+AIOPS_CODE_CONTEXT_PROVIDER=internal
+AIOPS_CODE_CONTEXT_AUTO_ROOTS=/source
 ```
 
-### 3. Start the Platform
+### 3. Start The Stack
 
 ```bash
 docker compose up -d --build
 ```
 
-### Service URLs
+### 4. Optional: Sync Code Context
 
-| Service | URL |
+If you have active repository indexes or mounted source roots, sync the local code-context database:
+
+```bash
+docker compose exec web python manage.py sync_code_context
+```
+
+For a single named repository:
+
+```bash
+docker compose exec web python manage.py sync_code_context --repository customer-portal-demo
+```
+
+## Main URLs
+
+| Surface | URL |
 |---|---|
-| React UI | `http://localhost:8089` |
+| React product UI | `http://localhost:8089` |
 | Django backend | `http://localhost:8000` |
+| Assistant | `http://localhost:8089/genai` |
+| Code Context Graph | `http://localhost:8089/code-context` |
+| Alert dashboard | `http://localhost:8000/genai/alerts/dashboard/` |
+| Incident dashboard | `http://localhost:8000/genai/incidents/dashboard/` |
+| Demo app | `http://localhost:8088` |
 | Prometheus | `http://localhost:9090` |
 | Alertmanager | `http://localhost:9093` |
 | Grafana | `http://localhost:3000` |
-| Demo app | `http://localhost:8088` |
 | Jaeger | `http://localhost:16686` |
 
----
+## Chaos And Demo
 
-## Changing the vLLM Model
+The demo stack is designed to produce realistic failure propagation across shared dependencies.
 
-Update `VLLM_MODEL_NAME` and `VLLM_API_URL` in `.env` to point at a different model served by vLLM, then restart the `web` container — no rebuild required:
-```bash
-docker compose up -d --no-deps web
-```
+Useful scripts in [demo/tools](./demo/tools):
 
----
+- `run-demo-traffic.sh`
+- `cut-db-traffic.sh`
+- `set-db-latency.sh`
+- `stress-db-connections.sh`
+- `cut-gateway-traffic.sh`
+- `set-gateway-latency.sh`
+- `reset-db-proxy.sh`
+- `reset-gateway-proxy.sh`
+
+See [CHAOS_RUNBOOK.md](./CHAOS_RUNBOOK.md) for scenarios.
 
 ## Security Model
 
-| Concern | How It Is Addressed |
+| Concern | Approach |
 |---|---|
-| **Data egress** | In `vllm` mode, zero operational data leaves the server. All AI inference is local. |
-| **Agent execution** | Commands are allowlisted in `agent/control_allowed_commands.json`. Only explicitly listed commands can run. |
-| **Agent auth** | Every agent request requires a `Bearer` token (`AGENT_SECRET_TOKEN`). Unauthenticated requests are rejected with HTTP 401. |
-| **Network isolation** | The compose stack uses internal Docker networks; only necessary ports are exposed. |
-| **Model provenance** | Qwen2.5 is Apache 2.0 licensed. AWQ weights are sourced directly from HuggingFace under the same license. |
+| **AI data egress** | Model inference is served locally through `vLLM`. |
+| **Tool access** | The assistant works through explicit internal MCP-style services rather than unrestricted external access. |
+| **Command execution** | Agents run allowlisted commands only. |
+| **Execution approval** | Higher-risk actions pass through policy and approval tokens. |
+| **Repository context** | Source code stays local; the code-context engine reads from indexed local paths. |
 
----
-
-## Chaos and Demo
-
-Chaos tooling lives under `demo/tools/`. Use it to inject faults and validate that the AIOps platform detects, correlates, and recommends correctly.
-
-```bash
-bash demo/tools/run-demo-traffic.sh      # simulate normal load
-bash demo/tools/chaos-inject.sh          # inject failures
-```
-
-See [CHAOS_RUNBOOK.md](./CHAOS_RUNBOOK.md) for detailed scenarios.
-
----
-
-## Architecture and Roadmaps
+## Related Docs
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md)
-- [FRONTEND_MIGRATION_PLAN.md](./FRONTEND_MIGRATION_PLAN.md)
-- [MCP_PHASE_PLAN.md](./MCP_PHASE_PLAN.md)
 - [CHAOS_RUNBOOK.md](./CHAOS_RUNBOOK.md)
-
----
-
-## Notes
-
-- The internal Django project package has been renamed to `aiops_platform` to align with the product identity.
-- `.env` is intentionally gitignored — never commit credentials.
-- `172.17.0.1` is the default Docker bridge gateway IP. If your server uses a different bridge subnet, adjust `VLLM_API_URL` accordingly (`docker network inspect bridge | grep Gateway`).
-- Local runtime data (Postgres volumes, media files, model cache) is gitignored.
+- [MCP_PHASE_PLAN.md](./MCP_PHASE_PLAN.md)
+- [CODE_CONTEXT_ENGINE_PLAN.md](./CODE_CONTEXT_ENGINE_PLAN.md)
+- [CODE_INTELLIGENCE_FOR_INCIDENTS.md](./CODE_INTELLIGENCE_FOR_INCIDENTS.md)

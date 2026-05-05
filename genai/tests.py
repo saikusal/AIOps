@@ -9,6 +9,7 @@ from django.test import SimpleTestCase, TestCase
 from genai.code_context_extractors import extract_python_artifacts
 from genai.code_context_ingestion import auto_register_target_code_context, ensure_builtin_repository_indexes, sync_repository_index
 from genai.code_context_services import find_service_owner, read_code_snippet, route_to_handler, search_code_context, span_to_symbol
+from genai.tools.investigation import _infer_runtime_entities_from_question
 from genai.mcp_client import MCPClient
 from genai.mcp_registry import MCPRegistry
 from genai.mcp_services import (
@@ -445,6 +446,25 @@ class MultiStepWorkflowTests(SimpleTestCase):
 
 
 class CodeContextExtractorTests(SimpleTestCase):
+    def test_runtime_entity_inference_uses_live_application_overview(self):
+        inferred = _infer_runtime_entities_from_question(
+            "How does app-orders integrate with other systems?",
+            build_application_overview=lambda **_: {
+                "results": [
+                    {
+                        "application": "customer-portal",
+                        "title": "Customer Portal",
+                        "components": [
+                            {"service": "app-orders", "target_host": "app-orders", "title": "Orders"},
+                            {"service": "gateway", "target_host": "gateway", "title": "Gateway"},
+                        ],
+                    }
+                ]
+            },
+        )
+        self.assertEqual(inferred["application"], "customer-portal")
+        self.assertEqual(inferred["service"], "app-orders")
+
     def test_extract_python_artifacts_finds_route_and_span(self):
         temp_dir = tempfile.mkdtemp(prefix="aiops-code-context-")
         self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))

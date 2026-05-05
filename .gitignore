@@ -39,6 +39,7 @@ gunicorn.ctl
 # Frontend
 frontend/node_modules/
 frontend/dist/
+opsmitra-site/
 
 # Local data volumes
 postgres_data/
@@ -57,4 +58,3 @@ demo_logs/
 .vscode/
 *.swp
 *.swo
-

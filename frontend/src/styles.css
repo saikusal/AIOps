@@ -1701,6 +1701,188 @@ a {
   line-height: 1.5;
 }
 
+.assistant-code-context {
+  margin-top: 14px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(124, 213, 255, 0.18);
+  background:
+    radial-gradient(circle at top right, rgba(124, 213, 255, 0.08), transparent 26%),
+    linear-gradient(180deg, rgba(8, 22, 34, 0.88), rgba(7, 17, 27, 0.82));
+  display: grid;
+  gap: 14px;
+}
+
+.assistant-code-context__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.assistant-code-context__badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: rgba(124, 213, 255, 0.12);
+  border: 1px solid rgba(124, 213, 255, 0.24);
+  color: var(--accent-2);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+}
+
+.assistant-code-context__links {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.assistant-code-context__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.assistant-code-context__card,
+.assistant-code-context__snippet,
+.assistant-code-context__section li {
+  border: 1px solid rgba(124, 213, 255, 0.12);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.assistant-code-context__card {
+  padding: 12px 13px;
+}
+
+.assistant-code-context__card span,
+.assistant-code-context__section > span,
+.assistant-code-context__trace > span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--accent-2);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.assistant-code-context__card strong {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 0.95rem;
+}
+
+.assistant-code-context__card small {
+  display: block;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.assistant-code-context__section {
+  display: grid;
+  gap: 8px;
+}
+
+.assistant-code-context__section ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.assistant-code-context__section li {
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.assistant-code-context__section li strong {
+  font-size: 0.9rem;
+}
+
+.assistant-code-context__section li span {
+  color: var(--muted);
+  line-height: 1.45;
+  font-size: 0.84rem;
+}
+
+.assistant-code-context__snippet {
+  padding: 10px 12px;
+}
+
+.assistant-code-context__snippet strong {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 0.88rem;
+}
+
+.assistant-code-context__snippet pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #dff6ff;
+  font-size: 0.78rem;
+  line-height: 1.55;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+}
+
+.assistant-code-context__trace {
+  display: grid;
+  gap: 8px;
+}
+
+.assistant-code-context__trace-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.assistant-code-context__trace-list code {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: rgba(124, 213, 255, 0.08);
+  border: 1px solid rgba(124, 213, 255, 0.14);
+  color: var(--text);
+  font-size: 0.76rem;
+}
+
+:root[data-theme="light"] .assistant-code-context {
+  border-color: rgba(23, 148, 208, 0.18);
+  background:
+    radial-gradient(circle at top right, rgba(74, 196, 255, 0.14), transparent 28%),
+    linear-gradient(180deg, rgba(241, 249, 255, 0.97), rgba(228, 243, 252, 0.94));
+}
+
+:root[data-theme="light"] .assistant-code-context__badge {
+  background: rgba(74, 196, 255, 0.14);
+  border-color: rgba(23, 148, 208, 0.22);
+  color: #0f5977;
+}
+
+:root[data-theme="light"] .assistant-code-context__card,
+:root[data-theme="light"] .assistant-code-context__snippet,
+:root[data-theme="light"] .assistant-code-context__section li {
+  border-color: rgba(23, 148, 208, 0.12);
+  background: rgba(255, 255, 255, 0.55);
+}
+
+:root[data-theme="light"] .assistant-code-context__snippet pre {
+  color: #16344c;
+}
+
+:root[data-theme="light"] .assistant-code-context__trace-list code {
+  background: rgba(74, 196, 255, 0.12);
+  border-color: rgba(23, 148, 208, 0.14);
+  color: #16344c;
+}
+
 .incident-deep-dive__panel--decision {
   border-color: rgba(83, 196, 255, 0.18);
   background: linear-gradient(180deg, rgba(9, 25, 36, 0.88), rgba(8, 18, 27, 0.78));
@@ -2892,6 +3074,10 @@ a {
   }
 
   .incident-deep-dive__grid {
+    grid-template-columns: 1fr;
+  }
+
+  .assistant-code-context__grid {
     grid-template-columns: 1fr;
   }
 

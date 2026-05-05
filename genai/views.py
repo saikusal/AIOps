@@ -2939,9 +2939,9 @@ def analyze_command_output(
         f"{source_context_prompt}"
         f"Command Output:\n---\n{_errors_first_for_prompt(command_output, 1600)}\n---\n"
     )
-    logger.info(f"[LLM] Sending analysis prompt to AIDE | Evidence confidence: {structured_evidence.get('confidence_score', 'N/A')} | Target: {target_host}")
+    logger.info(f"[LLM] Sending analysis prompt to vLLM | Evidence confidence: {structured_evidence.get('confidence_score', 'N/A')} | Target: {target_host}")
     logger.debug(f"[LLM] Prompt (first 800 chars): {analysis_prompt[:800]}...")
-    ok, status, body_text = query_aide_api(analysis_prompt)
+    ok, status, body_text = query_llm(analysis_prompt)
     logger.info(f"[LLM] Response received | Status: {str(status)[:50] if status else 'None'}")
     logger.debug(f"[LLM] Response body (first 500 chars): {body_text[:500] if body_text else 'Empty'}")
     if not ok:
@@ -3367,7 +3367,7 @@ def _generate_overview_insights(components: List[Dict[str, Any]]) -> Dict[str, s
         "Focus on current status, likely impact, blast radius, and next attention area. Do not mention missing data unless it matters.\n\n"
         f"APPLICATION SNAPSHOT:\n{_head_for_prompt(json.dumps(components, indent=2, default=str), 4000)}"
     )
-    ok, status, body_text = query_aide_api(prompt)
+    ok, status, body_text = query_llm(prompt)
     if not ok:
         return {}
     try:
@@ -3733,10 +3733,8 @@ def operator_feedback_view(request: HttpRequest):
     )
 
 # ---------------- LLM API (delegated to genai.llm_backend) ----------------
-# Backward-compatible: query_aide_api is now imported from llm_backend.
-# The original inline implementation has been moved to genai/llm_backend.py
-# which supports both AIDE and vLLM (Qwen) backends via LLM_BACKEND env var.
-from genai.llm_backend import query_aide_api  # noqa: E402
+# Centralized local LLM client used across investigations, chat, and remediation.
+from genai.llm_backend import query_llm  # noqa: E402
 
 # ---------------- schema helpers ----------------
 def get_full_schema_for_prompt(target_table: str = TARGET_TABLE, max_tables: int = 6, sample_rows_limit: int = 2, max_total_chars: int = 6000) -> str:
@@ -3891,7 +3889,7 @@ def _extract_selected_columns(sql: str) -> List[str]:
     return cols
 
 def classify_query(query: str) -> str:
-    return hybrid_classify_query(query, llm_query=query_aide_api, logger=logger)
+    return hybrid_classify_query(query, llm_query=query_llm, logger=logger)
 
 # ---------------- visualization suggestion ----------------
 def suggest_visualization(columns: List[str], rows: List[Tuple]) -> dict:
@@ -3905,7 +3903,7 @@ def suggest_visualization(columns: List[str], rows: List[Tuple]) -> dict:
         "y (column for y-axis or null), explanation (1 sentence). Do NOT include other fields.\n\n"
         f"Columns: {', '.join(columns)}\nSample rows:\n{sample_preview}\n\nReturn JSON only:"
     )
-    ok, status, body = query_aide_api(prompt)
+    ok, status, body = query_llm(prompt)
     if not ok:
         if "status" in [c.lower() for c in columns]:
             return {"chart_type": "bar", "x": "status", "y": "count", "explanation": "Count records per status with a bar chart."}
@@ -3932,13 +3930,13 @@ def suggest_visualization(columns: List[str], rows: List[Tuple]) -> dict:
 
 # ---------------- SQL handler (text->SQL->execute -> visualize -> persist) ----------------
 def handle_direct_action(prompt: str) -> Tuple[Optional[dict], str]:
-    return direct_action_tool(prompt, llm_query=query_aide_api, logger=logger)
+    return direct_action_tool(prompt, llm_query=query_llm, logger=logger)
 
 
 def handle_prometheus_query(prompt: str) -> Tuple[Optional[dict], dict, str, str]:
     return prometheus_query_tool(
         prompt,
-        llm_query=query_aide_api,
+        llm_query=query_llm,
         prometheus_url=METRICS_API_URL,
         logger=logger,
     )
@@ -3946,7 +3944,7 @@ def handle_prometheus_query(prompt: str) -> Tuple[Optional[dict], dict, str, str
 def handle_sql(prompt: str) -> Tuple[Optional[dict], dict, str, str]:
     return sql_tool(
         prompt,
-        llm_query=query_aide_api,
+        llm_query=query_llm,
         get_full_schema_for_prompt=get_full_schema_for_prompt,
         target_table=TARGET_TABLE,
         extract_sql_from_markdown=_extract_sql_from_markdown,
@@ -4064,7 +4062,7 @@ def genai_chat(request: HttpRequest):
                 question,
                 body,
                 conversation_history,
-                llm_query=query_aide_api,
+                llm_query=query_llm,
                 incident_model=Incident,
                 build_application_overview=_build_application_overview,
                 incident_timeline_payload=_incident_timeline_payload,
@@ -4167,6 +4165,40 @@ def genai_chat(request: HttpRequest):
 
     # Docs (RAG) route -> delegate to doc_search
     if route == "docs":
+        from doc_search.models import DocumentChunk
+        if not DocumentChunk.objects.exists():
+            logger.info("genai_chat: docs route selected but no documents are indexed; falling back to investigation")
+            try:
+                response_data = investigation_route_tool(
+                    question,
+                    body,
+                    conversation_history,
+                    llm_query=query_llm,
+                    incident_model=Incident,
+                    build_application_overview=_build_application_overview,
+                    incident_timeline_payload=_incident_timeline_payload,
+                    get_dependency_context=_get_dependency_context,
+                    application_graph_payload=_application_graph_payload,
+                    fetch_elasticsearch_logs=_fetch_elasticsearch_logs,
+                    fetch_jaeger_traces=_fetch_jaeger_traces,
+                    fetch_metrics_query=_fetch_metrics_query,
+                    compute_incident_revenue_impact=_compute_incident_revenue_impact,
+                    logger=logger,
+                    chat_session=chat_session,
+                    user=request.user,
+                    source_path_map=MCP_SOURCE_PATH_MAP,
+                    source_root=MCP_SOURCE_ROOT,
+                )
+                response_data["route_fallback"] = "docs_to_investigation_no_documents_indexed"
+                return _chat_json_response(chat_session, response_data)
+            except Exception as e:
+                logger.exception("Docs fallback investigation route error: %s", e)
+                return _chat_json_response(
+                    chat_session,
+                    {"error": "docs_fallback_failed", "detail": str(e), "answer": "Document search is unavailable and the investigation fallback failed."},
+                    status=500,
+                )
+
         proxy_body = build_docs_proxy_body(body, question, client_top_k, client_strict_docs)
         
         logger.info(f"genai_chat: Proxying to RAG with body: {proxy_body}")
@@ -4193,7 +4225,7 @@ def genai_chat(request: HttpRequest):
         response_data = general_chat_tool(
             question,
             conversation_history,
-            llm_query=query_aide_api,
+            llm_query=query_llm,
             history_model=GenAIChatHistory,
             cache_store=simple_cache,
             logger=logger,
@@ -5096,7 +5128,7 @@ AGENT_SECRET_TOKEN = os.getenv("AGENT_SECRET_TOKEN")
 @csrf_exempt
 def ingest_alert_view(request: HttpRequest):
     """
-    Accepts an alert payload, gathers observability context, asks AiDE for a
+    Accepts an alert payload, gathers observability context, asks the local Qwen model for a
     diagnostic command, optionally executes it through the remote agent, and
     returns the investigation result.
     """
@@ -5164,13 +5196,13 @@ def ingest_alert_view(request: HttpRequest):
             f"ALERT PAYLOAD:\n{_head_for_prompt(json.dumps(alert_payload, indent=2, default=str), 2000)}\n\n"
             f"OBSERVABILITY CONTEXT:\n{_head_for_prompt(json.dumps(context, indent=2, default=str), 2500)}\n"
         )
-        logger.info(f"[INGEST] Sending planning prompt to AIDE for {alert_name} on {target_host}")
-        ok, status, planning_body = query_aide_api(planning_prompt)
+        logger.info(f"[INGEST] Sending planning prompt to vLLM for {alert_name} on {target_host}")
+        ok, status, planning_body = query_llm(planning_prompt)
         if not ok:
             # CRITICAL: Never return a non-2xx to alertmanager — it will retry indefinitely and
             # mark the webhook as dead after 9 attempts. Accept the alert, log the LLM failure,
             # return 200 with a degraded response so alertmanager considers it delivered.
-            logger.error(f"[INGEST] AIDE planning failed (LLM unavailable): {status} | Alert will be stored without AI analysis")
+            logger.error(f"[INGEST] vLLM planning failed (LLM unavailable): {status} | Alert will be stored without AI analysis")
             _correlate_alert_to_incident(alert_payload, context, f"AI analysis unavailable: {alert_name}", "LLM backend unreachable during ingestion.")
             return JsonResponse(
                 {
@@ -5331,7 +5363,7 @@ def ingest_alert_view(request: HttpRequest):
         return JsonResponse(response_payload, status=500)
 
     if not diagnostic_command or not target_host or not should_execute:
-        response_payload["error"] = "AiDE did not return an executable command and target."
+        response_payload["error"] = "The local Qwen model did not return an executable command and target."
         return JsonResponse(response_payload, status=400)
 
     if policy_decision["decision"] != "allowed":
@@ -6839,7 +6871,7 @@ def generate_runbook_view(request: HttpRequest, incident_key: str):
     try:
         payload = generate_runbook_payload(
             incident,
-            llm_query=query_aide_api,
+            llm_query=query_llm,
             runbook_model=Runbook,
             timeline_event_model=IncidentTimelineEvent,
             request_user=request.user,
@@ -6929,7 +6961,7 @@ def explain_anomaly_view(request: HttpRequest):
             labels=labels,
             summary=summary,
             incident=incident,
-            llm_query=query_aide_api,
+            llm_query=query_llm,
             timeline_event_model=IncidentTimelineEvent,
         )
     except RuntimeError as exc:
@@ -6988,7 +7020,7 @@ def change_risk_view(request: HttpRequest):
             blast_radius=blast_radius,
             depends_on=depends_on,
             recent_incidents=recent_incidents,
-            llm_query=query_aide_api,
+            llm_query=query_llm,
         )
     except RuntimeError as exc:
         return JsonResponse({"error": "llm_failed", "detail": str(exc)}, status=502)
@@ -7040,7 +7072,7 @@ def incident_timeline_narrative_view(request: HttpRequest, incident_key: str):
     try:
         payload = generate_timeline_narrative_payload(
             incident,
-            llm_query=query_aide_api,
+            llm_query=query_llm,
             timeline_event_model=IncidentTimelineEvent,
         )
     except RuntimeError as exc:

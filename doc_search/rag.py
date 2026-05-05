@@ -2,9 +2,9 @@
 """
 rag_local.py
 
-Read a local document, chunk it, attempt to get embeddings from AiDE,
+Read a local document, chunk it, attempt to get embeddings from a local vLLM endpoint,
 fallback to TF-IDF if embedding calls fail, perform a similarity search,
-and query the AiDE completions/chat endpoint with retrieved context.
+and query the local OpenAI-compatible completions/chat endpoint with retrieved context.
 
 Usage:
   python rag_local.py --file sample.pdf --question "Summarize the policy" --topk 4 --no-verify
@@ -41,12 +41,12 @@ except Exception:
     sklearn_cosine = None
 
 # ----------------- config (edit or set env) -----------------
-AIDE_API_KEY = os.getenv("AIDE_API_KEY", "")
-AIDE_EMBED_URL = os.getenv("AIDE_API_URL", "")
-# completions/chat endpoint (if different set AIDE_API_COMPLETIONS_URL)
-AIDE_COMPLETIONS_URL = os.getenv(
-    "AIDE_API_COMPLETIONS_URL",
-    AIDE_EMBED_URL.replace("/embeddings", "/completions") if AIDE_EMBED_URL else "",
+VLLM_API_KEY = os.getenv("VLLM_API_KEY", "")
+VLLM_EMBEDDING_URL = os.getenv("VLLM_EMBEDDING_URL", "")
+# completions/chat endpoint (if different set VLLM_EMBEDDING_URL)
+VLLM_COMPLETIONS_URL = os.getenv(
+    "VLLM_API_URL",
+    VLLM_EMBEDDING_URL.replace("/embeddings", "/completions") if VLLM_EMBEDDING_URL else "",
 )
 
 TIMEOUT = 30
@@ -108,8 +108,8 @@ def cosine_similarity(vec: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     denom = np.where(denom == 0, 1e-9, denom)
     return np.dot(matrix, vec) / denom
 
-# ----------------- AiDE calls -----------------
-def get_embedding_aide(text: str, api_url: str, api_key: str, verify: bool = True) -> Tuple[bool, dict]:
+# ----------------- vLLM calls -----------------
+def get_embedding_vllm(text: str, api_url: str, api_key: str, verify: bool = True) -> Tuple[bool, dict]:
     """
     Call embedding endpoint. Returns (ok, parsed_json_or_error_str)
     Expecting returned structure may vary; we'll return the parsed json.
@@ -132,7 +132,7 @@ def get_embedding_aide(text: str, api_url: str, api_key: str, verify: bool = Tru
 
 def extract_embedding_from_response(data) -> List[float]:
     """
-    Different AiDE deployments may return shapes like:
+    Different OpenAI-compatible embedding deployments may return shapes like:
       {"data":[{"embedding":[...] , ... }], "model": ...}
     or {"embedding": [...]}
     This tries several patterns.
@@ -161,7 +161,7 @@ def extract_embedding_from_response(data) -> List[float]:
     emb = find_emb(data)
     return list(emb) if emb is not None else None
 
-def call_completion_aide(prompt: str, api_url: str, api_key: str, verify: bool = True) -> Tuple[bool, dict]:
+def call_completion_vllm(prompt: str, api_url: str, api_key: str, verify: bool = True) -> Tuple[bool, dict]:
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent":"rag-local/1.0"}
     payload = {"messages": [{"role":"user","content": prompt}]}
     try:
@@ -197,46 +197,46 @@ def retrieve_context(chunks: List[str], embeddings_matrix: np.ndarray, query_emb
     idx = np.argsort(-sims)[:topk]
     return [(int(i), chunks[int(i)], float(sims[int(i)])) for i in idx]
 
-def run_rag(filepath: str, question: str, aide_embed_url: str, aide_comp_url: str, aide_key: str, verify_ssl: bool = True, topk: int = 3):
+def run_rag(filepath: str, question: str, vllm_embed_url: str, vllm_comp_url: str, vllm_key: str, verify_ssl: bool = True, topk: int = 3):
     print("Reading document:", filepath)
     text = read_document(filepath)
     print("Document length (chars):", len(text))
     chunks = chunk_text(text, chunk_size=400, overlap=50)
     print("Chunk count:", len(chunks))
 
-    # 1) try to get chunk embeddings from AiDE
+    # 1) try to get chunk embeddings from the local endpoint
     embeddings = []
-    print("Attempting to fetch embeddings from AiDE for each chunk (this may be rate-limited). Verify SSL:", verify_ssl)
-    aide_ok = True
+    print("Attempting to fetch embeddings from the local endpoint for each chunk. Verify SSL:", verify_ssl)
+    embeddings_ok = True
     for i, ch in enumerate(chunks):
-        ok, res = get_embedding_aide(ch[:10000], aide_embed_url, aide_key, verify=verify_ssl)
+        ok, res = get_embedding_vllm(ch[:10000], vllm_embed_url, vllm_key, verify=verify_ssl)
         if not ok:
             print(f"Embedding API failed on chunk {i}: {res}")
-            aide_ok = False
+            embeddings_ok = False
             break
         emb = extract_embedding_from_response(res)
         if emb is None:
             print(f"Could not extract embedding from response for chunk {i}; falling back.")
-            aide_ok = False
+            embeddings_ok = False
             break
         embeddings.append(emb)
-    if aide_ok and len(embeddings) == len(chunks):
-        print("Embeddings obtained from AiDE for all chunks.")
+    if embeddings_ok and len(embeddings) == len(chunks):
+        print("Embeddings obtained from the local endpoint for all chunks.")
         embeddings_matrix = np.array(embeddings, dtype=float)
         # embed the query
-        ok, qres = get_embedding_aide(question, aide_embed_url, aide_key, verify=verify_ssl)
+        ok, qres = get_embedding_vllm(question, vllm_embed_url, vllm_key, verify=verify_ssl)
         if not ok:
-            print("Failed to embed query via AiDE:", qres)
+            print("Failed to embed query via the local endpoint:", qres)
             # degrade to TF-IDF fallback below
-            aide_ok = False
+            embeddings_ok = False
         else:
             qemb = extract_embedding_from_response(qres)
             if qemb is None:
                 print("Could not extract query embedding; falling back.")
-                aide_ok = False
+                embeddings_ok = False
             else:
                 qemb = np.array(qemb, dtype=float)
-    if not aide_ok:
+    if not embeddings_ok:
         # fall back to TF-IDF approach if embeddings failed
         print("Using TF-IDF fallback for similarity search (no external embeddings).")
         if TfidfVectorizer is None:
@@ -268,8 +268,8 @@ def run_rag(filepath: str, question: str, aide_embed_url: str, aide_comp_url: st
         "Use only the provided excerpts to answer. If information is not present, say \"I could not find that in the documents.\".\n\n"
         f"CONTEXT:\n{context}\n\nQUESTION: {question}\n\nANSWER (concise):"
     )
-    print("Sending prompt to AiDE completions endpoint...")
-    ok, comp_res = call_completion_aide(prompt, aide_comp_url, aide_key, verify=verify_ssl)
+    print("Sending prompt to the local vLLM completions endpoint...")
+    ok, comp_res = call_completion_vllm(prompt, vllm_comp_url, vllm_key, verify=verify_ssl)
     if not ok:
         print("Completion call failed:", comp_res.get("error"))
         return {"error": comp_res}
@@ -298,7 +298,7 @@ def run_rag(filepath: str, question: str, aide_embed_url: str, aide_comp_url: st
 
 # ----------------- script entry -----------------
 def main():
-    parser = argparse.ArgumentParser(description="Local RAG tester with AiDE completions + embedding fallback")
+    parser = argparse.ArgumentParser(description="Local RAG tester with vLLM completions + embedding fallback")
     parser.add_argument("--file", "-f", required=True, help="Local document path (pdf, txt, docx)")
     parser.add_argument("--question", "-q", required=True, help="Question to ask the document")
     parser.add_argument("--topk", type=int, default=3, help="How many chunks to include as context")
@@ -307,17 +307,17 @@ def main():
     parser.set_defaults(verify_ssl=False)  # default off since you were seeing SSL issues; change as needed
     args = parser.parse_args()
 
-    aide_key = AIDE_API_KEY
-    aide_embed_url = AIDE_EMBED_URL
-    aide_comp_url = AIDE_COMPLETIONS_URL
+    vllm_key = VLLM_API_KEY
+    vllm_embed_url = VLLM_EMBEDDING_URL
+    vllm_comp_url = VLLM_COMPLETIONS_URL
 
-    if aide_key.startswith("REPLACE") and not os.getenv("AIDE_API_KEY"):
-        print("WARNING: AIDE_API_KEY not set; completions/embeddings will fail unless you edit the script or set env var.")
-    print("AiDE embed URL:", aide_embed_url)
-    print("AiDE completions URL:", aide_comp_url)
+    if vllm_key.startswith("REPLACE") and not os.getenv("VLLM_API_KEY"):
+        print("WARNING: VLLM_API_KEY not set; authenticated completions/embeddings will fail unless you edit the script or set env var.")
+    print("vLLM embed URL:", vllm_embed_url)
+    print("vLLM completions URL:", vllm_comp_url)
     print("Verify SSL:", args.verify_ssl)
 
-    res = run_rag(args.file, args.question, aide_embed_url, aide_comp_url, aide_key, verify_ssl=args.verify_ssl, topk=args.topk)
+    res = run_rag(args.file, args.question, vllm_embed_url, vllm_comp_url, vllm_key, verify_ssl=args.verify_ssl, topk=args.topk)
     # Optionally save result to file
     outpath = "rag_result.json"
     with open(outpath, "w", encoding="utf-8") as fo:

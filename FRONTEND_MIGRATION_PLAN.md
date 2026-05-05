@@ -22,7 +22,7 @@ The current Django template frontend is enough for operational prototyping, but 
   - Django
   - PostgreSQL
   - Redis
-  - AiDE integration
+  - local Qwen via vLLM integration
   - incidents / sessions / predictions / docs
 - Frontend:
   - React + TypeScript + Vite
