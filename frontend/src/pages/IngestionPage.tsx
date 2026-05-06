@@ -27,7 +27,7 @@ export function IngestionPage() {
 
   const profilesQuery = useQuery({
     queryKey: ["fleet-profiles"],
-    queryFn: fetchTelemetryProfiles,
+    queryFn: () => fetchTelemetryProfiles(),
   });
 
   const targets = fleetQuery.data || [];

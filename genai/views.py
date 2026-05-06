@@ -40,6 +40,7 @@ from .models import (
     ChatMessage,
     ChatSession,
     CodeChangeRecord,
+    DataRetentionPolicy,
     DiscoveredService,
     EnrollmentToken,
     ExecutionIntent,
@@ -47,6 +48,7 @@ from .models import (
     Incident,
     IncidentAlert,
     IncidentTimelineEvent,
+    InvestigationRun,
     OperatorFeedback,
     RemediationOutcome,
     ReplayEvaluation,
@@ -62,7 +64,13 @@ from .models import (
     Target,
     TargetComponent,
     TargetHeartbeat,
+    TargetLogIngestionProfile,
+    TargetLogSource,
     TargetOnboardingRequest,
+    TargetPolicyAssignment,
+    TargetPolicyProfile,
+    TargetRuntimeProfile,
+    TargetServiceBinding,
     TelemetryProfile,
 )
 from .predictions import score_components
@@ -191,6 +199,7 @@ from .telemetry_cache import (
 TARGET_TABLE = os.getenv("GENAI_TABLE", "")
 METRICS_API_URL = os.getenv("METRICS_API_URL") or os.getenv("PROMETHEUS_URL")
 ELASTICSEARCH_URL = os.getenv("ELASTICSEARCH_URL")
+OPENSEARCH_URL = os.getenv("OPENSEARCH_URL") or ELASTICSEARCH_URL
 JAEGER_URL = os.getenv("JAEGER_URL")
 AGENT_PORT = int(os.getenv("AGENT_PORT", "9999"))
 DB_AGENT_HOST = os.getenv("DB_AGENT_HOST", "db-agent")
@@ -212,6 +221,9 @@ AIOPS_PUBLIC_BASE_URL = os.getenv("AIOPS_PUBLIC_BASE_URL", "").strip()
 AIOPS_PUBLIC_OTLP_GRPC_ENDPOINT = os.getenv("AIOPS_PUBLIC_OTLP_GRPC_ENDPOINT", "").strip()
 AIOPS_OTELCOL_VERSION = os.getenv("AIOPS_OTELCOL_VERSION", "0.87.0")
 AIOPS_NODE_EXPORTER_VERSION = os.getenv("AIOPS_NODE_EXPORTER_VERSION", "1.8.1")
+AIOPS_K8S_AGENT_IMAGE_REPOSITORY = os.getenv("AIOPS_K8S_AGENT_IMAGE_REPOSITORY", "opsmitra/k8s-cluster-agent").strip()
+AIOPS_K8S_AGENT_IMAGE_TAG = os.getenv("AIOPS_K8S_AGENT_IMAGE_TAG", "latest").strip()
+AIOPS_K8S_AGENT_NAMESPACE = os.getenv("AIOPS_K8S_AGENT_NAMESPACE", "opsmitra-system").strip() or "opsmitra-system"
 CHAT_HISTORY_WINDOW = int(os.getenv("CHAT_HISTORY_WINDOW", "12"))
 MCP_INTERNAL_TOKEN = (os.getenv("MCP_INTERNAL_TOKEN", "") or "").strip()
 RECENT_ALERT_CACHE_KEY = "aiops_recent_alert_recommendations"
@@ -1173,6 +1185,108 @@ RESTARTABLE_CONTAINER_NAMES = {
     "toxiproxy": "aiops-toxiproxy",
 }
 
+K8S_AGENT_QUEUE_TTL_SECONDS = 60 * 15
+K8S_AGENT_RESULT_TTL_SECONDS = 60 * 15
+K8S_AGENT_POLL_BATCH_SIZE = 1
+
+
+def _target_aliases(target: Target) -> List[str]:
+    aliases = {
+        value.strip()
+        for value in (
+            target.target_id,
+            target.name,
+            target.hostname,
+            target.ip_address,
+        )
+        if str(value or "").strip()
+    }
+    return sorted(aliases)
+
+
+def _find_target_by_host_alias(target_host: str) -> Optional[Target]:
+    normalized = str(target_host or "").strip()
+    if not normalized:
+        return None
+    direct = Target.objects.select_related("profile").filter(
+        models.Q(target_id=normalized)
+        | models.Q(name=normalized)
+        | models.Q(hostname=normalized)
+        | models.Q(ip_address=normalized)
+    ).first()
+    return direct
+
+
+def _cluster_agent_token(target: Target) -> str:
+    metadata = target.metadata_json or {}
+    return str(metadata.get("cluster_agent_auth_token") or "").strip()
+
+
+def _ensure_cluster_agent_token(target: Target) -> str:
+    metadata = target.metadata_json or {}
+    token = str(metadata.get("cluster_agent_auth_token") or "").strip()
+    if token:
+        return token
+    token = f"k8sagent_{uuid.uuid4().hex}"
+    metadata["cluster_agent_auth_token"] = token
+    target.metadata_json = metadata
+    target.save(update_fields=["metadata_json", "updated_at"])
+    return token
+
+
+def _k8s_command_queue_key(target_id: str) -> str:
+    return f"aiops:k8s:queue:{target_id}"
+
+
+def _k8s_command_result_key(target_id: str, command_id: str) -> str:
+    return f"aiops:k8s:result:{target_id}:{command_id}"
+
+
+def _enqueue_k8s_command(target: Target, command: str, typed_action: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    queue_key = _k8s_command_queue_key(target.target_id)
+    current = cache.get(queue_key) or []
+    payload = {
+        "command_id": uuid.uuid4().hex,
+        "command": command,
+        "typed_action": typed_action or {},
+        "target_id": target.target_id,
+        "target_name": target.name,
+        "created_at": timezone.now().isoformat(),
+    }
+    current.append(payload)
+    cache.set(queue_key, current, timeout=K8S_AGENT_QUEUE_TTL_SECONDS)
+    return payload
+
+
+def _dequeue_k8s_commands(target: Target, limit: int = K8S_AGENT_POLL_BATCH_SIZE) -> List[Dict[str, Any]]:
+    queue_key = _k8s_command_queue_key(target.target_id)
+    current = cache.get(queue_key) or []
+    if not current:
+        return []
+    batch = current[:limit]
+    remaining = current[limit:]
+    cache.set(queue_key, remaining, timeout=K8S_AGENT_QUEUE_TTL_SECONDS)
+    return batch
+
+
+def _store_k8s_command_result(target: Target, command_id: str, result: Dict[str, Any]) -> None:
+    cache.set(
+        _k8s_command_result_key(target.target_id, command_id),
+        result,
+        timeout=K8S_AGENT_RESULT_TTL_SECONDS,
+    )
+
+
+def _wait_for_k8s_command_result(target: Target, command_id: str, timeout_seconds: int = 75) -> Optional[Dict[str, Any]]:
+    result_key = _k8s_command_result_key(target.target_id, command_id)
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        result = cache.get(result_key)
+        if result:
+            return result
+        time.sleep(1)
+    return None
+
 
 def _normalize_agent_target_host(target_host: str) -> str:
     host = (target_host or "").strip()
@@ -1223,6 +1337,25 @@ def _normalize_agent_command(command_to_run: str, target_host: str) -> str:
         )
 
     return command
+
+
+def _delegate_k8s_command_to_cluster_agent(
+    target: Target,
+    command_to_run: str,
+    typed_action: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    queued = _enqueue_k8s_command(target, command_to_run, typed_action=typed_action)
+    result = _wait_for_k8s_command_result(target, queued["command_id"])
+    if not result:
+        return (
+            False,
+            "Error: Timed out waiting for the Kubernetes cluster agent to execute the requested command.",
+            {"error": "cluster agent timeout", "queued_command_id": queued["command_id"]},
+        )
+    success = bool(result.get("success"))
+    output = str(result.get("output") or "")
+    result["queued_command_id"] = queued["command_id"]
+    return success, output or "No output received from cluster agent.", result
 
 
 def _lookup_recent_alert_recommendation(alert_id: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -2746,6 +2879,21 @@ def _run_post_action_verification(
         "command": command,
         "baseline_issue_score": baseline_score,
         "post_issue_score": fresh_score,
+        "issue_score_delta": round(fresh_score - baseline_score, 3),
+        "improvement_detected": fresh_score < baseline_score,
+        "verification_loop_state": "closed" if status == "resolved" else "follow_up_required" if status in {"partially_improved", "unchanged", "worsened", "inconclusive"} else "execution_failed",
+        "requires_follow_up": status not in {"resolved"},
+        "recommended_next_step": (
+            "Close the incident or continue passive monitoring for recurrence."
+            if status == "resolved"
+            else "Collect another telemetry sample and compare it against the baseline before taking further action."
+            if status == "partially_improved"
+            else "Re-scope the investigation and gather additional evidence before retrying remediation."
+            if status in {"unchanged", "inconclusive"}
+            else "Escalate immediately and inspect for blast-radius expansion before taking another write action."
+            if status == "worsened"
+            else "Review the failed execution and restore safe diagnostics before attempting verification again."
+        ),
         "baseline_evidence": baseline_evidence or {},
         "post_evidence": fresh_evidence,
         "post_context_summary": {
@@ -2755,7 +2903,14 @@ def _run_post_action_verification(
         },
     }
 
-def delegate_command_to_agent(command_to_run: str, target_host: str) -> Tuple[bool, str, Dict[str, Any]]:
+def delegate_command_to_agent(command_to_run: str, target_host: str, typed_action: Optional[Dict[str, Any]] = None) -> Tuple[bool, str, Dict[str, Any]]:
+    resolved_target = _find_target_by_host_alias(target_host)
+    if resolved_target and resolved_target.target_type == "kubernetes":
+        return _delegate_k8s_command_to_cluster_agent(
+            resolved_target,
+            command_to_run,
+            typed_action=typed_action,
+        )
     requested_target_host = target_host
     command_to_run = _normalize_agent_command(command_to_run, requested_target_host)
     target_host = _normalize_agent_target_host(requested_target_host)
@@ -4727,35 +4882,230 @@ def investigations_dashboard_view(request: HttpRequest):
 
 @login_required
 def investigations_recent_view(request: HttpRequest):
-    runs = InvestigationRun.objects.select_related("incident", "session").prefetch_related("tool_invocations").all()[:25]
+    runs = InvestigationRun.objects.select_related("incident", "session", "evidence_bundle_record").prefetch_related("tool_invocations").all()
+    incident_key = str(request.GET.get("incident_key") or "").strip()
+    session_id = str(request.GET.get("session_id") or "").strip()
+    target_host = str(request.GET.get("target_host") or "").strip()
+    if incident_key:
+        runs = runs.filter(incident__incident_key=incident_key)
+    if session_id:
+        runs = runs.filter(session__session_id=session_id)
+    if target_host:
+        runs = runs.filter(target_host__iexact=target_host)
+    runs = runs[:25]
+
+    def _serialize_investigation_run(run: InvestigationRun) -> Dict[str, Any]:
+        invocations = list(run.tool_invocations.all()[:25])
+        evidence = ((run.evidence_bundle_json or {}).get("evidence_assessment") or {})
+        bundle = getattr(run, "evidence_bundle_record", None)
+        return {
+            "run_id": str(run.run_id),
+            "status": run.status,
+            "question": run.question,
+            "application": run.application,
+            "service": run.service,
+            "target_host": run.target_host,
+            "incident_key": str(run.incident.incident_key) if run.incident else "",
+            "incident_title": run.incident.title if run.incident else "",
+            "session_id": str(run.session.session_id) if run.session else "",
+            "tool_call_count": run.tool_invocations.count(),
+            "current_stage": run.current_stage,
+            "confidence_score": run.confidence_score,
+            "planner": run.planner_json or {},
+            "workflow": run.workflow_json or [],
+            "evidence_bundle": run.evidence_bundle_json or {},
+            "missing_evidence": run.missing_evidence_json or [],
+            "contradicting_evidence": run.contradicting_evidence_json or [],
+            "confidence_assessment": evidence.get("confidence_assessment") or {},
+            "contradiction_assessment": evidence.get("contradiction_assessment") or {},
+            "evidence_gap_assessment": evidence.get("evidence_gap_assessment") or {},
+            "evidence_bundle_ref": {
+                "bundle_id": str(bundle.bundle_id),
+                "lifecycle_status": bundle.lifecycle_status,
+                "primary_store": bundle.primary_store,
+                "archive_store": bundle.archive_store,
+                "snapshot_count": bundle.snapshots.count(),
+                "transcript_entry_count": bundle.transcript_entries.count(),
+            } if bundle else {},
+            "created_at": run.created_at.isoformat(),
+            "updated_at": run.updated_at.isoformat(),
+            "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+            "tool_calls": [
+                {
+                    "server_name": item.server_name,
+                    "tool_name": item.tool_name,
+                    "status": item.status,
+                    "latency_ms": item.latency_ms,
+                    "created_at": item.created_at.isoformat(),
+                    "request_json": item.request_json or {},
+                    "response_json": item.response_json or {},
+                    "error_detail": item.error_detail or "",
+                }
+                for item in invocations
+            ],
+        }
+
     results = []
     for run in runs:
-        invocations = list(run.tool_invocations.all()[:10])
-        results.append(
-            {
-                "run_id": str(run.run_id),
-                "status": run.status,
-                "question": run.question,
-                "application": run.application,
-                "service": run.service,
-                "target_host": run.target_host,
-                "incident_key": str(run.incident.incident_key) if run.incident else "",
-                "session_id": str(run.session.session_id) if run.session else "",
-                "tool_call_count": run.tool_invocations.count(),
-                "updated_at": run.updated_at.isoformat(),
-                "tool_calls": [
-                    {
-                        "server_name": item.server_name,
-                        "tool_name": item.tool_name,
-                        "status": item.status,
-                        "latency_ms": item.latency_ms,
-                        "created_at": item.created_at.isoformat(),
-                    }
-                    for item in invocations
-                ],
-            }
-        )
+        results.append(_serialize_investigation_run(run))
     return JsonResponse({"count": len(results), "results": results})
+
+
+def _serialize_retention_policy(policy: Optional[DataRetentionPolicy]) -> Dict[str, Any]:
+    if not policy:
+        return {}
+    return {
+        "policy_id": str(policy.policy_id),
+        "slug": policy.slug,
+        "name": policy.name,
+        "data_category": policy.data_category,
+        "subject_type": policy.subject_type,
+        "deployment_mode": policy.deployment_mode,
+        "primary_store": policy.primary_store,
+        "archive_store": policy.archive_store,
+        "retention_days": int(policy.retention_days or 0),
+        "archive_after_days": int(policy.archive_after_days or 0),
+        "purge_after_days": int(policy.purge_after_days or 0),
+        "hold_supported": bool(policy.hold_supported),
+        "object_storage_required": bool(policy.object_storage_required),
+        "vector_store_required": bool(policy.vector_store_required),
+        "trace_backend": policy.trace_backend or "",
+        "is_default": bool(policy.is_default),
+        "storage_defaults": policy.storage_defaults_json or {},
+        "policy_json": policy.policy_json or {},
+        "notes": policy.notes or "",
+        "updated_at": policy.updated_at.isoformat(),
+    }
+
+
+@login_required
+def lifecycle_retention_policies_view(request: HttpRequest):
+    deployment_mode = str(request.GET.get("deployment_mode") or "").strip().lower()
+    subject_type = str(request.GET.get("subject_type") or "").strip().lower()
+    data_category = str(request.GET.get("data_category") or "").strip().lower()
+
+    policies = DataRetentionPolicy.objects.all()
+    if deployment_mode:
+        policies = policies.filter(models.Q(deployment_mode=deployment_mode) | models.Q(deployment_mode="any"))
+    if subject_type:
+        policies = policies.filter(subject_type=subject_type)
+    if data_category:
+        policies = policies.filter(data_category=data_category)
+
+    serialized = [_serialize_retention_policy(policy) for policy in policies.order_by("data_category", "subject_type", "deployment_mode", "slug")]
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for item in serialized:
+        grouped.setdefault(item["deployment_mode"], []).append(item)
+
+    return JsonResponse(
+        {
+            "count": len(serialized),
+            "results": serialized,
+            "grouped_by_deployment_mode": grouped,
+            "storage_direction": {
+                "postgres": "control_plane_state",
+                "opensearch": "centralized_logs",
+                "victoriametrics": "metrics",
+                "tempo": "traces",
+                "object_storage": "archives_and_large_artifacts",
+                "vector_backend": "learning_memory",
+            },
+        }
+    )
+
+
+@login_required
+def investigation_detail_view(request: HttpRequest, run_id: str):
+    run = (
+        InvestigationRun.objects.select_related("incident", "session", "evidence_bundle_record")
+        .prefetch_related("tool_invocations", "evidence_bundle_record__snapshots", "evidence_bundle_record__transcript_entries")
+        .filter(run_id=run_id)
+        .first()
+    )
+    if not run:
+        return JsonResponse({"error": "investigation_not_found"}, status=404)
+    evidence = ((run.evidence_bundle_json or {}).get("evidence_assessment") or {})
+    invocations = list(run.tool_invocations.all().order_by("created_at"))
+    bundle = getattr(run, "evidence_bundle_record", None)
+    snapshots = list(bundle.snapshots.all().order_by("created_at")) if bundle else []
+    transcript_entries = list(bundle.transcript_entries.all().order_by("created_at")) if bundle else []
+    return JsonResponse(
+        {
+            "run_id": str(run.run_id),
+            "status": run.status,
+            "route": run.route,
+            "question": run.question,
+            "application": run.application,
+            "service": run.service,
+            "target_host": run.target_host,
+            "incident_key": str(run.incident.incident_key) if run.incident else "",
+            "incident_title": run.incident.title if run.incident else "",
+            "session_id": str(run.session.session_id) if run.session else "",
+            "current_stage": run.current_stage,
+            "confidence_score": run.confidence_score,
+            "planner": run.planner_json or {},
+            "workflow": run.workflow_json or [],
+            "evidence_bundle": run.evidence_bundle_json or {},
+            "evidence_summary": run.evidence_summary or {},
+            "hypotheses": run.hypotheses_json or [],
+            "missing_evidence": run.missing_evidence_json or [],
+            "contradicting_evidence": run.contradicting_evidence_json or [],
+            "confidence_assessment": evidence.get("confidence_assessment") or {},
+            "contradiction_assessment": evidence.get("contradiction_assessment") or {},
+            "evidence_gap_assessment": evidence.get("evidence_gap_assessment") or {},
+            "evidence_bundle_ref": {
+                "bundle_id": str(bundle.bundle_id),
+                "lifecycle_status": bundle.lifecycle_status,
+                "primary_store": bundle.primary_store,
+                "archive_store": bundle.archive_store,
+                "retention_policy": bundle.retention_policy.slug if bundle and bundle.retention_policy else "",
+                "snapshot_count": len(snapshots),
+                "transcript_entry_count": len(transcript_entries),
+                "updated_at": bundle.updated_at.isoformat(),
+            } if bundle else {},
+            "evidence_snapshots": [
+                {
+                    "snapshot_id": str(snapshot.snapshot_id),
+                    "stage": snapshot.stage,
+                    "iteration_index": snapshot.iteration_index,
+                    "title": snapshot.title,
+                    "summary": snapshot.summary,
+                    "confidence_score": snapshot.confidence_score,
+                    "created_at": snapshot.created_at.isoformat(),
+                }
+                for snapshot in snapshots[-12:]
+            ],
+            "investigation_transcript": [
+                {
+                    "transcript_id": str(entry.transcript_id),
+                    "sequence_index": entry.sequence_index,
+                    "entry_type": entry.entry_type,
+                    "stage": entry.stage,
+                    "title": entry.title,
+                    "content_json": entry.content_json or {},
+                    "created_at": entry.created_at.isoformat(),
+                }
+                for entry in transcript_entries[-25:]
+            ],
+            "created_at": run.created_at.isoformat(),
+            "updated_at": run.updated_at.isoformat(),
+            "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+            "tool_calls": [
+                {
+                    "invocation_id": item.invocation_id,
+                    "server_name": item.server_name,
+                    "tool_name": item.tool_name,
+                    "status": item.status,
+                    "latency_ms": item.latency_ms,
+                    "created_at": item.created_at.isoformat(),
+                    "request_json": item.request_json or {},
+                    "response_json": item.response_json or {},
+                    "error_detail": item.error_detail or "",
+                }
+                for item in invocations
+            ],
+        }
+    )
 
 
 @login_required
@@ -5532,10 +5882,6 @@ def execute_command_view(request: HttpRequest):
     """
     if request.method != "POST":
         return JsonResponse({"error": "Invalid request method"}, status=405)
-    
-    if not AGENT_SECRET_TOKEN:
-        logger.error("CRITICAL: AGENT_SECRET_TOKEN is not set on the bot server. Cannot delegate commands.")
-        return JsonResponse({"error": "Bot server is not configured for command execution."}, status=500)
 
     try:
         body = json.loads(request.body or "{}")
@@ -5550,6 +5896,11 @@ def execute_command_view(request: HttpRequest):
         original_question = body.get("original_question")
         target_host = body.get("target_host") or (typed_action_payload or {}).get("target_host") or (typed_action_payload or {}).get("target") # The IP or hostname of the server to run the command on.
         execution_type = _summarize_execution_type(str(body.get("execution_type") or "diagnostic").strip().lower())
+        target_record = _find_target_by_host_alias(str(target_host or ""))
+
+        if (not AGENT_SECRET_TOKEN) and not (target_record and target_record.target_type == "kubernetes"):
+            logger.error("CRITICAL: AGENT_SECRET_TOKEN is not set on the bot server. Cannot delegate commands.")
+            return JsonResponse({"error": "Bot server is not configured for command execution."}, status=500)
 
         logger.info(f"[EXECUTE] Request to execute {execution_type} command: {command_to_run[:60]}... on {target_host}")
 
@@ -5771,7 +6122,11 @@ def execute_command_view(request: HttpRequest):
         intent.status = "executing"
         intent.executed_at = timezone.now()
         intent.save(update_fields=["status", "executed_at", "updated_at"])
-        success, command_output, agent_response = delegate_command_to_agent(command_to_run, target_host)
+        success, command_output, agent_response = delegate_command_to_agent(
+            command_to_run,
+            target_host,
+            typed_action=resolved_typed_action,
+        )
         record_execution_attempt(
             policy_decision=policy_decision,
             command=command_to_run,
@@ -6039,11 +6394,133 @@ FLEET_PROFILE_SEED = [
         "capabilities": ["metrics", "heartbeat"],
         "config_json": {"logs_enabled": False, "traces_enabled": False, "discovery_enabled": False},
     },
+    {
+        "slug": "kubernetes-observability",
+        "name": "Kubernetes Cluster Observability",
+        "summary": "Read-only cluster agent with workload discovery, heartbeat, and Kubernetes runtime context for monitored clusters.",
+        "default_for_target": "kubernetes",
+        "components": [
+            "OpsMitra Cluster Agent",
+            "Kubernetes discovery helper",
+            "cluster heartbeat",
+        ],
+        "capabilities": ["kubernetes", "discovery", "heartbeat", "topology"],
+        "config_json": {"logs_enabled": False, "traces_enabled": False, "discovery_enabled": True},
+    },
+]
+
+TARGET_POLICY_PROFILE_SEED = [
+    {
+        "slug": "linux-readonly",
+        "name": "Linux Readonly",
+        "description": "Read-only Linux diagnostics with service status and journald access only.",
+        "target_type": "linux",
+        "runtime_type": "any",
+        "allow_service_status": True,
+        "allow_service_restart": False,
+        "allow_docker_logs": False,
+        "allow_docker_restart": False,
+        "allow_journal_logs": True,
+        "allow_file_logs": False,
+        "allow_db_diagnostics": False,
+        "allow_db_changes": False,
+        "allow_process_kill": False,
+        "requires_approval_for_restart": True,
+        "requires_approval_for_write_actions": True,
+        "sudo_mode": "limited",
+        "allowed_command_patterns": ["systemctl status", "journalctl -u", "ss -tulpn"],
+        "metadata_json": {"recommended_for": ["linux", "readonly"]},
+    },
+    {
+        "slug": "linux-app-systemd",
+        "name": "Linux App Systemd",
+        "description": "Systemd-based application host with journald access and approval-aware service restart.",
+        "target_type": "linux",
+        "runtime_type": "systemd",
+        "allow_service_status": True,
+        "allow_service_restart": True,
+        "allow_docker_logs": False,
+        "allow_docker_restart": False,
+        "allow_journal_logs": True,
+        "allow_file_logs": True,
+        "allow_db_diagnostics": False,
+        "allow_db_changes": False,
+        "allow_process_kill": False,
+        "requires_approval_for_restart": True,
+        "requires_approval_for_write_actions": True,
+        "sudo_mode": "limited",
+        "allowed_command_patterns": ["systemctl status", "systemctl restart", "journalctl -u", "tail -n", "grep "],
+        "metadata_json": {"recommended_for": ["systemd", "app"]},
+    },
+    {
+        "slug": "linux-app-docker",
+        "name": "Linux App Docker",
+        "description": "Docker-based application host with container log access and approval-aware restart.",
+        "target_type": "linux",
+        "runtime_type": "docker",
+        "allow_service_status": True,
+        "allow_service_restart": False,
+        "allow_docker_logs": True,
+        "allow_docker_restart": True,
+        "allow_journal_logs": True,
+        "allow_file_logs": False,
+        "allow_db_diagnostics": False,
+        "allow_db_changes": False,
+        "allow_process_kill": False,
+        "requires_approval_for_restart": True,
+        "requires_approval_for_write_actions": True,
+        "sudo_mode": "limited",
+        "allowed_command_patterns": ["docker ps", "docker logs", "docker inspect", "docker restart", "systemctl status"],
+        "metadata_json": {"recommended_for": ["docker", "app"]},
+    },
+    {
+        "slug": "linux-db-readonly",
+        "name": "Linux DB Readonly",
+        "description": "Read-only diagnostics for database hosts with no restart or write actions.",
+        "target_type": "linux",
+        "runtime_type": "systemd",
+        "allow_service_status": True,
+        "allow_service_restart": False,
+        "allow_docker_logs": False,
+        "allow_docker_restart": False,
+        "allow_journal_logs": True,
+        "allow_file_logs": True,
+        "allow_db_diagnostics": True,
+        "allow_db_changes": False,
+        "allow_process_kill": False,
+        "requires_approval_for_restart": True,
+        "requires_approval_for_write_actions": True,
+        "sudo_mode": "limited",
+        "allowed_command_patterns": ["systemctl status", "journalctl -u", "tail -n", "grep ", "psql -c SELECT"],
+        "metadata_json": {"recommended_for": ["db", "readonly"]},
+    },
+    {
+        "slug": "prod-restricted",
+        "name": "Production Restricted",
+        "description": "Highly restricted production profile with read-heavy diagnostics and approval-required writes.",
+        "target_type": "linux",
+        "runtime_type": "any",
+        "allow_service_status": True,
+        "allow_service_restart": False,
+        "allow_docker_logs": True,
+        "allow_docker_restart": False,
+        "allow_journal_logs": True,
+        "allow_file_logs": True,
+        "allow_db_diagnostics": True,
+        "allow_db_changes": False,
+        "allow_process_kill": False,
+        "requires_approval_for_restart": True,
+        "requires_approval_for_write_actions": True,
+        "sudo_mode": "limited",
+        "allowed_command_patterns": ["systemctl status", "journalctl -u", "docker logs", "docker inspect", "tail -n"],
+        "metadata_json": {"recommended_for": ["prod", "restricted"]},
+    },
 ]
 
 
-def _ensure_fleet_profiles() -> List[TelemetryProfile]:
+def _ensure_fleet_profiles(target_type: Optional[str] = None) -> List[TelemetryProfile]:
     profiles: List[TelemetryProfile] = []
+    normalized_target_type = (target_type or "").strip().lower()
     for seed in FLEET_PROFILE_SEED:
         profile, _ = TelemetryProfile.objects.get_or_create(
             slug=seed["slug"],
@@ -6068,6 +6545,39 @@ def _ensure_fleet_profiles() -> List[TelemetryProfile]:
             changed = True
         if changed:
             profile.save()
+        if normalized_target_type and (profile.default_for_target or "").strip().lower() != normalized_target_type:
+            continue
+        profiles.append(profile)
+    return profiles
+
+
+def _ensure_target_policy_profiles(
+    *,
+    target_type: Optional[str] = None,
+    runtime_type: Optional[str] = None,
+) -> List[TargetPolicyProfile]:
+    profiles: List[TargetPolicyProfile] = []
+    normalized_target_type = (target_type or "").strip().lower()
+    normalized_runtime_type = (runtime_type or "").strip().lower()
+    for seed in TARGET_POLICY_PROFILE_SEED:
+        profile, _ = TargetPolicyProfile.objects.get_or_create(
+            slug=seed["slug"],
+            defaults={**seed, "is_active": True},
+        )
+        changed = False
+        for field, new_value in seed.items():
+            if getattr(profile, field) != new_value:
+                setattr(profile, field, new_value)
+                changed = True
+        if not profile.is_active:
+            profile.is_active = True
+            changed = True
+        if changed:
+            profile.save()
+        if normalized_target_type and (profile.target_type or "").strip().lower() != normalized_target_type:
+            continue
+        if normalized_runtime_type and (profile.runtime_type or "").strip().lower() not in {"any", normalized_runtime_type}:
+            continue
         profiles.append(profile)
     return profiles
 
@@ -6082,6 +6592,389 @@ def _serialize_profile(profile: TelemetryProfile) -> Dict[str, Any]:
         "capabilities": profile.capabilities or [],
     }
 
+
+def _serialize_policy_profile(profile: Optional[TargetPolicyProfile]) -> Dict[str, Any]:
+    if not profile:
+        return {}
+    return {
+        "slug": profile.slug,
+        "name": profile.name,
+        "description": profile.description,
+        "target_type": profile.target_type,
+        "runtime_type": profile.runtime_type,
+        "allow_service_status": profile.allow_service_status,
+        "allow_service_restart": profile.allow_service_restart,
+        "allow_docker_logs": profile.allow_docker_logs,
+        "allow_docker_restart": profile.allow_docker_restart,
+        "allow_journal_logs": profile.allow_journal_logs,
+        "allow_file_logs": profile.allow_file_logs,
+        "allow_db_diagnostics": profile.allow_db_diagnostics,
+        "allow_db_changes": profile.allow_db_changes,
+        "allow_process_kill": profile.allow_process_kill,
+        "requires_approval_for_restart": profile.requires_approval_for_restart,
+        "requires_approval_for_write_actions": profile.requires_approval_for_write_actions,
+        "sudo_mode": profile.sudo_mode,
+        "allowed_command_patterns": profile.allowed_command_patterns or [],
+        "metadata_json": profile.metadata_json or {},
+    }
+
+
+def _serialize_target_policy_assignment(assignment: Optional[TargetPolicyAssignment]) -> Dict[str, Any]:
+    if not assignment:
+        return {}
+    return {
+        "policy_profile": _serialize_policy_profile(assignment.policy_profile),
+        "override_json": assignment.override_json or {},
+        "config_version": assignment.config_version,
+        "last_applied_at": assignment.last_applied_at.isoformat() if assignment.last_applied_at else None,
+        "last_apply_status": assignment.last_apply_status,
+    }
+
+
+def _serialize_target_runtime_profile(runtime_profile: Optional[TargetRuntimeProfile]) -> Dict[str, Any]:
+    if not runtime_profile:
+        return {}
+    return {
+        "profile_id": runtime_profile.profile_id,
+        "role": runtime_profile.role,
+        "environment": runtime_profile.environment,
+        "runtime_type": runtime_profile.runtime_type,
+        "hostname": runtime_profile.hostname,
+        "os_family": runtime_profile.os_family,
+        "docker_available": runtime_profile.docker_available,
+        "systemd_available": runtime_profile.systemd_available,
+        "primary_restart_mode": runtime_profile.primary_restart_mode,
+        "notes": runtime_profile.notes,
+        "metadata_json": runtime_profile.metadata_json or {},
+    }
+
+
+def _serialize_target_service_binding(binding: TargetServiceBinding) -> Dict[str, Any]:
+    return {
+        "binding_id": binding.binding_id,
+        "service_name": binding.service_name,
+        "service_kind": binding.service_kind,
+        "systemd_unit": binding.systemd_unit,
+        "container_name": binding.container_name,
+        "process_name": binding.process_name,
+        "port": binding.port,
+        "is_primary": binding.is_primary,
+        "restart_command_template": binding.restart_command_template,
+        "status_command_template": binding.status_command_template,
+        "metadata_json": binding.metadata_json or {},
+    }
+
+
+def _serialize_target_log_source(log_source: TargetLogSource) -> Dict[str, Any]:
+    return {
+        "log_source_id": log_source.log_source_id,
+        "service_binding_id": log_source.service_binding.binding_id if log_source.service_binding else None,
+        "source_type": log_source.source_type,
+        "journal_unit": log_source.journal_unit,
+        "file_path": log_source.file_path,
+        "container_name": log_source.container_name,
+        "stream_family": log_source.stream_family,
+        "parser_name": log_source.parser_name,
+        "include_patterns": log_source.include_patterns or [],
+        "exclude_patterns": log_source.exclude_patterns or [],
+        "shipper_type": log_source.shipper_type,
+        "parser_type": log_source.parser_type,
+        "is_primary": log_source.is_primary,
+        "metadata_json": log_source.metadata_json or {},
+    }
+
+
+def _serialize_target_log_ingestion_profile(profile: Optional[TargetLogIngestionProfile]) -> Dict[str, Any]:
+    if not profile:
+        return {}
+    return {
+        "shipper_type": profile.shipper_type,
+        "stream_family": profile.stream_family,
+        "opensearch_pipeline": profile.opensearch_pipeline,
+        "record_metadata_json": profile.record_metadata_json or {},
+        "config_version": profile.config_version,
+        "last_applied_at": profile.last_applied_at.isoformat() if profile.last_applied_at else None,
+        "last_apply_status": profile.last_apply_status,
+    }
+
+
+def _request_data_value(data: Any, key: str, default: Any = "") -> Any:
+    value = data.get(key, default) if hasattr(data, "get") else default
+    return default if value is None else value
+
+
+def _normalize_bool(value: Any, default: bool = False) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_optional_int(value: Any) -> Optional[int]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_onboarding_track1_config(data: Any, existing: Optional[TargetOnboardingRequest] = None) -> Dict[str, Any]:
+    base_config = dict((existing.config_json if existing else {}) or {})
+
+    target_role = str(
+        _request_data_value(data, "target_role", existing.target_role if existing else "app")
+    ).strip().lower() or "app"
+    runtime_type = str(
+        _request_data_value(data, "runtime_type", existing.runtime_type if existing else "unknown")
+    ).strip().lower() or "unknown"
+    target_environment = str(
+        _request_data_value(data, "target_environment", existing.target_environment if existing else "prod")
+    ).strip().lower() or "prod"
+    notes = str(_request_data_value(data, "notes", existing.notes if existing else "")).strip()
+    policy_profile_slug = str(
+        _request_data_value(data, "policy_profile", existing.policy_profile.slug if existing and existing.policy_profile else "")
+    ).strip().lower()
+
+    service_name = str(_request_data_value(data, "service_name", "")).strip()
+    if not service_name:
+        service_name = str(_request_data_value(data, "primary_service_name", "")).strip()
+    if not service_name and existing:
+        service_name = str((((existing.config_json or {}).get("primary_service") or {}).get("service_name")) or "").strip()
+    service_kind = str(
+        _request_data_value(
+            data,
+            "service_kind",
+            (((existing.config_json or {}).get("primary_service") or {}).get("service_kind")) if existing else "",
+        )
+    ).strip() or ("docker_container" if runtime_type == "docker" else ("database" if target_role == "db" else "systemd"))
+    systemd_unit = str(
+        _request_data_value(
+            data,
+            "systemd_unit",
+            (((existing.config_json or {}).get("primary_service") or {}).get("systemd_unit")) if existing else "",
+        )
+    ).strip()
+    container_name = str(
+        _request_data_value(
+            data,
+            "container_name",
+            (((existing.config_json or {}).get("primary_service") or {}).get("container_name")) if existing else "",
+        )
+    ).strip()
+    process_name = str(
+        _request_data_value(
+            data,
+            "process_name",
+            (((existing.config_json or {}).get("primary_service") or {}).get("process_name")) if existing else "",
+        )
+    ).strip()
+    port = _normalize_optional_int(
+        _request_data_value(
+            data,
+            "port",
+            (((existing.config_json or {}).get("primary_service") or {}).get("port")) if existing else "",
+        )
+    )
+
+    log_source_type = str(
+        _request_data_value(
+            data,
+            "log_source_type",
+            (((existing.config_json or {}).get("log_source") or {}).get("source_type")) if existing else "",
+        )
+    ).strip() or ("docker" if runtime_type == "docker" else "journald")
+    journal_unit = str(
+        _request_data_value(
+            data,
+            "journal_unit",
+            (((existing.config_json or {}).get("log_source") or {}).get("journal_unit")) if existing else "",
+        )
+    ).strip()
+    file_path = str(
+        _request_data_value(
+            data,
+            "file_path",
+            (((existing.config_json or {}).get("log_source") or {}).get("file_path")) if existing else "",
+        )
+    ).strip()
+    log_container_name = str(
+        _request_data_value(
+            data,
+            "log_container_name",
+            (((existing.config_json or {}).get("log_source") or {}).get("container_name")) if existing else "",
+        )
+    ).strip() or container_name
+    log_stream_family = str(
+        _request_data_value(
+            data,
+            "log_stream_family",
+            (((existing.config_json or {}).get("log_source") or {}).get("stream_family")) if existing else "",
+        )
+    ).strip() or f"logs-{runtime_type or 'default'}"
+    parser_name = str(
+        _request_data_value(
+            data,
+            "parser_name",
+            (((existing.config_json or {}).get("log_source") or {}).get("parser_name")) if existing else "",
+        )
+    ).strip()
+    ship_logs_centrally = _normalize_bool(
+        _request_data_value(
+            data,
+            "ship_logs_centrally",
+            (((existing.config_json or {}).get("log_ingestion") or {}).get("enabled")) if existing else True,
+        ),
+        default=True,
+    )
+    shipper_type = str(
+        _request_data_value(
+            data,
+            "shipper_type",
+            (((existing.config_json or {}).get("log_ingestion") or {}).get("shipper_type")) if existing else "fluent-bit",
+        )
+    ).strip() or "fluent-bit"
+    opensearch_pipeline = str(
+        _request_data_value(
+            data,
+            "opensearch_pipeline",
+            (((existing.config_json or {}).get("log_ingestion") or {}).get("opensearch_pipeline")) if existing else "",
+        )
+    ).strip()
+    application_name = str(
+        _request_data_value(
+            data,
+            "application_name",
+            (((existing.config_json or {}).get("record_metadata_json") or {}).get("application")) if existing else "",
+        )
+    ).strip()
+
+    record_metadata_json = dict((base_config.get("record_metadata_json") or {}))
+    if application_name:
+        record_metadata_json["application"] = application_name
+    if target_role:
+        record_metadata_json["component_role"] = target_role
+    if runtime_type:
+        record_metadata_json["runtime_type"] = runtime_type
+    if target_environment:
+        record_metadata_json["environment"] = target_environment
+    if service_name:
+        record_metadata_json["service_name"] = service_name
+
+    return {
+        "target_role": target_role,
+        "runtime_type": runtime_type,
+        "target_environment": target_environment,
+        "policy_profile_slug": policy_profile_slug,
+        "notes": notes,
+        "config_json": {
+            "primary_service": {
+                "service_name": service_name,
+                "service_kind": service_kind,
+                "systemd_unit": systemd_unit,
+                "container_name": container_name,
+                "process_name": process_name,
+                "port": port,
+            },
+            "log_source": {
+                "source_type": log_source_type,
+                "journal_unit": journal_unit,
+                "file_path": file_path,
+                "container_name": log_container_name,
+                "stream_family": log_stream_family,
+                "parser_name": parser_name,
+            },
+            "log_ingestion": {
+                "enabled": ship_logs_centrally,
+                "shipper_type": shipper_type,
+                "stream_family": log_stream_family,
+                "opensearch_pipeline": opensearch_pipeline,
+            },
+            "record_metadata_json": record_metadata_json,
+        },
+    }
+
+
+def _apply_onboarding_configuration_to_target(onboarding: TargetOnboardingRequest, target: Target) -> None:
+    config = onboarding.config_json or {}
+    primary_service = config.get("primary_service") or {}
+    log_source = config.get("log_source") or {}
+    log_ingestion = config.get("log_ingestion") or {}
+    record_metadata_json = config.get("record_metadata_json") or {}
+
+    runtime_profile, _ = TargetRuntimeProfile.objects.get_or_create(target=target)
+    runtime_profile.role = onboarding.target_role or "app"
+    runtime_profile.environment = onboarding.target_environment or "prod"
+    runtime_profile.runtime_type = onboarding.runtime_type or "unknown"
+    runtime_profile.hostname = target.hostname or onboarding.hostname
+    runtime_profile.os_family = target.os_name or runtime_profile.os_family
+    runtime_profile.docker_available = onboarding.runtime_type == "docker" or bool(target.metadata_json.get("docker_available"))
+    runtime_profile.systemd_available = onboarding.target_type == "linux"
+    runtime_profile.primary_restart_mode = (
+        "docker"
+        if onboarding.runtime_type == "docker"
+        else "kubectl"
+        if onboarding.runtime_type == "kubernetes"
+        else "systemctl"
+        if primary_service.get("systemd_unit")
+        else "unknown"
+    )
+    runtime_profile.notes = onboarding.notes or ""
+    runtime_profile.metadata_json = dict(record_metadata_json)
+    runtime_profile.save()
+
+    policy_assignment, _ = TargetPolicyAssignment.objects.get_or_create(target=target)
+    policy_assignment.policy_profile = onboarding.policy_profile
+    policy_assignment.override_json = {}
+    policy_assignment.config_version = max(1, int(policy_assignment.config_version or 1))
+    policy_assignment.last_applied_at = timezone.now()
+    policy_assignment.last_apply_status = "applied"
+    policy_assignment.save()
+
+    target.service_bindings.all().delete()
+    service_binding = None
+    if primary_service.get("service_name"):
+        service_binding = TargetServiceBinding.objects.create(
+            target=target,
+            service_name=str(primary_service.get("service_name") or "").strip(),
+            service_kind=str(primary_service.get("service_kind") or "systemd").strip() or "systemd",
+            systemd_unit=str(primary_service.get("systemd_unit") or "").strip(),
+            container_name=str(primary_service.get("container_name") or "").strip(),
+            process_name=str(primary_service.get("process_name") or "").strip(),
+            port=primary_service.get("port"),
+            is_primary=True,
+            restart_command_template="",
+            status_command_template="",
+            metadata_json={"application_name": record_metadata_json.get("application") or ""},
+        )
+
+    target.log_sources.all().delete()
+    if log_source.get("source_type"):
+        TargetLogSource.objects.create(
+            target=target,
+            service_binding=service_binding,
+            source_type=str(log_source.get("source_type") or "journald").strip() or "journald",
+            journal_unit=str(log_source.get("journal_unit") or "").strip(),
+            file_path=str(log_source.get("file_path") or "").strip(),
+            container_name=str(log_source.get("container_name") or "").strip(),
+            stream_family=str(log_source.get("stream_family") or "").strip(),
+            parser_name=str(log_source.get("parser_name") or "").strip(),
+            shipper_type=str(log_ingestion.get("shipper_type") or "fluent-bit").strip() or "fluent-bit",
+            is_primary=True,
+            metadata_json={"ingestion_enabled": bool(log_ingestion.get("enabled", True))},
+        )
+
+    ingestion_profile, _ = TargetLogIngestionProfile.objects.get_or_create(target=target)
+    ingestion_profile.shipper_type = str(log_ingestion.get("shipper_type") or "fluent-bit").strip() or "fluent-bit"
+    ingestion_profile.stream_family = str(log_ingestion.get("stream_family") or "").strip()
+    ingestion_profile.opensearch_pipeline = str(log_ingestion.get("opensearch_pipeline") or "").strip()
+    ingestion_profile.record_metadata_json = dict(record_metadata_json)
+    ingestion_profile.last_applied_at = timezone.now()
+    ingestion_profile.last_apply_status = "applied"
+    ingestion_profile.config_version = max(1, int(ingestion_profile.config_version or 1))
+    ingestion_profile.save()
 
 def _sorted_discovered_services(target: Target) -> List[DiscoveredService]:
     return sorted(
@@ -6186,6 +7079,7 @@ def _build_target_runtime_payload(target: Target) -> Dict[str, Any]:
     if not discovered_count:
         discovered_count = int(target.metadata_json.get("discovered_service_count") or 0)
     docker_workloads = []
+    kubernetes_workloads = []
     host_services = []
     for service in discovered_services:
         metadata = service.metadata_json or {}
@@ -6204,11 +7098,14 @@ def _build_target_runtime_payload(target: Target) -> Dict[str, Any]:
         item["category"] = _categorize_discovered_service(item)
         if item["runtime"] == "docker":
             docker_workloads.append(item)
+        elif item["runtime"] == "kubernetes":
+            kubernetes_workloads.append(item)
         else:
             host_services.append(item)
     metadata = target.metadata_json or {}
-    container_runtime = metadata.get("container_runtime") or ("docker" if docker_workloads else "none")
+    container_runtime = metadata.get("container_runtime") or ("kubernetes" if kubernetes_workloads else ("docker" if docker_workloads else "none"))
     docker_container_count = int(metadata.get("docker_container_count") or len(docker_workloads))
+    kubernetes_workload_count = len(kubernetes_workloads)
     host_application_services = [item for item in host_services if item.get("category") == "application"]
     host_support_services = [item for item in host_services if item.get("category") != "application"]
     return {
@@ -6221,13 +7118,16 @@ def _build_target_runtime_payload(target: Target) -> Dict[str, Any]:
             "container_runtime": container_runtime,
             "docker_available": bool(metadata.get("docker_available") or docker_workloads),
             "docker_container_count": docker_container_count,
+            "kubernetes_available": bool(metadata.get("kubernetes_available") or kubernetes_workloads),
+            "kubernetes_workload_count": kubernetes_workload_count,
             "host_service_count": len(host_services),
             "host_application_service_count": len(host_application_services),
             "host_support_service_count": len(host_support_services),
             "docker_error": metadata.get("docker_error") or "",
         },
-        "workload_preview": docker_workloads[:4],
+        "workload_preview": (docker_workloads[:4] if docker_workloads else kubernetes_workloads[:4]),
         "docker_workloads": docker_workloads,
+        "kubernetes_workloads": kubernetes_workloads,
         "host_services": host_services,
         "host_application_services": host_application_services,
         "host_support_services": host_support_services,
@@ -6267,7 +7167,299 @@ def _serialize_target_detail(target: Target) -> Dict[str, Any]:
         "collector_status": target.collector_status,
         "metadata_json": target.metadata_json or {},
         "recent_execution_history": _recent_execution_history_for_target(target),
+        "policy_assignment": _serialize_target_policy_assignment(getattr(target, "policy_assignment", None)),
+        "runtime_profile": _serialize_target_runtime_profile(getattr(target, "runtime_profile", None)),
+        "service_bindings": [_serialize_target_service_binding(item) for item in target.service_bindings.all().order_by("service_name")],
+        "log_sources": [_serialize_target_log_source(item) for item in target.log_sources.all().order_by("created_at")],
+        "log_ingestion_profile": _serialize_target_log_ingestion_profile(getattr(target, "log_ingestion_profile", None)),
         **runtime_payload,
+    }
+
+
+def _opensearch_connection_settings() -> Dict[str, Any]:
+    parsed = urlparse((OPENSEARCH_URL or "").strip())
+    scheme = (parsed.scheme or "http").lower()
+    default_port = 443 if scheme == "https" else 9200
+    return {
+        "host": parsed.hostname or "opensearch.example.internal",
+        "port": parsed.port or default_port,
+        "tls": scheme == "https",
+        "http_user": parsed.username or "${OPENSEARCH_USERNAME}",
+        "http_password": parsed.password or "${OPENSEARCH_PASSWORD}",
+        "path": parsed.path or "",
+    }
+
+
+def _fluent_bit_input_block(target: Target, log_source: TargetLogSource) -> str:
+    tag_suffix = re.sub(r"[^a-zA-Z0-9_.-]+", "-", f"{target.target_id}-{log_source.log_source_id}")[:80]
+    tag = f"aiops.{tag_suffix}"
+    db_name = re.sub(r"[^a-zA-Z0-9_.-]+", "-", f"{target.target_id}-{log_source.log_source_id}.db")[:120]
+    if log_source.source_type == "journald":
+        unit = log_source.journal_unit or (
+            log_source.service_binding.systemd_unit if log_source.service_binding else ""
+        )
+        return f"""[INPUT]
+    Name              systemd
+    Tag               {tag}
+    DB                /var/lib/fluent-bit/{db_name}
+    Read_From_Tail    On
+    Strip_Underscores On
+    Systemd_Filter    _SYSTEMD_UNIT={unit}
+"""
+    if log_source.source_type == "docker":
+        return f"""[INPUT]
+    Name              tail
+    Tag               {tag}
+    Path              /var/lib/docker/containers/*/*-json.log
+    Parser            docker
+    DB                /var/lib/fluent-bit/{db_name}
+    Read_from_Head    Off
+    Refresh_Interval  10
+"""
+    if log_source.source_type == "kubernetes":
+        return f"""[INPUT]
+    Name              tail
+    Tag               {tag}
+    Path              /var/log/containers/*.log
+    Parser            cri
+    DB                /var/lib/fluent-bit/{db_name}
+    Read_from_Head    Off
+    Refresh_Interval  10
+"""
+    return f"""[INPUT]
+    Name              tail
+    Tag               {tag}
+    Path              {log_source.file_path or '/var/log/app.log'}
+    DB                /var/lib/fluent-bit/{db_name}
+    Read_from_Head    Off
+    Refresh_Interval  10
+"""
+
+
+def _fluent_bit_filter_block(target: Target, log_source: TargetLogSource) -> str:
+    tag_suffix = re.sub(r"[^a-zA-Z0-9_.-]+", "-", f"{target.target_id}-{log_source.log_source_id}")[:80]
+    tag = f"aiops.{tag_suffix}"
+    service_binding = log_source.service_binding
+    service_name = service_binding.service_name if service_binding else target.name
+    runtime_profile = getattr(target, "runtime_profile", None)
+    runtime_type = runtime_profile.runtime_type if runtime_profile else target.target_type
+    role = runtime_profile.role if runtime_profile else ""
+    stream_family = log_source.stream_family or "logs-default"
+    records = [
+        f"target_id {target.target_id}",
+        f"target_name {target.name}",
+        f"target_type {target.target_type}",
+        f"environment {target.environment}",
+        f"hostname {target.hostname or target.name}",
+        f"service_name {service_name}",
+        f"runtime_type {runtime_type}",
+        f"component_role {role}",
+        f"log_source_type {log_source.source_type}",
+        f"stream_family {stream_family}",
+    ]
+    if log_source.container_name:
+        records.append(f"container_name {log_source.container_name}")
+    if log_source.journal_unit:
+        records.append(f"journal_unit {log_source.journal_unit}")
+    if log_source.file_path:
+        records.append(f"log_file_path {log_source.file_path}")
+    rendered = "\n".join(f"    Record            {line}" for line in records)
+    return f"""[FILTER]
+    Name              record_modifier
+    Match             {tag}
+{rendered}
+"""
+
+
+def _fluent_bit_output_blocks(log_sources: List[TargetLogSource]) -> str:
+    settings = _opensearch_connection_settings()
+    blocks: List[str] = []
+    seen_streams: set[str] = set()
+    for log_source in log_sources:
+        stream_family = log_source.stream_family or "logs-default"
+        if stream_family in seen_streams:
+            continue
+        seen_streams.add(stream_family)
+        path_line = f"\n    Path              {settings['path']}" if settings["path"] not in {"", "/"} else ""
+        blocks.append(
+            f"""[OUTPUT]
+    Name              opensearch
+    Match             aiops.*
+    Host              {settings['host']}
+    Port              {settings['port']}
+    HTTP_User         {settings['http_user']}
+    HTTP_Passwd       {settings['http_password']}
+    Logstash_Format   On
+    Logstash_Prefix   {stream_family}
+    Suppress_Type_Name On
+    Replace_Dots      On
+    tls               {"On" if settings["tls"] else "Off"}{path_line}
+"""
+        )
+    return "\n".join(blocks)
+
+
+def _render_fluent_bit_config(target: Target) -> str:
+    log_sources = list(target.log_sources.select_related("service_binding").all().order_by("created_at"))
+    if not log_sources:
+        return ""
+    input_blocks = "\n".join(_fluent_bit_input_block(target, item) for item in log_sources)
+    filter_blocks = "\n".join(_fluent_bit_filter_block(target, item) for item in log_sources)
+    output_blocks = _fluent_bit_output_blocks(log_sources)
+    return f"""# Generated by OpsMitra for target {target.target_id}
+# Review paths, credentials, and runtime-specific mounts before deployment.
+
+[SERVICE]
+    Flush             5
+    Daemon            Off
+    Log_Level         info
+    Parsers_File      parsers.conf
+    storage.path      /var/lib/fluent-bit
+
+{input_blocks}
+{filter_blocks}
+{output_blocks}
+"""
+
+
+def _target_generated_config_payload(target: Target) -> Dict[str, Any]:
+    policy_assignment = getattr(target, "policy_assignment", None)
+    runtime_profile = getattr(target, "runtime_profile", None)
+    log_ingestion_profile = getattr(target, "log_ingestion_profile", None)
+    service_bindings = list(target.service_bindings.all().order_by("service_name"))
+    log_sources = list(target.log_sources.select_related("service_binding").all().order_by("created_at"))
+    return {
+        "target": {
+            "target_id": target.target_id,
+            "name": target.name,
+            "target_type": target.target_type,
+            "environment": target.environment,
+            "hostname": target.hostname,
+        },
+        "config_version": {
+            "policy": int(policy_assignment.config_version) if policy_assignment else 0,
+            "log_ingestion": int(log_ingestion_profile.config_version) if log_ingestion_profile else 0,
+        },
+        "runtime_profile": _serialize_target_runtime_profile(runtime_profile),
+        "policy_assignment": _serialize_target_policy_assignment(policy_assignment),
+        "service_bindings": [_serialize_target_service_binding(item) for item in service_bindings],
+        "log_sources": [_serialize_target_log_source(item) for item in log_sources],
+        "log_ingestion_profile": _serialize_target_log_ingestion_profile(log_ingestion_profile),
+        "generated_configs": {
+            "fluent_bit": {
+                "enabled": bool(log_ingestion_profile and log_ingestion_profile.shipper_type == "fluent-bit" and log_sources),
+                "path_hint": "/etc/fluent-bit/fluent-bit.conf",
+                "config": _render_fluent_bit_config(target) if log_sources else "",
+            }
+        },
+        "generated_at": timezone.now().isoformat(),
+    }
+
+
+def _update_target_configuration_from_payload(target: Target, payload: Dict[str, Any]) -> None:
+    runtime_payload = payload.get("runtime_profile") or {}
+    policy_slug = str(payload.get("policy_profile_slug") or "").strip().lower()
+    service_bindings_payload = payload.get("service_bindings") or []
+    log_sources_payload = payload.get("log_sources") or []
+    log_ingestion_payload = payload.get("log_ingestion_profile") or {}
+
+    runtime_profile, _ = TargetRuntimeProfile.objects.get_or_create(target=target)
+    runtime_profile.role = str(runtime_payload.get("role") or runtime_profile.role or "app").strip() or "app"
+    runtime_profile.environment = str(runtime_payload.get("environment") or runtime_profile.environment or "prod").strip() or "prod"
+    runtime_profile.runtime_type = str(runtime_payload.get("runtime_type") or runtime_profile.runtime_type or "unknown").strip() or "unknown"
+    runtime_profile.hostname = str(runtime_payload.get("hostname") or target.hostname or runtime_profile.hostname or "").strip()
+    runtime_profile.os_family = str(runtime_payload.get("os_family") or runtime_profile.os_family or "").strip()
+    runtime_profile.docker_available = bool(runtime_payload.get("docker_available"))
+    runtime_profile.systemd_available = bool(runtime_payload.get("systemd_available"))
+    runtime_profile.primary_restart_mode = str(runtime_payload.get("primary_restart_mode") or runtime_profile.primary_restart_mode or "unknown").strip() or "unknown"
+    runtime_profile.notes = str(runtime_payload.get("notes") or runtime_profile.notes or "").strip()
+    runtime_profile.metadata_json = runtime_payload.get("metadata_json") or runtime_profile.metadata_json or {}
+    runtime_profile.save()
+
+    policy_assignment, _ = TargetPolicyAssignment.objects.get_or_create(target=target)
+    if policy_slug:
+        policy_assignment.policy_profile = TargetPolicyProfile.objects.filter(slug=policy_slug, is_active=True).first()
+    policy_assignment.override_json = payload.get("policy_override_json") or policy_assignment.override_json or {}
+    policy_assignment.config_version = int(policy_assignment.config_version or 0) + 1
+    policy_assignment.last_apply_status = "pending"
+    policy_assignment.last_applied_at = None
+    policy_assignment.save()
+
+    target.service_bindings.all().delete()
+    binding_by_name: Dict[str, TargetServiceBinding] = {}
+    for raw_item in service_bindings_payload:
+        if not isinstance(raw_item, dict):
+            continue
+        service_name = str(raw_item.get("service_name") or "").strip()
+        if not service_name:
+            continue
+        binding = TargetServiceBinding.objects.create(
+            target=target,
+            service_name=service_name,
+            service_kind=str(raw_item.get("service_kind") or "systemd").strip() or "systemd",
+            systemd_unit=str(raw_item.get("systemd_unit") or "").strip(),
+            container_name=str(raw_item.get("container_name") or "").strip(),
+            process_name=str(raw_item.get("process_name") or "").strip(),
+            port=_normalize_optional_int(raw_item.get("port")),
+            is_primary=bool(raw_item.get("is_primary")),
+            restart_command_template=str(raw_item.get("restart_command_template") or "").strip(),
+            status_command_template=str(raw_item.get("status_command_template") or "").strip(),
+            metadata_json=raw_item.get("metadata_json") or {},
+        )
+        binding_by_name[binding.service_name] = binding
+
+    target.log_sources.all().delete()
+    for raw_item in log_sources_payload:
+        if not isinstance(raw_item, dict):
+            continue
+        source_type = str(raw_item.get("source_type") or "").strip()
+        if not source_type:
+            continue
+        binding_ref = str(raw_item.get("service_name") or "").strip()
+        TargetLogSource.objects.create(
+            target=target,
+            service_binding=binding_by_name.get(binding_ref),
+            source_type=source_type,
+            journal_unit=str(raw_item.get("journal_unit") or "").strip(),
+            file_path=str(raw_item.get("file_path") or "").strip(),
+            container_name=str(raw_item.get("container_name") or "").strip(),
+            stream_family=str(raw_item.get("stream_family") or "").strip(),
+            parser_name=str(raw_item.get("parser_name") or "").strip(),
+            include_patterns=raw_item.get("include_patterns") or [],
+            exclude_patterns=raw_item.get("exclude_patterns") or [],
+            shipper_type=str(raw_item.get("shipper_type") or "fluent-bit").strip() or "fluent-bit",
+            parser_type=str(raw_item.get("parser_type") or "").strip(),
+            is_primary=bool(raw_item.get("is_primary")),
+            metadata_json=raw_item.get("metadata_json") or {},
+        )
+
+    log_ingestion_profile, _ = TargetLogIngestionProfile.objects.get_or_create(target=target)
+    log_ingestion_profile.shipper_type = str(log_ingestion_payload.get("shipper_type") or log_ingestion_profile.shipper_type or "fluent-bit").strip() or "fluent-bit"
+    log_ingestion_profile.stream_family = str(log_ingestion_payload.get("stream_family") or log_ingestion_profile.stream_family or "").strip()
+    log_ingestion_profile.opensearch_pipeline = str(log_ingestion_payload.get("opensearch_pipeline") or log_ingestion_profile.opensearch_pipeline or "").strip()
+    log_ingestion_profile.record_metadata_json = log_ingestion_payload.get("record_metadata_json") or log_ingestion_profile.record_metadata_json or {}
+    log_ingestion_profile.config_version = int(log_ingestion_profile.config_version or 0) + 1
+    log_ingestion_profile.last_apply_status = "pending"
+    log_ingestion_profile.last_applied_at = None
+    log_ingestion_profile.save()
+
+
+def _mark_target_config_apply_requested(target: Target) -> Dict[str, Any]:
+    applied_at = timezone.now()
+    policy_assignment = getattr(target, "policy_assignment", None)
+    if policy_assignment:
+        policy_assignment.last_apply_status = "requested"
+        policy_assignment.last_applied_at = applied_at
+        policy_assignment.save(update_fields=["last_apply_status", "last_applied_at", "updated_at"])
+    log_ingestion_profile = getattr(target, "log_ingestion_profile", None)
+    if log_ingestion_profile:
+        log_ingestion_profile.last_apply_status = "requested"
+        log_ingestion_profile.last_applied_at = applied_at
+        log_ingestion_profile.save(update_fields=["last_apply_status", "last_applied_at", "updated_at"])
+    return {
+        "status": "requested",
+        "requested_at": applied_at.isoformat(),
+        "config_payload": _target_generated_config_payload(target),
     }
 
 
@@ -6281,6 +7473,10 @@ def _fleet_install_prereqs(target_type: str = "linux") -> Dict[str, Any]:
         missing_requirements.append(
             "AGENT_SECRET_TOKEN is not configured on the control plane, so onboarded Linux hosts cannot start the aiops-command-agent securely."
         )
+    if normalized_target_type == "kubernetes" and not AIOPS_K8S_AGENT_IMAGE_REPOSITORY:
+        missing_requirements.append(
+            "AIOPS_K8S_AGENT_IMAGE_REPOSITORY is not configured on the control plane, so Kubernetes clusters do not know which cluster-agent image to install."
+        )
 
     return {
         "control_plane_ready": not missing_requirements,
@@ -6289,9 +7485,22 @@ def _fleet_install_prereqs(target_type: str = "linux") -> Dict[str, Any]:
     }
 
 
-def _get_profile_by_slug(slug: str) -> TelemetryProfile:
-    _ensure_fleet_profiles()
-    return TelemetryProfile.objects.filter(slug=slug).first() or TelemetryProfile.objects.order_by("name").first()
+def _get_profile_by_slug(slug: str, target_type: Optional[str] = None) -> TelemetryProfile:
+    normalized_target_type = (target_type or "").strip().lower()
+    _ensure_fleet_profiles(normalized_target_type or None)
+    if normalized_target_type:
+        profile = TelemetryProfile.objects.filter(
+            slug=slug,
+            default_for_target=normalized_target_type,
+            is_active=True,
+        ).first()
+        if profile:
+            return profile
+        return TelemetryProfile.objects.filter(
+            default_for_target=normalized_target_type,
+            is_active=True,
+        ).order_by("name").first()
+    return TelemetryProfile.objects.filter(slug=slug, is_active=True).first() or TelemetryProfile.objects.filter(is_active=True).order_by("name").first()
 
 
 @login_required
@@ -6306,24 +7515,138 @@ def fleet_target_detail_view(request: HttpRequest, target_id: str):
     if request.method != "GET":
         return JsonResponse({"error": "Invalid request method"}, status=405)
     _ensure_fleet_profiles()
-    target = Target.objects.select_related("profile").prefetch_related("components", "discovered_services").filter(target_id=target_id).first()
+    target = (
+        Target.objects.select_related(
+            "profile",
+            "runtime_profile",
+            "policy_assignment__policy_profile",
+            "log_ingestion_profile",
+        )
+        .prefetch_related("components", "discovered_services", "service_bindings", "log_sources__service_binding")
+        .filter(target_id=target_id)
+        .first()
+    )
     if not target:
         return JsonResponse({"error": "Unknown target"}, status=404)
     return JsonResponse(_serialize_target_detail(target))
 
 
 @login_required
+def fleet_target_config_view(request: HttpRequest, target_id: str):
+    target = (
+        Target.objects.select_related(
+            "profile",
+            "runtime_profile",
+            "policy_assignment__policy_profile",
+            "log_ingestion_profile",
+        )
+        .prefetch_related("service_bindings", "log_sources__service_binding")
+        .filter(target_id=target_id)
+        .first()
+    )
+    if not target:
+        return JsonResponse({"error": "Unknown target"}, status=404)
+
+    if request.method == "GET":
+        return JsonResponse(_target_generated_config_payload(target))
+
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+
+    try:
+        payload = json.loads(request.body or "{}")
+    except Exception:
+        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+    try:
+        _update_target_configuration_from_payload(target, payload)
+        target.refresh_from_db()
+        return JsonResponse(_target_generated_config_payload(target))
+    except Exception as exc:
+        logger.exception("fleet_target_config_view error: %s", exc)
+        return JsonResponse({"error": "Unable to update target config", "detail": str(exc)}, status=500)
+
+
+@csrf_exempt
+@login_required
+def fleet_target_config_apply_view(request: HttpRequest, target_id: str):
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    target = (
+        Target.objects.select_related(
+            "runtime_profile",
+            "policy_assignment__policy_profile",
+            "log_ingestion_profile",
+        )
+        .prefetch_related("service_bindings", "log_sources__service_binding")
+        .filter(target_id=target_id)
+        .first()
+    )
+    if not target:
+        return JsonResponse({"error": "Unknown target"}, status=404)
+    try:
+        return JsonResponse(_mark_target_config_apply_requested(target))
+    except Exception as exc:
+        logger.exception("fleet_target_config_apply_view error: %s", exc)
+        return JsonResponse({"error": "Unable to request config apply", "detail": str(exc)}, status=500)
+
+
+@login_required
 def fleet_profiles_view(request: HttpRequest):
-    profiles = _ensure_fleet_profiles()
+    target_type = (request.GET.get("target_type") or "").strip().lower() or None
+    profiles = _ensure_fleet_profiles(target_type)
     return JsonResponse({"count": len(profiles), "results": [_serialize_profile(profile) for profile in profiles]})
+
+
+@login_required
+def fleet_policy_profiles_view(request: HttpRequest):
+    if request.method != "GET":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    target_type = (request.GET.get("target_type") or "").strip().lower() or None
+    runtime_type = (request.GET.get("runtime_type") or "").strip().lower() or None
+    profiles = _ensure_target_policy_profiles(target_type, runtime_type)
+    return JsonResponse({"count": len(profiles), "results": [_serialize_policy_profile(profile) for profile in profiles]})
+
+
+def _build_kubernetes_install_command(control_plane: str, token_value: str, profile_slug: str, namespace: str) -> str:
+    query = (
+        f"token={token_value}"
+        f"&profile={profile_slug}"
+        f"&namespace={namespace}"
+    )
+    return f"kubectl apply -f {control_plane}/genai/fleet/install/kubernetes/?{query}"
+
+
+def _kubernetes_blueprint_payload(
+    request: HttpRequest,
+    target_type: str,
+    profile: TelemetryProfile,
+    token: EnrollmentToken,
+) -> Dict[str, Any]:
+    control_plane = _public_control_plane_base_url(request)
+    namespace = AIOPS_K8S_AGENT_NAMESPACE
+    install_command = _build_kubernetes_install_command(control_plane, token.token, profile.slug, namespace)
+    return {
+        "target_type": target_type,
+        "install_mode": "generated_kubernetes_manifest",
+        "token_preview": token.token[:16] + "...",
+        "install_command": install_command,
+        "components": profile.components or [],
+        "next_steps": [
+            f"Create the `{namespace}` namespace and deploy the OpsMitra cluster agent manifest.",
+            "The cluster agent enrolls itself back into the control plane using the generated enrollment token.",
+            "The agent starts cluster heartbeat and workload discovery for deployments, services, ingresses, and namespaces.",
+            "Fleet and topology surfaces update automatically once the agent reports its first heartbeat.",
+        ],
+    }
 
 
 @login_required
 def fleet_enroll_blueprint_view(request: HttpRequest):
     target_type = (request.GET.get("target_type") or "linux").strip().lower()
-    profile_slug = (request.GET.get("profile") or "infra-observability").strip()
-    profile = _get_profile_by_slug(profile_slug)
-    token_value = f"lnx_{uuid.uuid4().hex[:24]}"
+    profile_slug = (request.GET.get("profile") or ("kubernetes-observability" if target_type == "kubernetes" else "infra-observability")).strip()
+    profile = _get_profile_by_slug(profile_slug, target_type)
+    token_prefix = "k8s" if target_type == "kubernetes" else "lnx"
+    token_value = f"{token_prefix}_{uuid.uuid4().hex[:24]}"
     expires_at = timezone.now() + timezone.timedelta(hours=24)
     token = EnrollmentToken.objects.create(
         token=token_value,
@@ -6332,26 +7655,30 @@ def fleet_enroll_blueprint_view(request: HttpRequest):
         created_by=request.user,
         expires_at=expires_at,
     )
+    prereqs = _fleet_install_prereqs(target_type)
+    if target_type == "kubernetes":
+        payload = _kubernetes_blueprint_payload(request, target_type, profile, token)
+        payload.update(prereqs)
+        return JsonResponse(payload)
+
     control_plane = _public_control_plane_base_url(request)
     install_command = (
         f"curl -fsSL {control_plane}/genai/fleet/install/linux/ | "
         f"sudo bash -s -- --control-plane {control_plane} --token {token.token} --profile {profile.slug}"
     )
-    next_steps = [
-        "Create an aiops-agent user and install the supervisor service.",
-        "Install OpenTelemetry Collector and the selected host exporters locally.",
-        "Enroll back into the control plane and start heartbeat reporting.",
-        "Begin discovery so services can populate Fleet, Applications, and Graphs.",
-    ]
-    prereqs = _fleet_install_prereqs(target_type)
     return JsonResponse(
         {
             "target_type": target_type,
-            "install_mode": "generated_shell_bootstrap" if target_type == "linux" else "planned",
+            "install_mode": "generated_shell_bootstrap",
             "token_preview": token.token[:16] + "...",
             "install_command": install_command,
             "components": profile.components or [],
-            "next_steps": next_steps,
+            "next_steps": [
+                "Create an aiops-agent user and install the supervisor service.",
+                "Install OpenTelemetry Collector and the selected host exporters locally.",
+                "Enroll back into the control plane and start heartbeat reporting.",
+                "Begin discovery so services can populate Fleet, Applications, and Graphs.",
+            ],
             **prereqs,
         }
     )
@@ -6389,6 +7716,18 @@ def fleet_enroll_view(request: HttpRequest):
                 "last_heartbeat_at": timezone.now(),
             },
         )
+        onboarding = None
+        onboarding_id = str((token.metadata_json or {}).get("onboarding_id") or "").strip()
+        if onboarding_id:
+            onboarding = TargetOnboardingRequest.objects.select_related("policy_profile").filter(onboarding_id=onboarding_id).first()
+            if onboarding:
+                onboarding.target = target
+                onboarding.status = "installed"
+                onboarding.save(update_fields=["target", "status", "updated_at"])
+                _apply_onboarding_configuration_to_target(onboarding, target)
+        cluster_agent_token = ""
+        if token.target_type == "kubernetes":
+            cluster_agent_token = _ensure_cluster_agent_token(target)
         token.used_at = token.used_at or timezone.now()
         token.target_name = token.target_name or target.name
         token.save(update_fields=["used_at", "target_name"])
@@ -6404,7 +7743,10 @@ def fleet_enroll_view(request: HttpRequest):
             auto_register_target_code_context(target)
         except Exception as exc:
             logger.warning("Code-context auto-registration failed during enroll for %s: %s", target.target_id, exc)
-        return JsonResponse({"target": _serialize_target(target), "profile": _serialize_profile(target.profile) if target.profile else None})
+        payload = {"target": _serialize_target(target), "profile": _serialize_profile(target.profile) if target.profile else None}
+        if cluster_agent_token:
+            payload["cluster_agent_auth_token"] = cluster_agent_token
+        return JsonResponse(payload)
     except Exception as exc:
         logger.exception("fleet_enroll_view error: %s", exc)
         return JsonResponse({"error": "Unable to enroll target", "detail": str(exc)}, status=500)
@@ -6466,6 +7808,58 @@ def fleet_heartbeat_view(request: HttpRequest, target_id: str):
         return JsonResponse({"error": "Unable to record heartbeat", "detail": str(exc)}, status=500)
 
 
+def _cluster_agent_request_target(request: HttpRequest, target_id: str) -> Optional[Target]:
+    provided = str(request.headers.get("X-Cluster-Agent-Token") or "").strip()
+    if not provided:
+        return None
+    target = Target.objects.select_related("profile").filter(target_id=target_id, target_type="kubernetes").first()
+    if not target:
+        return None
+    expected = _cluster_agent_token(target)
+    if not expected or provided != expected:
+        return None
+    return target
+
+
+@csrf_exempt
+def fleet_cluster_agent_poll_view(request: HttpRequest, target_id: str):
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    target = _cluster_agent_request_target(request, target_id)
+    if not target:
+        return JsonResponse({"error": "Unauthorized cluster agent request"}, status=403)
+    commands = _dequeue_k8s_commands(target)
+    return JsonResponse({"commands": commands})
+
+
+@csrf_exempt
+def fleet_cluster_agent_result_view(request: HttpRequest, target_id: str):
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    target = _cluster_agent_request_target(request, target_id)
+    if not target:
+        return JsonResponse({"error": "Unauthorized cluster agent request"}, status=403)
+    try:
+        body = json.loads(request.body or "{}")
+    except Exception:
+        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+    command_id = str(body.get("command_id") or "").strip()
+    if not command_id:
+        return JsonResponse({"error": "Missing command_id"}, status=400)
+    _store_k8s_command_result(
+        target,
+        command_id,
+        {
+            "success": bool(body.get("success")),
+            "output": str(body.get("output") or ""),
+            "error": str(body.get("error") or ""),
+            "metadata_json": body.get("metadata_json") or {},
+            "completed_at": timezone.now().isoformat(),
+        },
+    )
+    return JsonResponse({"status": "ok"})
+
+
 
 def _public_control_plane_base_url(request: HttpRequest) -> str:
     if AIOPS_PUBLIC_BASE_URL:
@@ -6488,10 +7882,15 @@ def _serialize_onboarding_request(onboarding: TargetOnboardingRequest) -> Dict[s
         "onboarding_id": onboarding.onboarding_id,
         "name": onboarding.name,
         "hostname": onboarding.hostname,
+        "target_role": onboarding.target_role,
+        "runtime_type": onboarding.runtime_type,
+        "target_environment": onboarding.target_environment,
         "ssh_user": onboarding.ssh_user,
         "ssh_port": onboarding.ssh_port,
         "target_type": onboarding.target_type,
         "profile_slug": onboarding.profile.slug if onboarding.profile else "",
+        "policy_profile_slug": onboarding.policy_profile.slug if onboarding.policy_profile else "",
+        "policy_profile_name": onboarding.policy_profile.name if onboarding.policy_profile else "",
         "status": onboarding.status,
         "connectivity_status": onboarding.connectivity_status,
         "connectivity_message": onboarding.connectivity_message,
@@ -6500,13 +7899,15 @@ def _serialize_onboarding_request(onboarding: TargetOnboardingRequest) -> Dict[s
         "install_message": onboarding.install_message,
         "target_id": onboarding.target.target_id if onboarding.target else None,
         "pem_file_name": os.path.basename(onboarding.pem_file.name) if onboarding.pem_file else "",
+        "notes": onboarding.notes,
+        "config_json": onboarding.config_json or {},
     }
 
 
 @login_required
 def fleet_onboarding_requests_view(request: HttpRequest):
     if request.method == "GET":
-        requests_qs = TargetOnboardingRequest.objects.select_related("profile", "target").all()
+        requests_qs = TargetOnboardingRequest.objects.select_related("profile", "policy_profile", "target").all()
         return JsonResponse({"count": requests_qs.count(), "results": [_serialize_onboarding_request(item) for item in requests_qs]})
 
     if request.method != "POST":
@@ -6515,26 +7916,59 @@ def fleet_onboarding_requests_view(request: HttpRequest):
     try:
         name = str(request.POST.get("name") or "").strip()
         hostname = str(request.POST.get("hostname") or "").strip()
-        ssh_user = str(request.POST.get("ssh_user") or "ubuntu").strip()
-        ssh_port = int(request.POST.get("ssh_port") or 22)
         target_type = str(request.POST.get("target_type") or "linux").strip().lower()
-        profile_slug = str(request.POST.get("profile") or "infra-observability").strip()
+        ssh_user = str(request.POST.get("ssh_user") or ("ubuntu" if target_type == "linux" else "")).strip()
+        ssh_port = int(request.POST.get("ssh_port") or 22)
+        profile_slug = str(
+            request.POST.get("profile")
+            or ("kubernetes-observability" if target_type == "kubernetes" else "infra-observability")
+        ).strip()
         pem_file = request.FILES.get("pem_file")
 
-        if not all([name, hostname, pem_file]):
-            return JsonResponse({"error": "name, hostname, and pem_file are required"}, status=400)
+        if not name or not hostname:
+            return JsonResponse({"error": "name and hostname are required"}, status=400)
+        if target_type == "linux" and not pem_file:
+            return JsonResponse({"error": "pem_file is required for Linux onboarding"}, status=400)
 
-        profile = _get_profile_by_slug(profile_slug)
+        profile = _get_profile_by_slug(profile_slug, target_type)
+        track1_config = _extract_onboarding_track1_config(request.POST)
+        _ensure_target_policy_profiles(target_type, track1_config["runtime_type"])
+        policy_profile = None
+        if track1_config["policy_profile_slug"]:
+            policy_profile = (
+                TargetPolicyProfile.objects.filter(
+                    slug=track1_config["policy_profile_slug"],
+                    is_active=True,
+                ).first()
+            )
+        if not policy_profile:
+            policy_profile = (
+                TargetPolicyProfile.objects.filter(
+                    target_type=target_type,
+                    is_active=True,
+                )
+                .filter(models.Q(runtime_type="any") | models.Q(runtime_type=track1_config["runtime_type"]))
+                .order_by("name")
+                .first()
+            )
         onboarding = TargetOnboardingRequest.objects.create(
             name=name,
             hostname=hostname,
+            target_role=track1_config["target_role"],
+            runtime_type=track1_config["runtime_type"],
+            target_environment=track1_config["target_environment"],
             ssh_user=ssh_user,
             ssh_port=ssh_port,
             target_type=target_type,
             profile=profile,
-            pem_file=pem_file,
+            policy_profile=policy_profile,
+            config_json=track1_config["config_json"],
+            notes=track1_config["notes"],
             created_by=request.user,
         )
+        if pem_file:
+            onboarding.pem_file = pem_file
+            onboarding.save(update_fields=["pem_file", "updated_at"])
         return JsonResponse(_serialize_onboarding_request(onboarding), status=201)
     except Exception as exc:
         logger.exception("fleet_onboarding_requests_view error: %s", exc)
@@ -6543,7 +7977,7 @@ def fleet_onboarding_requests_view(request: HttpRequest):
 
 @login_required
 def fleet_onboarding_request_detail_view(request: HttpRequest, onboarding_id: str):
-    onboarding = TargetOnboardingRequest.objects.select_related("profile", "target").filter(onboarding_id=onboarding_id).first()
+    onboarding = TargetOnboardingRequest.objects.select_related("profile", "policy_profile", "target").filter(onboarding_id=onboarding_id).first()
     if not onboarding:
         return JsonResponse({"error": "Unknown onboarding request"}, status=404)
 
@@ -6562,23 +7996,51 @@ def fleet_onboarding_request_detail_view(request: HttpRequest, onboarding_id: st
     try:
         name = str(request.POST.get("name") or onboarding.name).strip()
         hostname = str(request.POST.get("hostname") or onboarding.hostname).strip()
-        ssh_user = str(request.POST.get("ssh_user") or onboarding.ssh_user or "ubuntu").strip()
-        ssh_port = int(request.POST.get("ssh_port") or onboarding.ssh_port or 22)
         target_type = str(request.POST.get("target_type") or onboarding.target_type or "linux").strip().lower()
-        profile_slug = str(request.POST.get("profile") or (onboarding.profile.slug if onboarding.profile else "infra-observability")).strip()
+        ssh_user = str(request.POST.get("ssh_user") or onboarding.ssh_user or ("ubuntu" if target_type == "linux" else "")).strip()
+        ssh_port = int(request.POST.get("ssh_port") or onboarding.ssh_port or 22)
+        profile_slug = str(
+            request.POST.get("profile")
+            or (onboarding.profile.slug if onboarding.profile else ("kubernetes-observability" if target_type == "kubernetes" else "infra-observability"))
+        ).strip()
         pem_file = request.FILES.get("pem_file")
 
-        profile = _get_profile_by_slug(profile_slug)
+        profile = _get_profile_by_slug(profile_slug, target_type)
+        track1_config = _extract_onboarding_track1_config(request.POST, existing=onboarding)
+        _ensure_target_policy_profiles(target_type, track1_config["runtime_type"])
+        policy_profile = None
+        if track1_config["policy_profile_slug"]:
+            policy_profile = TargetPolicyProfile.objects.filter(slug=track1_config["policy_profile_slug"], is_active=True).first()
+        if not policy_profile:
+            policy_profile = (
+                onboarding.policy_profile
+                or TargetPolicyProfile.objects.filter(
+                    target_type=target_type,
+                    is_active=True,
+                )
+                .filter(models.Q(runtime_type="any") | models.Q(runtime_type=track1_config["runtime_type"]))
+                .order_by("name")
+                .first()
+            )
         onboarding.name = name
         onboarding.hostname = hostname
+        onboarding.target_role = track1_config["target_role"]
+        onboarding.runtime_type = track1_config["runtime_type"]
+        onboarding.target_environment = track1_config["target_environment"]
         onboarding.ssh_user = ssh_user
         onboarding.ssh_port = ssh_port
         onboarding.target_type = target_type
         onboarding.profile = profile
-        if pem_file:
+        onboarding.policy_profile = policy_profile
+        onboarding.config_json = track1_config["config_json"]
+        onboarding.notes = track1_config["notes"]
+        if target_type == "linux" and pem_file:
             if onboarding.pem_file:
                 onboarding.pem_file.delete(save=False)
             onboarding.pem_file = pem_file
+        if target_type == "kubernetes" and onboarding.pem_file:
+            onboarding.pem_file.delete(save=False)
+            onboarding.pem_file = None
         onboarding.connectivity_status = "untested"
         onboarding.connectivity_message = ""
         onboarding.status = "draft"
@@ -6591,6 +8053,8 @@ def fleet_onboarding_request_detail_view(request: HttpRequest, onboarding_id: st
 
 
 def _ssh_base_command(onboarding: TargetOnboardingRequest) -> List[str]:
+    if not onboarding.pem_file:
+        raise ValueError("Linux onboarding requires a PEM file before SSH connectivity can be tested.")
     if onboarding.pem_file and os.path.exists(onboarding.pem_file.path):
         try:
             os.chmod(onboarding.pem_file.path, 0o600)
@@ -6615,10 +8079,22 @@ def _ssh_base_command(onboarding: TargetOnboardingRequest) -> List[str]:
 def fleet_onboarding_test_view(request: HttpRequest, onboarding_id: str):
     if request.method != "POST":
         return JsonResponse({"error": "Invalid request method"}, status=405)
-    onboarding = TargetOnboardingRequest.objects.select_related("profile", "target").filter(onboarding_id=onboarding_id).first()
+    onboarding = TargetOnboardingRequest.objects.select_related("profile", "policy_profile", "target").filter(onboarding_id=onboarding_id).first()
     if not onboarding:
         return JsonResponse({"error": "Unknown onboarding request"}, status=404)
     try:
+        if onboarding.target_type == "kubernetes":
+            prereqs = _fleet_install_prereqs("kubernetes")
+            onboarding.last_connectivity_check_at = timezone.now()
+            onboarding.connectivity_status = "reachable" if prereqs["control_plane_ready"] else "failed"
+            onboarding.connectivity_message = (
+                "Control plane prerequisites look good. Apply the generated Kubernetes manifest to complete cluster enrollment."
+                if prereqs["control_plane_ready"]
+                else "; ".join(prereqs["missing_requirements"])
+            )[:2000]
+            onboarding.status = "validated" if prereqs["control_plane_ready"] else "failed"
+            onboarding.save(update_fields=["last_connectivity_check_at", "connectivity_status", "connectivity_message", "status", "updated_at"])
+            return JsonResponse(_serialize_onboarding_request(onboarding))
         tcp_check = subprocess.run(
             ["nc", "-vz", "-w", "5", onboarding.hostname, str(onboarding.ssh_port)],
             capture_output=True,
@@ -6671,12 +8147,118 @@ def _build_linux_install_command(control_plane: str, token_value: str, profile_s
     )
 
 
+def _kubernetes_agent_manifest(control_plane: str, token_value: str, namespace: str, cluster_name: str) -> str:
+    image_ref = f"{AIOPS_K8S_AGENT_IMAGE_REPOSITORY}:{AIOPS_K8S_AGENT_IMAGE_TAG}"
+    return f"""apiVersion: v1
+kind: Namespace
+metadata:
+  name: {namespace}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: opsmitra-cluster-agent
+  namespace: {namespace}
+type: Opaque
+stringData:
+  CONTROL_PLANE_URL: {control_plane}
+  ENROLL_TOKEN: {token_value}
+  CLUSTER_NAME: {cluster_name}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opsmitra-cluster-agent
+  namespace: {namespace}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: opsmitra-cluster-agent-readonly
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces", "nodes", "pods", "services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: opsmitra-cluster-agent-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: opsmitra-cluster-agent-readonly
+subjects:
+  - kind: ServiceAccount
+    name: opsmitra-cluster-agent
+    namespace: {namespace}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opsmitra-cluster-agent
+  namespace: {namespace}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: opsmitra-cluster-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: opsmitra-cluster-agent
+    spec:
+      serviceAccountName: opsmitra-cluster-agent
+      containers:
+        - name: agent
+          image: {image_ref}
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: opsmitra-cluster-agent
+          env:
+            - name: TARGET_ENVIRONMENT
+              value: production
+            - name: HEARTBEAT_INTERVAL_SECONDS
+              value: "60"
+            - name: COMMAND_POLL_INTERVAL_SECONDS
+              value: "5"
+            - name: VERIFY_SSL
+              value: "false"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: tmp
+          emptyDir: {{}}
+"""
+
+
 @csrf_exempt
 @login_required
 def fleet_onboarding_install_view(request: HttpRequest, onboarding_id: str):
     if request.method != "POST":
         return JsonResponse({"error": "Invalid request method"}, status=405)
-    onboarding = TargetOnboardingRequest.objects.select_related("profile", "target").filter(onboarding_id=onboarding_id).first()
+    onboarding = TargetOnboardingRequest.objects.select_related("profile", "policy_profile", "target").filter(onboarding_id=onboarding_id).first()
     if not onboarding:
         return JsonResponse({"error": "Unknown onboarding request"}, status=404)
     if onboarding.connectivity_status != "reachable":
@@ -6691,7 +8273,8 @@ def fleet_onboarding_install_view(request: HttpRequest, onboarding_id: str):
                 },
                 status=400,
             )
-        token_value = f"lnx_{uuid.uuid4().hex[:24]}"
+        token_prefix = "k8s" if onboarding.target_type == "kubernetes" else "lnx"
+        token_value = f"{token_prefix}_{uuid.uuid4().hex[:24]}"
         token = EnrollmentToken.objects.create(
             token=token_value,
             target_type=onboarding.target_type,
@@ -6699,8 +8282,26 @@ def fleet_onboarding_install_view(request: HttpRequest, onboarding_id: str):
             profile=onboarding.profile,
             created_by=request.user,
             expires_at=timezone.now() + timezone.timedelta(hours=24),
+            metadata_json={"onboarding_id": onboarding.onboarding_id},
         )
         control_plane = _public_control_plane_base_url(request)
+        if onboarding.target_type == "kubernetes":
+            install_command = _build_kubernetes_install_command(
+                control_plane,
+                token.token,
+                onboarding.profile.slug if onboarding.profile else "kubernetes-observability",
+                AIOPS_K8S_AGENT_NAMESPACE,
+            )
+            onboarding.status = "validated"
+            onboarding.last_install_at = timezone.now()
+            onboarding.install_message = (
+                f"Apply the generated manifest to the cluster: {install_command}"
+            )[:4000]
+            onboarding.save(update_fields=["status", "last_install_at", "install_message", "updated_at"])
+            payload = _serialize_onboarding_request(onboarding)
+            payload["install_command"] = install_command
+            payload["install_mode"] = "generated_kubernetes_manifest"
+            return JsonResponse(payload)
         install_command = _build_linux_install_command(
             control_plane,
             token.token,
@@ -6731,6 +8332,22 @@ def fleet_onboarding_install_view(request: HttpRequest, onboarding_id: str):
         onboarding.save(update_fields=["status", "last_install_at", "install_message", "updated_at"])
         payload = _serialize_onboarding_request(onboarding)
         return JsonResponse(payload, status=502)
+
+
+@csrf_exempt
+@xframe_options_exempt
+def fleet_kubernetes_install_manifest_view(request: HttpRequest):
+    token_value = str(request.GET.get("token") or "").strip()
+    if not token_value:
+        return JsonResponse({"error": "Missing enrollment token"}, status=400)
+    token = EnrollmentToken.objects.select_related("profile").filter(token=token_value, revoked=False).first()
+    if not token or not token.is_valid or token.target_type != "kubernetes":
+        return JsonResponse({"error": "Invalid or expired Kubernetes enrollment token"}, status=403)
+    namespace = str(request.GET.get("namespace") or AIOPS_K8S_AGENT_NAMESPACE).strip() or AIOPS_K8S_AGENT_NAMESPACE
+    control_plane = _public_control_plane_base_url(request)
+    cluster_name = token.target_name or f"{namespace}-cluster"
+    manifest = _kubernetes_agent_manifest(control_plane, token.token, namespace, cluster_name)
+    return HttpResponse(manifest, content_type="application/yaml")
 
 
 @csrf_exempt

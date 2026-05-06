@@ -1,0 +1,131 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opsmitra.webServiceName" . }}
+  labels:
+    {{- include "opsmitra.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app.kubernetes.io/name: {{ include "opsmitra.name" . }}
+    app.kubernetes.io/component: web
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: {{ .Values.service.webPort }}
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opsmitra.frontendServiceName" . }}
+  labels:
+    {{- include "opsmitra.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app.kubernetes.io/name: {{ include "opsmitra.name" . }}
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: {{ .Values.service.frontendPort }}
+      targetPort: http
+{{- if .Values.postgresql.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opsmitra.postgresServiceName" . }}
+  labels:
+    {{- include "opsmitra.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "opsmitra.name" . }}
+    app.kubernetes.io/component: postgres
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+{{- end }}
+{{- if .Values.redis.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opsmitra.redisServiceName" . }}
+  labels:
+    {{- include "opsmitra.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "opsmitra.name" . }}
+    app.kubernetes.io/component: redis
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+{{- end }}
+{{- if .Values.observability.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opsmitra.otelServiceName" . }}
+  labels:
+    {{- include "opsmitra.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "opsmitra.name" . }}
+    app.kubernetes.io/component: otel-collector
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: otlp-grpc
+      port: {{ .Values.observability.otelGrpcPort }}
+      targetPort: otlp-grpc
+    - name: otlp-http
+      port: {{ .Values.observability.otelHttpPort }}
+      targetPort: otlp-http
+    - name: prom
+      port: {{ .Values.observability.otelMetricsPort }}
+      targetPort: prom
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opsmitra.jaegerServiceName" . }}
+  labels:
+    {{- include "opsmitra.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "opsmitra.name" . }}
+    app.kubernetes.io/component: jaeger
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: ui
+      port: {{ .Values.observability.jaegerUiPort }}
+      targetPort: ui
+    - name: metrics
+      port: 14269
+      targetPort: metrics
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opsmitra.metricsServiceName" . }}
+  labels:
+    {{- include "opsmitra.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "opsmitra.name" . }}
+    app.kubernetes.io/component: metrics
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: {{ .Values.observability.metricsPort }}
+      targetPort: http
+{{- end }}

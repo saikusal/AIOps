@@ -167,10 +167,12 @@ The current product shape is:
 
 - **Today**: self-host the control plane on a customer Linux server using Docker Compose.
 - **Today**: onboard customer Linux servers by installing collectors and an AIOps agent bundle over SSH.
-- **Next**: package the control plane for Kubernetes-based customer environments.
-- **Later**: add first-class Kubernetes onboarding for monitored customer clusters.
+- **Implemented**: package the control plane for Kubernetes under [deploy/helm/opsmitra](./deploy/helm/opsmitra).
+- **Implemented**: first-class Kubernetes onboarding for monitored customer clusters through a generated cluster-agent manifest and chart in [deploy/helm/opsmitra-cluster-agent](./deploy/helm/opsmitra-cluster-agent).
 
 This means the product is already self-hosted and centralized, but the monitored estate can be much larger than the single host that runs the control plane.
+
+For a step-by-step Kubernetes operator guide, see [deploy/KUBERNETES_DEPLOYMENT.md](./deploy/KUBERNETES_DEPLOYMENT.md).
 
 ### Prerequisites
 
@@ -259,9 +261,7 @@ If the customer application runs as Docker containers on Linux servers, the onbo
 - **Runtime on that target**: Docker
 - **Workloads to discover**: containers, images, ports, health, and logs
 
-The current implementation already supports Linux host enrollment and safe Docker-oriented remediation commands, but it does **not** yet perform full Docker workload auto-discovery during heartbeat. Today the heartbeat reports the installed host-side collectors back to Fleet.
-
-The next step for Docker-aware discovery is:
+The current implementation supports:
 
 1. inspect the local Docker runtime from the installed agent
 2. enumerate running containers, image names, ports, labels, and health state
@@ -271,7 +271,7 @@ The next step for Docker-aware discovery is:
 That keeps the model simple:
 
 - Docker on Linux is treated as a Linux target with an additional runtime discovery layer
-- Kubernetes will be treated separately as a cluster-level onboarding path
+- Kubernetes is treated separately as a cluster-level onboarding path, using a cluster agent instead of SSH
 
 ## Main URLs
 
@@ -323,3 +323,24 @@ See [CHAOS_RUNBOOK.md](./CHAOS_RUNBOOK.md) for scenarios.
 - [MCP_PHASE_PLAN.md](./MCP_PHASE_PLAN.md)
 - [CODE_CONTEXT_ENGINE_PLAN.md](./CODE_CONTEXT_ENGINE_PLAN.md)
 - [CODE_INTELLIGENCE_FOR_INCIDENTS.md](./CODE_INTELLIGENCE_FOR_INCIDENTS.md)
+Kubernetes deployment assets now live under:
+
+- [deploy/helm/opsmitra](./deploy/helm/opsmitra) for the control plane
+- [deploy/helm/opsmitra-cluster-agent](./deploy/helm/opsmitra-cluster-agent) for monitored customer clusters
+- [deploy/README.md](./deploy/README.md) for image build/push and capability notes
+
+To build and push the monitored-cluster agent image:
+
+```bash
+./scripts/build_k8s_agent_image.sh your-registry/opsmitra-k8s-agent v0.1.0
+./scripts/push_k8s_agent_image.sh your-registry/opsmitra-k8s-agent v0.1.0
+```
+
+Then set `AIOPS_K8S_AGENT_IMAGE_REPOSITORY` and `AIOPS_K8S_AGENT_IMAGE_TAG` on the control plane so generated cluster manifests resolve to your registry image.
+
+Current Kubernetes scope:
+
+- control plane on Kubernetes: implemented
+- monitored cluster enrollment, heartbeat, and workload discovery: implemented
+- Kubernetes diagnostic command execution through the cluster agent: implemented
+- Kubernetes rollout restart remediation through the cluster agent: implemented

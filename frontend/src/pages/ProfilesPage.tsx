@@ -4,7 +4,7 @@ import { fetchTelemetryProfiles } from "../lib/api";
 export function ProfilesPage() {
   const profilesQuery = useQuery({
     queryKey: ["fleet-profiles"],
-    queryFn: fetchTelemetryProfiles,
+    queryFn: () => fetchTelemetryProfiles(),
   });
 
   const profiles = profilesQuery.data || [];

@@ -37,7 +37,7 @@ The platform currently has four interacting planes:
    +---------------------------+                 +-------------------------------+
    | Control Plane Host        |                 | Monitored Linux Servers       |
    | Docker Compose today      |                 | external targets              |
-   | Kubernetes packaging next |                 | onboarded over SSH            |
+   | Kubernetes via Helm chart |                 | onboarded over SSH            |
    +-------------+-------------+                 +---------------+---------------+
                  |                                               |
        +---------+---------+                                     |
@@ -90,16 +90,16 @@ The current supported control-plane deployment is:
 - Docker Compose for service packaging and startup
 - local Postgres, Redis, observability components, and `vLLM`
 
-The next packaging target is:
+The additional packaging target is:
 
 - Kubernetes deployment for the control plane itself
-- most likely via Helm charts and environment-specific values
+- Helm charts and environment-specific values under `deploy/helm/opsmitra`
 
 That distinction matters:
 
 - `Docker Compose` is the current control-plane deployment mechanism
 - customer servers being monitored do not need to run your platform containers
-- larger enterprise environments can later run the same control plane on Kubernetes
+- larger enterprise environments can run the same control plane on Kubernetes
 
 ## 4. Air-Gapped Inference Plane
 
@@ -187,9 +187,7 @@ When the customer application is running in Docker on a Linux server, the target
 - Docker is a runtime attribute of that server
 - containers become discovered workloads underneath the host target
 
-The current codebase already supports Docker-oriented remediation commands and a Fleet model that can receive `discovered_services`, but the Linux heartbeat script does not yet enumerate customer containers. Today it reports the installed collectors themselves.
-
-The intended Docker auto-discovery flow is:
+The current Docker-on-Linux flow is:
 
 ```text
 1. Onboard the Linux host with the existing SSH/bootstrap path.
@@ -203,18 +201,19 @@ That is the right extension point for Docker-on-Linux environments. It should no
 
 ### 6.3 Kubernetes Status
 
-Kubernetes onboarding is not implemented yet.
+Kubernetes is implemented as a separate onboarding track from Linux hosts.
 
-There are two separate Kubernetes workstreams:
+There are still two separate Kubernetes concerns:
 
 1. deploy the control plane itself on Kubernetes
 2. onboard customer Kubernetes clusters as monitored targets
 
-Those should be treated separately from Linux host onboarding because Kubernetes needs:
+Those remain separate from Linux host onboarding because Kubernetes uses:
 
 - cluster registration rather than SSH login
 - RBAC-scoped API access rather than per-host bootstrap
-- Helm or operator-based collectors rather than a shell installer
+- a generated manifest or Helm-driven cluster-agent install rather than a shell installer
+- queued command execution from the control plane to the cluster agent for diagnostics and safe restart actions
 
 ## 7. Code-Context Engine
 
@@ -484,7 +483,7 @@ The strongest way to describe the platform is:
 That positioning depends on four claims being true in the implementation:
 
 1. **self-hosted**
-   The stack currently runs under Docker Compose with local services and local data stores, with Kubernetes packaging planned next.
+   The stack runs under Docker Compose for single-node installs and is also packaged for Kubernetes through `deploy/helm/opsmitra`.
 2. **air-gapped AI**
    Inference is served by local `vLLM`, not an external AI SaaS endpoint.
 3. **code-aware**

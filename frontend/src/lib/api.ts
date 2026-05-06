@@ -17,6 +17,51 @@ export type WorkflowStage = {
   details?: Record<string, unknown>;
 };
 
+export type InvestigationToolCall = {
+  invocation_id?: string;
+  server_name: string;
+  tool_name: string;
+  status: string;
+  latency_ms: number;
+  created_at: string;
+  request_json?: Record<string, unknown>;
+  response_json?: Record<string, unknown>;
+  error_detail?: string;
+};
+
+export type InvestigationRunSummary = {
+  run_id: string;
+  status: string;
+  question: string;
+  application: string;
+  service: string;
+  target_host: string;
+  incident_key?: string;
+  incident_title?: string;
+  session_id?: string;
+  tool_call_count: number;
+  current_stage: string;
+  confidence_score: number;
+  planner: Record<string, unknown>;
+  workflow: WorkflowStage[];
+  evidence_bundle: Record<string, unknown>;
+  missing_evidence: string[];
+  contradicting_evidence: string[];
+  confidence_assessment?: Record<string, unknown>;
+  contradiction_assessment?: Record<string, unknown>;
+  evidence_gap_assessment?: Record<string, unknown>;
+  created_at?: string;
+  updated_at: string;
+  completed_at?: string | null;
+  tool_calls: InvestigationToolCall[];
+};
+
+export type InvestigationRunDetail = InvestigationRunSummary & {
+  route?: string;
+  evidence_summary?: Record<string, unknown>;
+  hypotheses?: Array<Record<string, unknown>>;
+};
+
 export type AlertRecommendation = {
   alert_id: string;
   alert_name: string;
@@ -25,8 +70,25 @@ export type AlertRecommendation = {
   target_host?: string;
   decision_policy?: string;
   confidence_reason?: string;
+  confidence_assessment?: {
+    level?: "high" | "medium" | "low";
+    score?: number;
+    posture?: string;
+    summary?: string;
+  };
   hard_evidence?: string[];
   missing_evidence?: string[];
+  contradiction_assessment?: {
+    severity?: string;
+    count?: number;
+    blocks_dependency_claim?: boolean;
+    summary?: string;
+  };
+  evidence_gap_assessment?: {
+    status?: string;
+    count?: number;
+    summary?: string;
+  };
   evidence_assessment?: {
     safe_action?: string;
     confidence_reason?: string;
@@ -34,6 +96,9 @@ export type AlertRecommendation = {
     missing_evidence?: string[];
     dependency_hard_evidence?: Record<string, string[]>;
     best_dependency_target?: string;
+    confidence_assessment?: Record<string, unknown>;
+    contradiction_assessment?: Record<string, unknown>;
+    evidence_gap_assessment?: Record<string, unknown>;
   };
   labels?: Record<string, string>;
   summary?: string;
@@ -276,11 +341,32 @@ export type ChatReply = {
   answer?: string;
   confidence?: "high" | "medium" | "low";
   confidence_reason?: string;
+  confidence_assessment?: {
+    level?: "high" | "medium" | "low";
+    score?: number;
+    posture?: string;
+    hard_evidence_count?: number;
+    supporting_evidence_count?: number;
+    contradicting_evidence_count?: number;
+    missing_evidence_count?: number;
+    summary?: string;
+  };
   hard_evidence?: string[];
   missing_evidence?: string[];
   decision_policy?: string;
   supporting_evidence?: string[];
   contradicting_evidence?: string[];
+  contradiction_assessment?: {
+    severity?: string;
+    count?: number;
+    blocks_dependency_claim?: boolean;
+    summary?: string;
+  };
+  evidence_gap_assessment?: {
+    status?: string;
+    count?: number;
+    summary?: string;
+  };
   next_verification_step?: string;
   follow_up_questions?: string[];
   workflow?: WorkflowStage[];
@@ -415,6 +501,22 @@ export type CommandExecutionResult = {
   agent_response?: Record<string, unknown> | string;
   last_execution_at: string;
   execution_status: string;
+  verification?: {
+    status?: string;
+    reason?: string;
+    execution_type?: string;
+    command?: string;
+    baseline_issue_score?: number;
+    post_issue_score?: number;
+    issue_score_delta?: number;
+    improvement_detected?: boolean;
+    verification_loop_state?: string;
+    requires_follow_up?: boolean;
+    recommended_next_step?: string;
+    baseline_evidence?: Record<string, unknown>;
+    post_evidence?: Record<string, unknown>;
+    post_context_summary?: Record<string, unknown>;
+  };
 };
 
 type RecentAlertsResponse = {
@@ -435,6 +537,11 @@ type PredictionsResponse = {
 type IncidentsResponse = {
   count: number;
   results: IncidentSummary[];
+};
+
+type InvestigationsResponse = {
+  count: number;
+  results: InvestigationRunSummary[];
 };
 
 type SessionListResponse = {
@@ -520,6 +627,24 @@ export async function fetchRecentIncidents(): Promise<IncidentSummary[]> {
 
 export async function fetchIncidentTimeline(incidentKey: string): Promise<IncidentTimeline> {
   return fetchJson<IncidentTimeline>(`/genai/incidents/${incidentKey}/timeline/`);
+}
+
+export async function fetchInvestigationRuns(params?: {
+  incident_key?: string;
+  session_id?: string;
+  target_host?: string;
+}): Promise<InvestigationRunSummary[]> {
+  const query = new URLSearchParams();
+  if (params?.incident_key) query.set("incident_key", params.incident_key);
+  if (params?.session_id) query.set("session_id", params.session_id);
+  if (params?.target_host) query.set("target_host", params.target_host);
+  const suffix = query.toString() ? `?${query}` : "";
+  const payload = await fetchJson<InvestigationsResponse>(`/genai/investigations/recent/${suffix}`);
+  return payload.results || [];
+}
+
+export async function fetchInvestigationRun(runId: string): Promise<InvestigationRunDetail> {
+  return fetchJson<InvestigationRunDetail>(`/genai/investigations/${runId}/`);
 }
 
 export async function fetchChatSessions(): Promise<ChatSessionSummary[]> {
@@ -733,6 +858,8 @@ export type FleetRuntimeSummary = {
   container_runtime: string;
   docker_available: boolean;
   docker_container_count: number;
+  kubernetes_available: boolean;
+  kubernetes_workload_count: number;
   host_service_count: number;
   host_application_service_count: number;
   host_support_service_count: number;
@@ -771,15 +898,133 @@ export type FleetDiscoveredService = FleetWorkloadPreview & {
   owner?: Record<string, unknown>;
 };
 
+export type FleetPolicyProfile = {
+  slug: string;
+  name: string;
+  description: string;
+  target_type: string;
+  runtime_type: string;
+  allow_service_status: boolean;
+  allow_service_restart: boolean;
+  allow_docker_logs: boolean;
+  allow_docker_restart: boolean;
+  allow_journal_logs: boolean;
+  allow_file_logs: boolean;
+  allow_db_diagnostics: boolean;
+  allow_db_changes: boolean;
+  allow_process_kill: boolean;
+  requires_approval_for_restart: boolean;
+  requires_approval_for_write_actions: boolean;
+  sudo_mode: string;
+  allowed_command_patterns: string[];
+  metadata_json: Record<string, unknown>;
+};
+
+export type FleetPolicyAssignment = {
+  policy_profile?: FleetPolicyProfile;
+  override_json: Record<string, unknown>;
+  config_version: number;
+  last_applied_at?: string | null;
+  last_apply_status: string;
+};
+
+export type FleetTargetRuntimeProfile = {
+  profile_id: string;
+  role: string;
+  environment: string;
+  runtime_type: string;
+  hostname: string;
+  os_family: string;
+  docker_available: boolean;
+  systemd_available: boolean;
+  primary_restart_mode: string;
+  notes: string;
+  metadata_json: Record<string, unknown>;
+};
+
+export type FleetTargetServiceBinding = {
+  binding_id: string;
+  service_name: string;
+  service_kind: string;
+  systemd_unit: string;
+  container_name: string;
+  process_name: string;
+  port?: number | null;
+  is_primary: boolean;
+  restart_command_template: string;
+  status_command_template: string;
+  metadata_json: Record<string, unknown>;
+};
+
+export type FleetTargetLogSource = {
+  log_source_id: string;
+  service_binding_id?: string | null;
+  source_type: string;
+  journal_unit: string;
+  file_path: string;
+  container_name: string;
+  stream_family: string;
+  parser_name: string;
+  include_patterns: string[];
+  exclude_patterns: string[];
+  shipper_type: string;
+  parser_type: string;
+  is_primary: boolean;
+  metadata_json: Record<string, unknown>;
+};
+
+export type FleetTargetLogIngestionProfile = {
+  shipper_type: string;
+  stream_family: string;
+  opensearch_pipeline: string;
+  record_metadata_json: Record<string, unknown>;
+  config_version: number;
+  last_applied_at?: string | null;
+  last_apply_status: string;
+};
+
+export type FleetTargetConfigPayload = {
+  target: {
+    target_id: string;
+    name: string;
+    target_type: string;
+    environment: string;
+    hostname: string;
+  };
+  config_version: {
+    policy: number;
+    log_ingestion: number;
+  };
+  runtime_profile?: FleetTargetRuntimeProfile;
+  policy_assignment?: FleetPolicyAssignment;
+  service_bindings: FleetTargetServiceBinding[];
+  log_sources: FleetTargetLogSource[];
+  log_ingestion_profile?: FleetTargetLogIngestionProfile;
+  generated_configs: {
+    fluent_bit: {
+      enabled: boolean;
+      path_hint: string;
+      config: string;
+    };
+  };
+  generated_at: string;
+};
+
 export type FleetTargetDetail = FleetTarget & {
   ip_address: string;
   os_name: string;
   os_version: string;
   metadata_json: Record<string, unknown>;
   docker_workloads: FleetDiscoveredService[];
+  kubernetes_workloads: FleetDiscoveredService[];
   host_services: FleetDiscoveredService[];
   host_application_services: FleetDiscoveredService[];
   host_support_services: FleetDiscoveredService[];
+  policy_assignment?: FleetPolicyAssignment;
+  runtime_profile?: FleetTargetRuntimeProfile;
+  service_bindings: FleetTargetServiceBinding[];
+  log_sources: FleetTargetLogSource[];
+  log_ingestion_profile?: FleetTargetLogIngestionProfile;
   recent_execution_history: Array<{
     intent_id: string;
     execution_type: string;
@@ -822,10 +1067,15 @@ export type OnboardingRequest = {
   onboarding_id: string;
   name: string;
   hostname: string;
+  target_role: string;
+  runtime_type: string;
+  target_environment: string;
   ssh_user: string;
   ssh_port: number;
   target_type: string;
   profile_slug: string;
+  policy_profile_slug: string;
+  policy_profile_name: string;
   status: string;
   connectivity_status: string;
   connectivity_message: string;
@@ -834,6 +1084,8 @@ export type OnboardingRequest = {
   install_message: string;
   target_id?: string | null;
   pem_file_name?: string;
+  notes: string;
+  config_json: Record<string, unknown>;
 };
 
 type FleetTargetsResponse = {
@@ -844,6 +1096,11 @@ type FleetTargetsResponse = {
 type FleetProfilesResponse = {
   count: number;
   results: TelemetryProfile[];
+};
+
+type FleetPolicyProfilesResponse = {
+  count: number;
+  results: FleetPolicyProfile[];
 };
 
 type FleetOnboardingResponse = {
@@ -860,8 +1117,76 @@ export async function fetchFleetTargetDetail(targetId: string): Promise<FleetTar
   return fetchJson<FleetTargetDetail>(`/genai/fleet/targets/${encodeURIComponent(targetId)}/`);
 }
 
-export async function fetchTelemetryProfiles(): Promise<TelemetryProfile[]> {
-  const payload = await fetchJson<FleetProfilesResponse>("/genai/fleet/profiles/");
+export async function fetchFleetTargetConfig(targetId: string): Promise<FleetTargetConfigPayload> {
+  return fetchJson<FleetTargetConfigPayload>(`/genai/fleet/targets/${encodeURIComponent(targetId)}/config/`);
+}
+
+export async function updateFleetTargetConfig(
+  targetId: string,
+  payload: {
+    runtime_profile: Record<string, unknown>;
+    policy_profile_slug?: string;
+    policy_override_json?: Record<string, unknown>;
+    service_bindings: Record<string, unknown>[];
+    log_sources: Record<string, unknown>[];
+    log_ingestion_profile: Record<string, unknown>;
+  },
+): Promise<FleetTargetConfigPayload> {
+  const response = await fetch(`/genai/fleet/targets/${encodeURIComponent(targetId)}/config/`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "X-CSRFToken": getCsrfToken(),
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = (await response.json()) as FleetTargetConfigPayload & { error?: string; detail?: string };
+  if (!response.ok) {
+    throw new Error(body.detail || body.error || `Target config update failed: ${response.status}`);
+  }
+  return body;
+}
+
+export async function applyFleetTargetConfig(targetId: string): Promise<{
+  status: string;
+  requested_at: string;
+  config_payload: FleetTargetConfigPayload;
+}> {
+  const response = await fetch(`/genai/fleet/targets/${encodeURIComponent(targetId)}/config/apply/`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+      "X-CSRFToken": getCsrfToken(),
+    },
+  });
+  const body = (await response.json()) as {
+    status: string;
+    requested_at: string;
+    config_payload: FleetTargetConfigPayload;
+    error?: string;
+    detail?: string;
+  };
+  if (!response.ok) {
+    throw new Error(body.detail || body.error || `Target config apply failed: ${response.status}`);
+  }
+  return body;
+}
+
+export async function fetchTelemetryProfiles(targetType?: string): Promise<TelemetryProfile[]> {
+  const query = targetType ? `?${new URLSearchParams({ target_type: targetType }).toString()}` : "";
+  const payload = await fetchJson<FleetProfilesResponse>(`/genai/fleet/profiles/${query}`);
+  return payload.results || [];
+}
+
+export async function fetchPolicyProfiles(targetType?: string, runtimeType?: string): Promise<FleetPolicyProfile[]> {
+  const query = new URLSearchParams();
+  if (targetType) query.set("target_type", targetType);
+  if (runtimeType) query.set("runtime_type", runtimeType);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  const payload = await fetchJson<FleetPolicyProfilesResponse>(`/genai/fleet/policy-profiles/${suffix}`);
   return payload.results || [];
 }
 
@@ -878,20 +1203,64 @@ export async function fetchOnboardingRequests(): Promise<OnboardingRequest[]> {
 export async function createOnboardingRequest(payload: {
   name: string;
   hostname: string;
+  target_role?: string;
+  runtime_type?: string;
+  target_environment?: string;
   ssh_user: string;
   ssh_port: number;
   target_type: string;
   profile: string;
-  pem_file: File;
+  policy_profile?: string;
+  service_name?: string;
+  service_kind?: string;
+  systemd_unit?: string;
+  container_name?: string;
+  process_name?: string;
+  port?: number | null;
+  log_source_type?: string;
+  journal_unit?: string;
+  file_path?: string;
+  log_container_name?: string;
+  log_stream_family?: string;
+  parser_name?: string;
+  ship_logs_centrally?: boolean;
+  shipper_type?: string;
+  opensearch_pipeline?: string;
+  application_name?: string;
+  notes?: string;
+  pem_file?: File | null;
 }): Promise<OnboardingRequest> {
   const formData = new FormData();
   formData.append("name", payload.name);
   formData.append("hostname", payload.hostname);
+  if (payload.target_role) formData.append("target_role", payload.target_role);
+  if (payload.runtime_type) formData.append("runtime_type", payload.runtime_type);
+  if (payload.target_environment) formData.append("target_environment", payload.target_environment);
   formData.append("ssh_user", payload.ssh_user);
   formData.append("ssh_port", String(payload.ssh_port));
   formData.append("target_type", payload.target_type);
   formData.append("profile", payload.profile);
-  formData.append("pem_file", payload.pem_file);
+  if (payload.policy_profile) formData.append("policy_profile", payload.policy_profile);
+  if (payload.service_name) formData.append("service_name", payload.service_name);
+  if (payload.service_kind) formData.append("service_kind", payload.service_kind);
+  if (payload.systemd_unit) formData.append("systemd_unit", payload.systemd_unit);
+  if (payload.container_name) formData.append("container_name", payload.container_name);
+  if (payload.process_name) formData.append("process_name", payload.process_name);
+  if (payload.port != null) formData.append("port", String(payload.port));
+  if (payload.log_source_type) formData.append("log_source_type", payload.log_source_type);
+  if (payload.journal_unit) formData.append("journal_unit", payload.journal_unit);
+  if (payload.file_path) formData.append("file_path", payload.file_path);
+  if (payload.log_container_name) formData.append("log_container_name", payload.log_container_name);
+  if (payload.log_stream_family) formData.append("log_stream_family", payload.log_stream_family);
+  if (payload.parser_name) formData.append("parser_name", payload.parser_name);
+  if (payload.ship_logs_centrally != null) formData.append("ship_logs_centrally", String(payload.ship_logs_centrally));
+  if (payload.shipper_type) formData.append("shipper_type", payload.shipper_type);
+  if (payload.opensearch_pipeline) formData.append("opensearch_pipeline", payload.opensearch_pipeline);
+  if (payload.application_name) formData.append("application_name", payload.application_name);
+  if (payload.notes) formData.append("notes", payload.notes);
+  if (payload.pem_file) {
+    formData.append("pem_file", payload.pem_file);
+  }
 
   const response = await fetch("/genai/fleet/onboarding/", {
     method: "POST",
@@ -950,19 +1319,61 @@ export async function installOnboardingTarget(onboardingId: string): Promise<Onb
 export async function updateOnboardingRequest(onboardingId: string, payload: {
   name: string;
   hostname: string;
+  target_role?: string;
+  runtime_type?: string;
+  target_environment?: string;
   ssh_user: string;
   ssh_port: number;
   target_type: string;
   profile: string;
+  policy_profile?: string;
+  service_name?: string;
+  service_kind?: string;
+  systemd_unit?: string;
+  container_name?: string;
+  process_name?: string;
+  port?: number | null;
+  log_source_type?: string;
+  journal_unit?: string;
+  file_path?: string;
+  log_container_name?: string;
+  log_stream_family?: string;
+  parser_name?: string;
+  ship_logs_centrally?: boolean;
+  shipper_type?: string;
+  opensearch_pipeline?: string;
+  application_name?: string;
+  notes?: string;
   pem_file?: File | null;
 }): Promise<OnboardingRequest> {
   const formData = new FormData();
   formData.append("name", payload.name);
   formData.append("hostname", payload.hostname);
+  if (payload.target_role) formData.append("target_role", payload.target_role);
+  if (payload.runtime_type) formData.append("runtime_type", payload.runtime_type);
+  if (payload.target_environment) formData.append("target_environment", payload.target_environment);
   formData.append("ssh_user", payload.ssh_user);
   formData.append("ssh_port", String(payload.ssh_port));
   formData.append("target_type", payload.target_type);
   formData.append("profile", payload.profile);
+  if (payload.policy_profile) formData.append("policy_profile", payload.policy_profile);
+  if (payload.service_name) formData.append("service_name", payload.service_name);
+  if (payload.service_kind) formData.append("service_kind", payload.service_kind);
+  if (payload.systemd_unit) formData.append("systemd_unit", payload.systemd_unit);
+  if (payload.container_name) formData.append("container_name", payload.container_name);
+  if (payload.process_name) formData.append("process_name", payload.process_name);
+  if (payload.port != null) formData.append("port", String(payload.port));
+  if (payload.log_source_type) formData.append("log_source_type", payload.log_source_type);
+  if (payload.journal_unit) formData.append("journal_unit", payload.journal_unit);
+  if (payload.file_path) formData.append("file_path", payload.file_path);
+  if (payload.log_container_name) formData.append("log_container_name", payload.log_container_name);
+  if (payload.log_stream_family) formData.append("log_stream_family", payload.log_stream_family);
+  if (payload.parser_name) formData.append("parser_name", payload.parser_name);
+  if (payload.ship_logs_centrally != null) formData.append("ship_logs_centrally", String(payload.ship_logs_centrally));
+  if (payload.shipper_type) formData.append("shipper_type", payload.shipper_type);
+  if (payload.opensearch_pipeline) formData.append("opensearch_pipeline", payload.opensearch_pipeline);
+  if (payload.application_name) formData.append("application_name", payload.application_name);
+  if (payload.notes) formData.append("notes", payload.notes);
   if (payload.pem_file) {
     formData.append("pem_file", payload.pem_file);
   }

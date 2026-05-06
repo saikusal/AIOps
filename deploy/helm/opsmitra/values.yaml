@@ -1,0 +1,157 @@
+nameOverride: ""
+fullnameOverride: ""
+
+images:
+  web:
+    repository: opsmitra/web
+    tag: latest
+    pullPolicy: IfNotPresent
+  frontend:
+    repository: opsmitra/frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+  postgres:
+    repository: postgres
+    tag: "13"
+    pullPolicy: IfNotPresent
+  redis:
+    repository: valkey/valkey
+    tag: "8-alpine"
+    pullPolicy: IfNotPresent
+  otelCollector:
+    repository: otel/opentelemetry-collector-contrib
+    tag: "0.87.0"
+    pullPolicy: IfNotPresent
+  jaeger:
+    repository: jaegertracing/all-in-one
+    tag: "1.66.0"
+    pullPolicy: IfNotPresent
+  metrics:
+    repository: victoriametrics/victoria-metrics
+    tag: "v1.106.1"
+    pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  webPort: 8000
+  frontendPort: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: opsmitra.local
+      paths:
+        - path: /
+          pathType: Prefix
+          service: frontend
+  tls: []
+
+application:
+  env:
+    DJANGO_SETTINGS_MODULE: aiops_platform.settings
+    POSTGRES_DB: aiops
+    POSTGRES_USER: user
+    POSTGRES_PORT: "5432"
+    REDIS_PORT: "6379"
+    ELASTICSEARCH_URL: ""
+    JAEGER_URL: ""
+    AGENT_PORT: "9999"
+    APP_LOG_DIR: /var/log/aiops
+    OTEL_ENABLED: "true"
+    OTEL_SERVICE_NAME: aiops-web
+    OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+    OTEL_EXPORTER_OTLP_ENDPOINT: ""
+    METRICS_API_URL: ""
+    PROMETHEUS_URL: ""
+    MCP_TRANSPORT: inprocess
+    MCP_BASE_URL: http://127.0.0.1:8000
+    AIOPS_CODE_CONTEXT_ENABLED: "true"
+    AIOPS_CODE_CONTEXT_PROVIDER: internal
+    AIOPS_CODE_CONTEXT_RECENT_COMMITS: "25"
+    AIOPS_CODE_CONTEXT_MAX_FILES: "5000"
+    AIOPS_CODE_CONTEXT_AUTO_ROOTS: /source
+    AIOPS_POLICY_VERSION: "2026-04-20"
+    AIOPS_POLICY_PROTECTED_ENVIRONMENTS: production,prod
+    AIOPS_POLICY_CRITICAL_SERVICES: db,gateway,frontend,app-orders,app-inventory,app-billing
+    AIOPS_POLICY_RESTART_COOLDOWN_SECONDS: "900"
+    AIOPS_POLICY_EXECUTION_RETRY_LIMIT: "3"
+    AIOPS_POLICY_RETRY_WINDOW_SECONDS: "3600"
+    AIOPS_POLICY_ALLOW_DB_CHANGES: "false"
+    AIOPS_POLICY_ALLOW_PROTECTED_ENV_RESTARTS: "false"
+    AIOPS_POLICY_REQUIRE_APPROVAL_FOR_RESTARTS: "true"
+    AIOPS_POLICY_REQUIRE_APPROVAL_FOR_UNKNOWN_ACTIONS: "true"
+    AIOPS_APPROVAL_TOKEN_TTL_SECONDS: "900"
+    AIOPS_EXECUTION_MAX_FREQUENCY_PER_SERVICE: "5"
+    AIOPS_EXECUTION_FREQUENCY_WINDOW_SECONDS: "1800"
+    AIOPS_AGENT_BEHAVIOR_NAME: default
+    AIOPS_PROMPT_VERSION: prompt-v1
+    AIOPS_MODEL_VERSION: vllm-qwen
+    AIOPS_EVIDENCE_RULES_VERSION: evidence-v1
+    AIOPS_RANKING_VERSION: ranking-v1
+    DJANGO_ALLOWED_HOSTS: "*"
+    CORS_ALLOW_ALL_ORIGINS: "true"
+    SESSION_COOKIE_SAMESITE: Lax
+    SESSION_COOKIE_SECURE: "false"
+    SITE_ID: "1"
+    SSO_ENABLED: "false"
+    VLLM_API_URL: ""
+    VLLM_MODEL_NAME: qwen32b
+    VLLM_VISION_MODEL_NAME: qwen32b
+    VLLM_VERIFY_SSL: "false"
+    VLLM_TIMEOUT: "120"
+    VLLM_MAX_TOKENS: "4096"
+    VLLM_MAX_MODEL_LEN: "8192"
+    VLLM_TEMPERATURE: "0.1"
+    AIOPS_K8S_AGENT_IMAGE_REPOSITORY: opsmitra/k8s-cluster-agent
+    AIOPS_K8S_AGENT_IMAGE_TAG: latest
+    AIOPS_K8S_AGENT_NAMESPACE: opsmitra-system
+  secretEnv:
+    POSTGRES_PASSWORD: password
+    AGENT_SECRET_TOKEN: replace-with-a-long-random-secret
+    MCP_INTERNAL_TOKEN: replace-with-an-internal-mcp-token
+    AIOPS_INTENT_SIGNING_SECRET: replace-with-intent-signing-secret
+    GOOGLE_CLIENT_ID: ""
+    GOOGLE_CLIENT_SECRET: ""
+    AIOPS_PUBLIC_BASE_URL: ""
+    AIOPS_PUBLIC_OTLP_GRPC_ENDPOINT: ""
+    VLLM_API_KEY: ""
+    VLLM_EMBEDDING_URL: ""
+
+predictor:
+  intervalSeconds: 300
+
+observability:
+  enabled: true
+  metricsRetention: 30d
+  jaegerUiPort: 16686
+  metricsPort: 9090
+  otelGrpcPort: 4317
+  otelHttpPort: 4318
+  otelMetricsPort: 8889
+
+postgresql:
+  enabled: true
+  auth:
+    database: aiops
+    username: user
+    password: password
+  persistence:
+    enabled: true
+    size: 20Gi
+
+redis:
+  enabled: true
+
+storage:
+  media:
+    enabled: true
+    size: 10Gi
+
+resources:
+  web: {}
+  frontend: {}
+  predictor: {}
+  postgres: {}
+  redis: {}

@@ -52,8 +52,25 @@ function formatSlaMinutes(minutes: number | null): string {
 type DecisionEvidenceMeta = {
   decision_policy?: string;
   confidence_reason?: string;
+  confidence_assessment?: {
+    level?: string;
+    score?: number;
+    posture?: string;
+    summary?: string;
+  };
   hard_evidence?: string[];
   missing_evidence?: string[];
+  contradiction_assessment?: {
+    severity?: string;
+    count?: number;
+    blocks_dependency_claim?: boolean;
+    summary?: string;
+  };
+  evidence_gap_assessment?: {
+    status?: string;
+    count?: number;
+    summary?: string;
+  };
   evidence_assessment?: {
     safe_action?: string;
     confidence_reason?: string;
@@ -61,17 +78,23 @@ type DecisionEvidenceMeta = {
     missing_evidence?: string[];
     dependency_hard_evidence?: Record<string, string[]>;
     best_dependency_target?: string;
+    confidence_assessment?: Record<string, unknown>;
+    contradiction_assessment?: Record<string, unknown>;
+    evidence_gap_assessment?: Record<string, unknown>;
   };
 };
 
 function DecisionPanel({ meta }: { meta: DecisionEvidenceMeta }) {
   const decisionPolicy = meta.decision_policy || meta.evidence_assessment?.safe_action || "diagnose";
   const confidenceReason = meta.confidence_reason || meta.evidence_assessment?.confidence_reason || "";
+  const confidenceAssessment = (meta.confidence_assessment || meta.evidence_assessment?.confidence_assessment || {}) as Record<string, unknown>;
+  const contradictionAssessment = (meta.contradiction_assessment || meta.evidence_assessment?.contradiction_assessment || {}) as Record<string, unknown>;
+  const evidenceGapAssessment = (meta.evidence_gap_assessment || meta.evidence_assessment?.evidence_gap_assessment || {}) as Record<string, unknown>;
   const hardEvidence = meta.hard_evidence || meta.evidence_assessment?.hard_evidence || [];
   const missingEvidence = meta.missing_evidence || meta.evidence_assessment?.missing_evidence || [];
   const bestDependencyTarget = meta.evidence_assessment?.best_dependency_target || "";
 
-  if (!confidenceReason && hardEvidence.length === 0 && missingEvidence.length === 0 && !bestDependencyTarget) {
+  if (!confidenceReason && hardEvidence.length === 0 && missingEvidence.length === 0 && !bestDependencyTarget && !Object.keys(confidenceAssessment).length && !Object.keys(contradictionAssessment).length && !Object.keys(evidenceGapAssessment).length) {
     return null;
   }
 
@@ -81,6 +104,14 @@ function DecisionPanel({ meta }: { meta: DecisionEvidenceMeta }) {
         <strong>Decision Policy</strong>
         <span className={`decision-policy decision-policy--${decisionPolicy}`}>{decisionPolicy.toUpperCase()}</span>
       </div>
+      {(confidenceAssessment.score !== undefined || contradictionAssessment.severity || evidenceGapAssessment.status) ? (
+        <p>
+          {confidenceAssessment.score !== undefined ? `Confidence ${Math.round(Number(confidenceAssessment.score) * 100)}%` : "Confidence pending"}
+          {confidenceAssessment.posture ? ` · ${String(confidenceAssessment.posture)}` : ""}
+          {contradictionAssessment.severity ? ` · contradictions ${String(contradictionAssessment.severity)}` : ""}
+          {evidenceGapAssessment.status ? ` · gaps ${String(evidenceGapAssessment.status)}` : ""}
+        </p>
+      ) : null}
       {confidenceReason ? <p>{confidenceReason}</p> : null}
       {bestDependencyTarget ? <p className="incident-decision__target">Preferred pivot target: {bestDependencyTarget}</p> : null}
       {hardEvidence.length > 0 ? (
@@ -560,7 +591,7 @@ export function IncidentsPage() {
               </div>
               <div className="incident-timeline-list">
                 {deepDiveEntry ? (
-                  <article className="incident-deep-dive">
+                  <article className="incident-deep-dive incident-deep-dive--investigation">
                     <div className="eyebrow">Secondary AI Analysis</div>
                     <h3>Diagnostic Deep Dive</h3>
                     <p>
@@ -581,7 +612,7 @@ export function IncidentsPage() {
                         <code>{deepDiveEntry.diagnostic_command || "No command suggested yet."}</code>
                       </div>
                     </div>
-                    <div className="page-card__meta">
+                    <div className="incident-deep-dive__toolbar">
                       <button
                         className="assistant-button"
                         onClick={() => executeMutation.mutate()}
@@ -589,6 +620,18 @@ export function IncidentsPage() {
                       >
                         {executeMutation.isPending || deepDiveEntry.execution_status === "running" ? "Running..." : "Run Deep Dive"}
                       </button>
+                      <div className="incident-deep-dive__toolbar-actions">
+                        {timelineQuery.data?.incident_key ? (
+                          <Link className="shell__link shell__link--small" to={`/investigations?incident_key=${encodeURIComponent(timelineQuery.data.incident_key)}`}>
+                            Open Investigation
+                          </Link>
+                        ) : null}
+                        {deepDiveEntry.target_host ? (
+                          <Link className="shell__link shell__link--small" to={`/genai?target_host=${encodeURIComponent(deepDiveEntry.target_host)}`}>
+                            Open In Assistant
+                          </Link>
+                        ) : null}
+                      </div>
                       {deepDiveEntry.last_execution_at ? (
                         <code>last-run:{new Date(deepDiveEntry.last_execution_at).toLocaleString()}</code>
                       ) : null}

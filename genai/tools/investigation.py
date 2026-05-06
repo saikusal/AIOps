@@ -1,13 +1,18 @@
 import json
 import re
 from datetime import datetime, timezone
+from datetime import timedelta
 
 from typing import Any, Callable, Dict, List, Optional
 from genai.code_context_extractors import extract_route_hint_from_text
 from genai.mcp_orchestrator import InvestigationMCPOrchestrator
 from genai.multi_step_workflow import (
+    annotate_investigation_workflow_with_iterations,
+    build_investigation_plan,
+    build_iteration_plan,
     build_investigation_workflow,
     finalize_investigation_workflow,
+    normalize_investigation_evidence,
 )
 
 
@@ -108,6 +113,111 @@ _DB_TOKENS = (
 )
 
 
+def _confidence_score(confidence: str) -> float:
+    normalized = str(confidence or "").strip().lower()
+    if normalized == "high":
+        return 0.9
+    if normalized == "low":
+        return 0.3
+    return 0.6
+
+
+def _score_to_confidence_label(score: float) -> str:
+    if score >= 0.8:
+        return "high"
+    if score <= 0.4:
+        return "low"
+    return "medium"
+
+
+def _build_contradiction_assessment(
+    contradicting_evidence: List[str],
+    *,
+    hard_evidence_count: int = 0,
+) -> Dict[str, Any]:
+    contradiction_count = len([item for item in contradicting_evidence if item])
+    if contradiction_count <= 0:
+        severity = "none"
+        summary = "No contradicting evidence currently weakens the working hypothesis."
+    elif contradiction_count == 1:
+        severity = "low"
+        summary = "A small amount of contradicting evidence exists, but it does not outweigh the confirming signals."
+    elif contradiction_count == 2:
+        severity = "moderate"
+        summary = "Multiple contradicting signals exist, so the current hypothesis should be treated cautiously."
+    else:
+        severity = "high"
+        summary = "Strong contradicting evidence exists, so the current hypothesis is unstable and needs more verification."
+    blocks_dependency_claim = contradiction_count > 0 and hard_evidence_count <= contradiction_count
+    return {
+        "severity": severity,
+        "count": contradiction_count,
+        "blocks_dependency_claim": blocks_dependency_claim,
+        "summary": summary,
+    }
+
+
+def _build_evidence_gap_assessment(missing_evidence: List[str]) -> Dict[str, Any]:
+    gap_count = len([item for item in missing_evidence if item])
+    if gap_count <= 0:
+        status = "none"
+        summary = "No unresolved evidence gaps are currently tracked."
+    elif gap_count == 1:
+        status = "low"
+        summary = "A small evidence gap remains before the RCA can be considered complete."
+    elif gap_count <= 3:
+        status = "moderate"
+        summary = "Several evidence gaps remain and should be closed before stronger action is taken."
+    else:
+        status = "high"
+        summary = "Many important evidence gaps remain, so the RCA should be treated as provisional."
+    return {
+        "status": status,
+        "count": gap_count,
+        "summary": summary,
+    }
+
+
+def _build_confidence_assessment(
+    *,
+    evidence_assessment: Dict[str, Any],
+    llm_confidence: str = "",
+    supporting_evidence: Optional[List[str]] = None,
+    contradicting_evidence: Optional[List[str]] = None,
+    missing_evidence: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    hard_evidence = [item for item in (evidence_assessment.get("hard_evidence") or []) if item]
+    supporting = [item for item in (supporting_evidence or hard_evidence) if item]
+    contradicting = [item for item in (contradicting_evidence or evidence_assessment.get("contradicting_evidence") or []) if item]
+    missing = [item for item in (missing_evidence or evidence_assessment.get("missing_evidence") or []) if item]
+
+    evidence_score = min(0.75, len(hard_evidence) * 0.18 + len(supporting) * 0.06)
+    evidence_score -= min(0.3, len(contradicting) * 0.08)
+    evidence_score -= min(0.25, len(missing) * 0.06)
+    evidence_score = max(0.05, min(0.95, evidence_score))
+
+    llm_score = _confidence_score(llm_confidence) if llm_confidence else evidence_score
+    final_score = round(max(0.0, min(1.0, (evidence_score * 0.55) + (llm_score * 0.45))), 2)
+    level = _score_to_confidence_label(final_score)
+    if level == "high":
+        posture = "well_supported"
+    elif level == "low":
+        posture = "tentative"
+    else:
+        posture = "developing"
+
+    return {
+        "level": level,
+        "score": final_score,
+        "posture": posture,
+        "hard_evidence_count": len(hard_evidence),
+        "supporting_evidence_count": len(supporting),
+        "contradicting_evidence_count": len(contradicting),
+        "missing_evidence_count": len(missing),
+        "summary": str(evidence_assessment.get("confidence_reason") or ""),
+    }
+
+
 def _extract_trace_span_hints(traces: Dict[str, Any]) -> List[str]:
     hints: List[str] = []
     for trace in (traces or {}).get("data") or []:
@@ -151,7 +261,101 @@ def _code_context_summary(code_context: Dict[str, Any]) -> str:
     recent_changes = (code_context.get("recent_changes") or {}).get("recent_changes") or []
     if recent_changes:
         parts.append(f"{len(recent_changes)} recent code changes matched the likely failure path.")
+    quality = code_context.get("quality_assessment") or {}
+    if quality.get("summary"):
+        parts.append(str(quality.get("summary")))
     return " ".join(part for part in parts if part)
+
+
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _assess_code_context_quality(code_context: Dict[str, Any]) -> Dict[str, Any]:
+    owner = code_context.get("owner") or {}
+    route_binding = code_context.get("route_binding") or {}
+    span_binding = code_context.get("span_binding") or {}
+
+    repo_status = (
+        owner.get("repository_index_status")
+        or route_binding.get("repository_index_status")
+        or span_binding.get("repository_index_status")
+        or ""
+    )
+    repo_last_indexed_at = (
+        owner.get("repository_last_indexed_at")
+        or route_binding.get("repository_last_indexed_at")
+        or span_binding.get("repository_last_indexed_at")
+        or ""
+    )
+    last_indexed = _parse_iso_datetime(repo_last_indexed_at)
+    if last_indexed and last_indexed.tzinfo is None:
+        last_indexed = last_indexed.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    stale_threshold = timedelta(days=7)
+    stale = bool(last_indexed and (now - last_indexed) > stale_threshold)
+
+    owner_confidence = float(owner.get("ownership_confidence") or 0.0)
+    route_confidence = float(route_binding.get("confidence") or 0.0)
+    span_confidence = float(span_binding.get("confidence") or 0.0)
+    overall_confidence = max(owner_confidence, route_confidence, span_confidence)
+
+    weak_signals: List[str] = []
+    strengths: List[str] = []
+    if owner.get("repository"):
+        strengths.append(f"Repository ownership mapped to {owner.get('repository')}.")
+    if route_binding.get("handler"):
+        strengths.append("Route binding is available for the suspected request path.")
+    if span_binding.get("symbol"):
+        strengths.append("Trace span binding is available for the suspected failure path.")
+
+    if not owner.get("repository"):
+        weak_signals.append("No strong service-to-repository ownership mapping was found.")
+    elif owner_confidence < 0.6:
+        weak_signals.append("Repository ownership mapping exists, but its confidence is low.")
+    if route_binding and route_confidence < 0.6:
+        weak_signals.append("Route-to-handler binding exists, but its confidence is low.")
+    if span_binding and span_confidence < 0.6:
+        weak_signals.append("Span-to-symbol binding exists, but its confidence is low.")
+    if repo_status and repo_status != "indexed":
+        weak_signals.append(f"Repository index status is {repo_status}, so code retrieval may be incomplete.")
+    if stale:
+        weak_signals.append("Repository index appears stale, so recent code changes may be missing from the current context.")
+
+    if overall_confidence >= 0.8 and repo_status == "indexed" and not stale:
+        quality = "high"
+        safe_to_claim = True
+        summary = "Code-context evidence is fresh and high-confidence."
+    elif overall_confidence >= 0.55 and repo_status in {"", "indexed"} and not stale:
+        quality = "medium"
+        safe_to_claim = False
+        summary = "Code-context evidence is usable, but the control plane should avoid overclaiming direct root-cause ownership."
+    else:
+        quality = "low"
+        safe_to_claim = False
+        summary = "Code-context evidence is weak or stale, so code-specific RCA claims should be treated as tentative."
+
+    return {
+        "quality": quality,
+        "safe_to_claim_code_root_cause": safe_to_claim,
+        "overall_confidence": round(overall_confidence, 2),
+        "repository_index_status": repo_status,
+        "repository_last_indexed_at": repo_last_indexed_at or "",
+        "stale_index": stale,
+        "strengths": strengths[:4],
+        "weak_signals": weak_signals[:5],
+        "summary": summary,
+    }
 
 
 def _collect_code_snippet_targets(code_context: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -207,6 +411,7 @@ def _llm_safe_investigation_context(context: Dict[str, Any]) -> Dict[str, Any]:
     trace_spans = _extract_trace_span_hints(traces)[:4]
     prompt_code_context = {
         "summary": code_context.get("summary") or _code_context_summary(code_context),
+        "quality_assessment": code_context.get("quality_assessment") or {},
         "owner": code_context.get("owner") or {},
         "route_binding": code_context.get("route_binding") or {},
         "span_binding": code_context.get("span_binding") or {},
@@ -568,7 +773,13 @@ def _build_evidence_assessment(
     for evidence in dependency_hard_evidence.values():
         hard_evidence.extend(evidence)
 
-    return {
+    contradiction_assessment = _build_contradiction_assessment(
+        contradicting_evidence,
+        hard_evidence_count=len(hard_evidence),
+    )
+    evidence_gap_assessment = _build_evidence_gap_assessment(missing_evidence)
+
+    evidence_assessment = {
         "safe_action": safe_action,
         "confidence_reason": confidence_reason,
         "service_hard_evidence": service_evidence,
@@ -578,7 +789,13 @@ def _build_evidence_assessment(
         "missing_evidence": missing_evidence,
         "contradicting_evidence": contradicting_evidence,
         "allow_dependency_pivot": bool(best_dependency_target),
+        "contradiction_assessment": contradiction_assessment,
+        "evidence_gap_assessment": evidence_gap_assessment,
     }
+    evidence_assessment["confidence_assessment"] = _build_confidence_assessment(
+        evidence_assessment=evidence_assessment,
+    )
+    return evidence_assessment
 
 
 def build_investigation_context(
@@ -868,6 +1085,8 @@ def build_investigation_context(
                     snippets.append(snippet)
             if snippets:
                 code_context["snippets"] = snippets
+        if code_context:
+            code_context["quality_assessment"] = _assess_code_context_quality(code_context)
             code_context["summary"] = _code_context_summary(code_context)
 
     context = {
@@ -939,6 +1158,15 @@ def run_investigation_route(
         source_root=source_root,
     )
     mcp_orchestrator.start_run(scope)
+    mcp_orchestrator.update_run_state(
+        status="collecting_evidence",
+        current_stage="collecting_evidence",
+        planner_json={
+            "goal": "Collect enough evidence to determine the most likely root cause and safest next step.",
+            "question": question,
+            "scope": scope or {},
+        },
+    )
     investigation_context = build_investigation_context(
         question,
         body,
@@ -952,10 +1180,37 @@ def run_investigation_route(
         fetch_metrics_query=fetch_metrics_query,
         mcp_orchestrator=mcp_orchestrator,
     )
+    planner = build_investigation_plan(
+        question=question,
+        scope=scope,
+        context=investigation_context,
+    )
+    evidence_bundle = normalize_investigation_evidence(investigation_context)
+    iteration_plan = build_iteration_plan(
+        question=question,
+        scope=scope,
+        context=investigation_context,
+        planner=planner,
+        evidence_bundle=evidence_bundle,
+    )
     workflow = build_investigation_workflow(
         question=question,
         scope=scope,
         context=investigation_context,
+    )
+    workflow = annotate_investigation_workflow_with_iterations(workflow, iteration_plan)
+    planner["iteration_plan"] = iteration_plan
+    evidence_assessment = investigation_context.get("evidence_assessment") or {}
+    mcp_orchestrator.update_run_state(
+        status="assessing_evidence",
+        current_stage="assessing_evidence",
+        target_host=investigation_context.get("target_host") or "",
+        planner_json=planner,
+        workflow_json=workflow,
+        evidence_bundle_json=evidence_bundle,
+        hypotheses_json=planner.get("candidate_hypotheses") or [],
+        missing_evidence_json=evidence_assessment.get("missing_evidence") or [],
+        contradicting_evidence_json=evidence_assessment.get("contradicting_evidence") or [],
     )
 
     incident_data = investigation_context.get("incident") or {}
@@ -989,6 +1244,7 @@ def run_investigation_route(
         "- If code_context is available, explain the likely repository, handler, symbol, and module responsibility in plain language.\n"
         "- If code snippets are available, use them to explain what the affected code path appears to do and why it could produce the observed symptoms.\n"
         "- If recent code changes are available, use them as supporting evidence only when they plausibly touch the failing path.\n"
+        "- If code_context.quality_assessment says the evidence is weak, stale, or not safe to claim, avoid asserting a direct code root cause. Say the code mapping is tentative.\n"
         "- When asked about remediation, use the code context to suggest the safest validation target after the fix, such as the route, span, handler, or file path to verify.\n"
         "- Use evidence_assessment as the safety policy. Do not claim a downstream/shared dependency root cause unless dependency_hard_evidence is non-empty.\n"
         "- If safe_action is 'observe' or hard_evidence is empty, explicitly say the current signal may reflect normal traffic/load and that remediation is not justified yet.\n"
@@ -998,6 +1254,11 @@ def run_investigation_route(
         f"QUESTION: {question}\n\n"
         f"INVESTIGATION CONTEXT:\n{json.dumps(prompt_context, indent=2, default=str)[:5500]}\n\n"
         "Return JSON only."
+    )
+    mcp_orchestrator.update_run_state(
+        status="planning_next_step",
+        current_stage="planning_next_step",
+        target_host=investigation_context.get("target_host") or "",
     )
     ok, _status, body_text = llm_query(prompt)
     if not ok:
@@ -1029,7 +1290,41 @@ def run_investigation_route(
         "cached": False,
         "code_context": investigation_context.get("code_context") or {},
         "retrieval": investigation_context.get("retrieval") or mcp_orchestrator.tool_trace(),
+        "planner": planner,
+        "evidence_bundle": evidence_bundle,
+        "iteration_plan": iteration_plan,
     }
+    response["confidence_assessment"] = _build_confidence_assessment(
+        evidence_assessment=investigation_context.get("evidence_assessment") or {},
+        llm_confidence=response.get("confidence") or "",
+        supporting_evidence=response.get("supporting_evidence") or [],
+        contradicting_evidence=response.get("contradicting_evidence") or [],
+        missing_evidence=response.get("missing_evidence") or [],
+    )
+    response["contradiction_assessment"] = _build_contradiction_assessment(
+        response.get("contradicting_evidence") or [],
+        hard_evidence_count=len(response.get("hard_evidence") or []),
+    )
+    response["evidence_gap_assessment"] = _build_evidence_gap_assessment(
+        response.get("missing_evidence") or [],
+    )
+    planner["confidence_assessment"] = response["confidence_assessment"]
+    planner["contradiction_assessment"] = response["contradiction_assessment"]
+    planner["evidence_gap_assessment"] = response["evidence_gap_assessment"]
+    evidence_bundle["evidence_assessment"]["confidence_assessment"] = response["confidence_assessment"]
+    evidence_bundle["evidence_assessment"]["contradiction_assessment"] = response["contradiction_assessment"]
+    evidence_bundle["evidence_assessment"]["evidence_gap_assessment"] = response["evidence_gap_assessment"]
     response["workflow"] = finalize_investigation_workflow(workflow, response)
-    mcp_orchestrator.finish_run(status="completed", context_summary=response, target_host=investigation_context.get("target_host") or "")
+    mcp_orchestrator.update_run_state(
+        status="verifying",
+        current_stage="verifying",
+        target_host=investigation_context.get("target_host") or "",
+        planner_json=planner,
+        workflow_json=response["workflow"],
+        evidence_bundle_json=evidence_bundle,
+        missing_evidence_json=response.get("missing_evidence") or [],
+        contradicting_evidence_json=response.get("contradicting_evidence") or [],
+        confidence_score=_confidence_score(response.get("confidence") or ""),
+    )
+    mcp_orchestrator.finish_run(status="resolved", context_summary=response, target_host=investigation_context.get("target_host") or "")
     return response

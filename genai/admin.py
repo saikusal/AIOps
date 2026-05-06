@@ -4,26 +4,40 @@ from django.contrib import messages
 from .code_context_ingestion import sync_repository_index
 from .models import (
     AgentBehaviorVersion,
+    ArchiveManifest,
     CodeChangeRecord,
+    DataRetentionPolicy,
     DeploymentBinding,
+    EvidenceArtifact,
+    EvidenceBundle,
+    EvidenceSnapshot,
     ExecutionIntent,
     InvestigationRun,
+    InvestigationTranscript,
+    LifecycleJobRun,
     RepositoryIndex,
     RemediationOutcome,
     ReplayEvaluation,
     ReplayScenario,
+    RetentionHold,
     RouteBinding,
     Runbook,
     ServiceRepositoryBinding,
     SpanBinding,
     SymbolRelation,
+    TargetLogIngestionProfile,
+    TargetLogSource,
+    TargetPolicyAssignment,
+    TargetPolicyProfile,
+    TargetRuntimeProfile,
+    TargetServiceBinding,
     ToolInvocation,
 )
 
 
 @admin.register(InvestigationRun)
 class InvestigationRunAdmin(admin.ModelAdmin):
-    list_display = ("run_id", "route", "application", "service", "target_host", "status", "updated_at")
+    list_display = ("run_id", "route", "application", "service", "target_host", "status", "current_stage", "updated_at")
     search_fields = ("run_id", "question", "application", "service", "target_host")
     list_filter = ("status", "route", "created_at")
     readonly_fields = ("run_id", "created_at", "updated_at", "completed_at")
@@ -35,6 +49,82 @@ class ToolInvocationAdmin(admin.ModelAdmin):
     search_fields = ("invocation_id", "server_name", "tool_name")
     list_filter = ("server_name", "status", "created_at")
     readonly_fields = ("invocation_id", "created_at")
+
+
+@admin.register(DataRetentionPolicy)
+class DataRetentionPolicyAdmin(admin.ModelAdmin):
+    list_display = ("slug", "data_category", "subject_type", "deployment_mode", "primary_store", "archive_store", "retention_days", "archive_after_days", "purge_after_days", "is_default")
+    search_fields = ("slug", "name", "notes")
+    list_filter = ("data_category", "subject_type", "deployment_mode", "primary_store", "archive_store", "is_default", "hold_supported", "object_storage_required", "vector_store_required")
+    readonly_fields = ("policy_id", "created_at", "updated_at")
+
+
+@admin.register(EvidenceBundle)
+class EvidenceBundleAdmin(admin.ModelAdmin):
+    list_display = ("bundle_id", "investigation_run", "incident", "data_category", "primary_store", "lifecycle_status", "updated_at")
+    search_fields = ("bundle_id", "investigation_run__run_id", "incident__incident_key")
+    list_filter = ("data_category", "primary_store", "archive_store", "lifecycle_status", "created_at")
+    readonly_fields = ("bundle_id", "created_at", "updated_at", "archived_at")
+
+
+@admin.register(EvidenceSnapshot)
+class EvidenceSnapshotAdmin(admin.ModelAdmin):
+    list_display = ("snapshot_id", "investigation_run", "stage", "iteration_index", "confidence_score", "created_at")
+    search_fields = ("snapshot_id", "investigation_run__run_id", "title", "summary")
+    list_filter = ("stage", "created_at")
+    readonly_fields = ("snapshot_id", "created_at")
+
+
+@admin.register(InvestigationTranscript)
+class InvestigationTranscriptAdmin(admin.ModelAdmin):
+    list_display = ("transcript_id", "investigation_run", "sequence_index", "entry_type", "stage", "created_at")
+    search_fields = ("transcript_id", "investigation_run__run_id", "title")
+    list_filter = ("entry_type", "stage", "created_at")
+    readonly_fields = ("transcript_id", "created_at")
+
+
+# ---------------------------------------------------------------------------
+# Track 3.4 — Lifecycle job history
+# ---------------------------------------------------------------------------
+
+@admin.register(LifecycleJobRun)
+class LifecycleJobRunAdmin(admin.ModelAdmin):
+    list_display = ("job_run_id", "job_type", "status", "triggered_by", "records_scanned", "records_pruned", "records_archived", "duration_seconds", "started_at")
+    search_fields = ("job_run_id", "job_type", "triggered_by", "error_detail")
+    list_filter = ("job_type", "status", "triggered_by", "started_at")
+    readonly_fields = ("job_run_id", "started_at", "completed_at", "duration_seconds")
+
+
+# ---------------------------------------------------------------------------
+# Track 3.4 — Retention holds
+# ---------------------------------------------------------------------------
+
+@admin.register(RetentionHold)
+class RetentionHoldAdmin(admin.ModelAdmin):
+    list_display = ("hold_id", "hold_reason", "is_active", "evidence_bundle", "incident", "held_by", "expires_at", "created_at")
+    search_fields = ("hold_id", "description", "held_by__username", "incident__incident_key")
+    list_filter = ("hold_reason", "is_active", "created_at")
+    readonly_fields = ("hold_id", "created_at", "released_at")
+
+
+# ---------------------------------------------------------------------------
+# Track 3.5 — Archive manifests
+# ---------------------------------------------------------------------------
+
+@admin.register(ArchiveManifest)
+class ArchiveManifestAdmin(admin.ModelAdmin):
+    list_display = ("manifest_id", "evidence_bundle", "archive_backend", "status", "size_bytes", "uploaded_at", "verified_at")
+    search_fields = ("manifest_id", "object_key", "bucket_name", "checksum_sha256")
+    list_filter = ("archive_backend", "status", "includes_snapshots", "includes_transcripts", "includes_tool_responses", "created_at")
+    readonly_fields = ("manifest_id", "created_at", "updated_at", "uploaded_at", "verified_at")
+
+
+@admin.register(EvidenceArtifact)
+class EvidenceArtifactAdmin(admin.ModelAdmin):
+    list_display = ("artifact_id", "artifact_type", "storage_backend", "size_bytes", "is_pruned", "evidence_bundle", "created_at")
+    search_fields = ("artifact_id", "object_key", "evidence_bundle__bundle_id")
+    list_filter = ("artifact_type", "storage_backend", "is_pruned", "created_at")
+    readonly_fields = ("artifact_id", "created_at", "pruned_at")
 
 
 @admin.register(Runbook)
@@ -156,3 +246,51 @@ class SymbolRelationAdmin(admin.ModelAdmin):
     search_fields = ("source_symbol", "target_symbol", "source_file_path", "target_file_path", "repository_index__name")
     list_filter = ("relation_type", "created_at")
     readonly_fields = ("relation_id", "created_at", "updated_at")
+
+
+@admin.register(TargetPolicyProfile)
+class TargetPolicyProfileAdmin(admin.ModelAdmin):
+    list_display = ("name", "slug", "target_type", "runtime_type", "sudo_mode", "is_active", "updated_at")
+    search_fields = ("name", "slug", "description")
+    list_filter = ("target_type", "runtime_type", "sudo_mode", "is_active", "created_at")
+    readonly_fields = ("profile_id", "created_at", "updated_at")
+
+
+@admin.register(TargetPolicyAssignment)
+class TargetPolicyAssignmentAdmin(admin.ModelAdmin):
+    list_display = ("target", "policy_profile", "config_version", "last_apply_status", "last_applied_at", "updated_at")
+    search_fields = ("target__name", "target__target_id", "policy_profile__name", "policy_profile__slug")
+    list_filter = ("last_apply_status", "updated_at")
+    readonly_fields = ("assignment_id", "created_at", "updated_at")
+
+
+@admin.register(TargetRuntimeProfile)
+class TargetRuntimeProfileAdmin(admin.ModelAdmin):
+    list_display = ("target", "role", "environment", "runtime_type", "primary_restart_mode", "docker_available", "systemd_available")
+    search_fields = ("target__name", "target__target_id", "hostname", "os_family")
+    list_filter = ("role", "environment", "runtime_type", "primary_restart_mode", "docker_available", "systemd_available")
+    readonly_fields = ("profile_id", "created_at", "updated_at")
+
+
+@admin.register(TargetServiceBinding)
+class TargetServiceBindingAdmin(admin.ModelAdmin):
+    list_display = ("target", "service_name", "service_kind", "port", "is_primary", "updated_at")
+    search_fields = ("target__name", "service_name", "systemd_unit", "container_name", "process_name")
+    list_filter = ("service_kind", "is_primary", "updated_at")
+    readonly_fields = ("binding_id", "created_at", "updated_at")
+
+
+@admin.register(TargetLogSource)
+class TargetLogSourceAdmin(admin.ModelAdmin):
+    list_display = ("target", "source_type", "stream_family", "shipper_type", "is_primary", "updated_at")
+    search_fields = ("target__name", "journal_unit", "file_path", "container_name", "stream_family", "shipper_type")
+    list_filter = ("source_type", "shipper_type", "is_primary", "updated_at")
+    readonly_fields = ("source_id", "created_at", "updated_at")
+
+
+@admin.register(TargetLogIngestionProfile)
+class TargetLogIngestionProfileAdmin(admin.ModelAdmin):
+    list_display = ("target", "shipper_type", "stream_family", "config_version", "last_apply_status", "last_applied_at")
+    search_fields = ("target__name", "shipper_type", "stream_family", "opensearch_pipeline")
+    list_filter = ("shipper_type", "last_apply_status", "updated_at")
+    readonly_fields = ("profile_id", "created_at", "updated_at")

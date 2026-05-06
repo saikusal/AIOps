@@ -1,0 +1,6 @@
+apiVersion: v2
+name: opsmitra
+description: Self-hosted OpsMitra control plane for air-gapped, code-context-aware AIOps.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

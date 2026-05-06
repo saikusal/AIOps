@@ -1,17 +1,20 @@
 import os
+import logging
+import json
 import shutil
 import subprocess
 import tempfile
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 from django.test import RequestFactory, SimpleTestCase, TestCase
 
 from genai.code_context_extractors import extract_python_artifacts
 from genai.code_context_ingestion import auto_register_target_code_context, ensure_builtin_repository_indexes, sync_repository_index
 from genai.code_context_services import find_service_owner, read_code_snippet, route_to_handler, search_code_context, span_to_symbol
-from genai.tools.investigation import _infer_runtime_entities_from_question
+from genai.tools.investigation import _assess_code_context_quality, _infer_runtime_entities_from_question
 from genai.mcp_client import MCPClient
 from genai.mcp_registry import MCPRegistry
+from genai.mcp_orchestrator import InvestigationMCPOrchestrator
 from genai.mcp_services import (
     applications_get_component_snapshot,
     applications_get_overview,
@@ -35,7 +38,15 @@ from genai.execution_safety import (
     resolve_idempotency_key,
     verify_approval_token,
 )
-from genai.multi_step_workflow import build_execution_workflow, build_investigation_workflow, finalize_investigation_workflow
+from genai.multi_step_workflow import (
+    annotate_investigation_workflow_with_iterations,
+    build_execution_workflow,
+    build_investigation_plan,
+    build_iteration_plan,
+    build_investigation_workflow,
+    finalize_investigation_workflow,
+    normalize_investigation_evidence,
+)
 from genai.policy_engine import (
     classify_action,
     evaluate_execution_policy,
@@ -43,8 +54,36 @@ from genai.policy_engine import (
 )
 from genai.replay_evaluation import build_replay_scores
 from genai.typed_actions import command_from_typed_action, infer_typed_action
-from genai.models import CodeChangeRecord, DiscoveredService, RepositoryIndex, RouteBinding, ServiceRepositoryBinding, SpanBinding, SymbolRelation, Target
-from genai.views import _fleet_install_prereqs, _serialize_target, fleet_linux_install_script_view
+from genai.models import (
+    CodeChangeRecord,
+    DataRetentionPolicy,
+    DiscoveredService,
+    EvidenceBundle,
+    EvidenceSnapshot,
+    InvestigationRun,
+    InvestigationTranscript,
+    RepositoryIndex,
+    RouteBinding,
+    ServiceRepositoryBinding,
+    SpanBinding,
+    SymbolRelation,
+    Target,
+    TargetLogIngestionProfile,
+    TargetLogSource,
+    TargetPolicyAssignment,
+    TargetPolicyProfile,
+    TargetRuntimeProfile,
+    TargetServiceBinding,
+)
+from genai.views import (
+    _fleet_install_prereqs,
+    _mark_target_config_apply_requested,
+    _serialize_target,
+    _target_generated_config_payload,
+    _update_target_configuration_from_payload,
+    fleet_kubernetes_install_manifest_view,
+    fleet_linux_install_script_view,
+)
 
 
 class MCPClientTests(SimpleTestCase):
@@ -77,6 +116,153 @@ class MCPServiceTests(SimpleTestCase):
         )
         self.assertEqual(payload["count"], 1)
         self.assertEqual(payload["results"][0]["application"], "b")
+
+    def test_investigation_plan_and_evidence_bundle_are_normalized(self):
+        context = {
+            "service_name": "orders-api",
+            "target_host": "orders-prod-01",
+            "incident": {"incident_key": "inc-1", "status": "open", "title": "Orders degraded"},
+            "metrics": {"latency_p95_seconds": {"query": "demo"}},
+            "elasticsearch": {"count": 12, "results": [{"message": "timeout"}]},
+            "jaeger": {"data": [{"spans": [{"operationName": "checkout"}]}]},
+            "dependency_graph": {"depends_on": ["postgres"], "blast_radius": ["gateway"]},
+            "code_context": {"owner": {"repository": "orders-repo"}, "recent_changes": {"recent_changes": [1, 2]}},
+            "source_context": {"traceback_count": 1},
+            "runbooks": {"count": 2},
+            "linked_recommendation": {"diagnostic_command": "journalctl -u orders-api"},
+            "evidence_assessment": {
+                "hard_evidence": ["error-rate spike"],
+                "contradicting_evidence": ["inventory healthy"],
+                "missing_evidence": ["db saturation check"],
+                "safe_action": "diagnose",
+                "confidence_reason": "metrics and logs agree",
+            },
+        }
+        plan = build_investigation_plan(
+            question="why is orders failing",
+            scope={"service": "orders-api"},
+            context=context,
+        )
+        self.assertEqual(plan["selected_target"], "orders-api")
+        self.assertTrue(plan["candidate_hypotheses"])
+
+        evidence_bundle = normalize_investigation_evidence(context)
+        self.assertEqual(evidence_bundle["logs"]["hit_count"], 12)
+        self.assertEqual(evidence_bundle["traces"]["trace_count"], 1)
+        self.assertEqual(evidence_bundle["code_context"]["owner_repository"], "orders-repo")
+        self.assertEqual(evidence_bundle["evidence_assessment"]["confidence_assessment"]["level"], "low")
+        self.assertEqual(evidence_bundle["evidence_assessment"]["contradiction_assessment"]["severity"], "low")
+        self.assertEqual(evidence_bundle["evidence_assessment"]["evidence_gap_assessment"]["status"], "low")
+
+        iteration_plan = build_iteration_plan(
+            question="why is orders failing",
+            scope={"service": "orders-api"},
+            context=context,
+            planner=plan,
+            evidence_bundle=evidence_bundle,
+        )
+        self.assertTrue(iteration_plan["should_continue"])
+        self.assertEqual(iteration_plan["candidate_steps"][0]["tool_name"], "topology.get_dependency_context")
+        self.assertEqual(iteration_plan["iterations"][0]["status"], "planned")
+
+        workflow = build_investigation_workflow(
+            question="why is orders failing",
+            scope={"service": "orders-api"},
+            context=context,
+        )
+        workflow = annotate_investigation_workflow_with_iterations(workflow, iteration_plan)
+        self.assertEqual(workflow[1]["stage"], "collecting_evidence")
+        self.assertEqual(workflow[3]["details"]["selected_next_tool"], "topology.get_dependency_context")
+        finalized = finalize_investigation_workflow(
+            workflow,
+            {
+                "confidence": "medium",
+                "confidence_assessment": {"level": "medium", "score": 0.61},
+                "contradiction_assessment": {"severity": "low", "count": 1},
+                "evidence_gap_assessment": {"status": "low", "count": 1},
+                "next_verification_step": "check db saturation",
+                "suggested_command": "journalctl -u orders-api",
+                "follow_up_questions": ["what changed?"],
+            },
+        )
+        self.assertEqual(finalized[-2]["stage"], "verifying")
+        self.assertEqual(finalized[-1]["stage"], "post_check_validator")
+        self.assertEqual(finalized[-1]["details"]["confidence_assessment"]["level"], "medium")
+
+    def test_code_context_quality_flags_stale_or_weak_mappings(self):
+        assessment = _assess_code_context_quality(
+            {
+                "owner": {
+                    "repository": "orders-repo",
+                    "ownership_confidence": 0.45,
+                    "repository_index_status": "failed",
+                    "repository_last_indexed_at": "2026-04-01T00:00:00+00:00",
+                },
+                "route_binding": {
+                    "handler": "orders.views.create_order",
+                    "confidence": 0.4,
+                },
+            }
+        )
+        self.assertEqual(assessment["quality"], "low")
+        self.assertFalse(assessment["safe_to_claim_code_root_cause"])
+        self.assertTrue(assessment["stale_index"])
+        self.assertTrue(assessment["weak_signals"])
+
+    def test_iteration_plan_stops_when_evidence_is_sufficient(self):
+        context = {
+            "service_name": "orders-api",
+            "target_host": "orders-prod-01",
+            "metrics": {"latency_p95_seconds": {"query": "demo"}},
+            "elasticsearch": {"count": 3, "results": [{"message": "timeout"}]},
+            "jaeger": {"data": [{"spans": [{"operationName": "checkout"}]}]},
+            "dependency_graph": {"depends_on": ["postgres"], "blast_radius": ["gateway"]},
+            "code_context": {"owner": {"repository": "orders-repo"}, "recent_changes": {"recent_changes": [1]}},
+            "source_context": {"traceback_count": 0},
+            "runbooks": {"count": 1},
+            "evidence_assessment": {
+                "hard_evidence": ["error-rate spike"],
+                "contradicting_evidence": [],
+                "missing_evidence": [],
+                "safe_action": "diagnose",
+            },
+        }
+        plan = build_investigation_plan(
+            question="why is orders failing",
+            scope={"service": "orders-api"},
+            context=context,
+        )
+        evidence_bundle = normalize_investigation_evidence(context)
+        iteration_plan = build_iteration_plan(
+            question="why is orders failing",
+            scope={"service": "orders-api"},
+            context=context,
+            planner=plan,
+            evidence_bundle=evidence_bundle,
+        )
+        self.assertFalse(iteration_plan["should_continue"])
+        self.assertEqual(iteration_plan["stop_reason"], "evidence_sufficient")
+        self.assertEqual(iteration_plan["candidate_steps"][0]["tool_name"], "none")
+
+
+class TypedActionTests(SimpleTestCase):
+    def test_infer_kubernetes_rollout_restart_action(self):
+        action = infer_typed_action(
+            command="kubectl rollout restart deployment/orders-api -n prod",
+            target_host="prod-cluster",
+            why="Restart the unhealthy workload.",
+            requires_approval=True,
+            service="orders-api",
+        )
+        self.assertEqual(action["action"], "restart_service")
+        self.assertEqual(action["metadata"]["executor"], "kubernetes")
+        self.assertEqual(action["metadata"]["resource_kind"], "deployment")
+        self.assertEqual(action["metadata"]["resource_name"], "orders-api")
+        self.assertEqual(action["metadata"]["namespace"], "prod")
+        self.assertEqual(
+            command_from_typed_action(action),
+            "kubectl rollout restart deployment/orders-api -n prod",
+        )
 
     def test_component_snapshot_matches_service_or_target_host(self):
         payload = applications_get_component_snapshot(
@@ -191,6 +377,88 @@ class PolicyEngineTests(SimpleTestCase):
         )
         self.assertEqual(decision["decision"], "blocked")
         self.assertEqual(decision["environment"], "production")
+
+
+class TargetConfigurationTests(TestCase):
+    def test_generated_target_config_and_apply_request(self):
+        target = Target.objects.create(
+            target_id="target-123",
+            name="orders-prod-01",
+            target_type="linux",
+            environment="production",
+            hostname="orders-prod-01",
+            status="connected",
+        )
+        profile = TargetPolicyProfile.objects.create(
+            slug="linux-app-systemd-test",
+            name="Linux App Systemd",
+            target_type="linux",
+            runtime_type="systemd",
+        )
+        payload = {
+            "runtime_profile": {
+                "role": "app",
+                "environment": "prod",
+                "runtime_type": "systemd",
+                "hostname": "orders-prod-01",
+                "os_family": "linux",
+                "docker_available": False,
+                "systemd_available": True,
+                "primary_restart_mode": "systemctl",
+                "notes": "managed by config editor",
+            },
+            "policy_profile_slug": profile.slug,
+            "service_bindings": [
+                {
+                    "service_name": "orders-api",
+                    "service_kind": "systemd",
+                    "systemd_unit": "orders-api.service",
+                    "port": 8080,
+                    "is_primary": True,
+                }
+            ],
+            "log_sources": [
+                {
+                    "service_name": "orders-api",
+                    "source_type": "journald",
+                    "journal_unit": "orders-api.service",
+                    "stream_family": "logs-linux",
+                    "shipper_type": "fluent-bit",
+                    "is_primary": True,
+                }
+            ],
+            "log_ingestion_profile": {
+                "shipper_type": "fluent-bit",
+                "stream_family": "logs-linux",
+                "opensearch_pipeline": "opsmitra-linux-default",
+                "record_metadata_json": {"service_name": "orders-api"},
+            },
+        }
+
+        _update_target_configuration_from_payload(target, payload)
+        target.refresh_from_db()
+
+        self.assertTrue(TargetRuntimeProfile.objects.filter(target=target, runtime_type="systemd").exists())
+        self.assertTrue(TargetPolicyAssignment.objects.filter(target=target, policy_profile=profile).exists())
+        self.assertTrue(TargetServiceBinding.objects.filter(target=target, service_name="orders-api").exists())
+        self.assertTrue(TargetLogSource.objects.filter(target=target, source_type="journald").exists())
+        self.assertTrue(TargetLogIngestionProfile.objects.filter(target=target, stream_family="logs-linux").exists())
+
+        generated = _target_generated_config_payload(target)
+        self.assertEqual(generated["target"]["target_id"], "target-123")
+        self.assertEqual(generated["runtime_profile"]["runtime_type"], "systemd")
+        self.assertEqual(generated["policy_assignment"]["policy_profile"]["slug"], profile.slug)
+        self.assertEqual(generated["service_bindings"][0]["service_name"], "orders-api")
+        self.assertTrue(generated["generated_configs"]["fluent_bit"]["enabled"])
+        self.assertIn("Logstash_Prefix   logs-linux", generated["generated_configs"]["fluent_bit"]["config"])
+        self.assertIn("Systemd_Filter    _SYSTEMD_UNIT=orders-api.service", generated["generated_configs"]["fluent_bit"]["config"])
+
+        apply_payload = _mark_target_config_apply_requested(target)
+        self.assertEqual(apply_payload["status"], "requested")
+
+        target.refresh_from_db()
+        self.assertEqual(target.policy_assignment.last_apply_status, "requested")
+        self.assertEqual(target.log_ingestion_profile.last_apply_status, "requested")
 
     @patch.dict(
         "os.environ",
@@ -422,7 +690,10 @@ class MultiStepWorkflowTests(SimpleTestCase):
                 },
             },
         )
-        self.assertEqual([stage["stage"] for stage in workflow], ["planner", "evidence_checker", "target_selector", "remediation_selector"])
+        self.assertEqual(
+            [stage["stage"] for stage in workflow],
+            ["planner", "collecting_evidence", "assessing_evidence", "planning_next_step", "remediation_selector"],
+        )
         finalized = finalize_investigation_workflow(workflow, {"confidence": "high", "next_verification_step": "Check gateway logs", "follow_up_questions": ["What changed?"]})
         self.assertEqual(finalized[-1]["stage"], "post_check_validator")
 
@@ -435,7 +706,14 @@ class MultiStepWorkflowTests(SimpleTestCase):
             policy_decision={"decision": "allowed", "requires_approval": True},
             ranking={"score": 0.8, "sample_size": 5},
             baseline_evidence={"signals": {"confirming": ["high 5xx"], "contradicting": ["db healthy"]}, "confidence_score": 0.7},
-            verification={"status": "resolved", "reason": "Error rate dropped"},
+            verification={
+                "status": "resolved",
+                "reason": "Error rate dropped",
+                "verification_loop_state": "closed",
+                "requires_follow_up": False,
+                "issue_score_delta": -0.7,
+                "recommended_next_step": "Close the incident or continue passive monitoring for recurrence.",
+            },
             analysis_sections={"remediation_typed_action": {"action": "diagnostic"}},
             execution_status="completed",
             dry_run=False,
@@ -444,6 +722,9 @@ class MultiStepWorkflowTests(SimpleTestCase):
         self.assertIn("executor", stage_names)
         self.assertIn("verifier", stage_names)
         self.assertEqual(workflow[-1]["stage"], "post_check_validator")
+        verifier = next(stage for stage in workflow if stage["stage"] == "verifier")
+        self.assertEqual(verifier["details"]["verification_loop_state"], "closed")
+        self.assertFalse(verifier["details"]["requires_follow_up"])
 
 
 class CodeContextExtractorTests(SimpleTestCase):
@@ -669,11 +950,11 @@ def health():
 
 
 class FleetInstallScriptTests(SimpleTestCase):
-    @patch.dict("os.environ", {"AGENT_SECRET_TOKEN": ""}, clear=False)
     def test_fleet_install_prereqs_require_agent_secret_token_for_linux(self):
-        prereqs = _fleet_install_prereqs("linux")
-        self.assertFalse(prereqs["control_plane_ready"])
-        self.assertTrue(prereqs["missing_requirements"])
+        with patch("genai.views.AGENT_SECRET_TOKEN", ""), patch.dict(os.environ, {"AGENT_SECRET_TOKEN": ""}, clear=False):
+            prereqs = _fleet_install_prereqs("linux")
+            self.assertFalse(prereqs["control_plane_ready"])
+            self.assertTrue(prereqs["missing_requirements"])
 
     def test_linux_install_script_includes_optional_docker_discovery(self):
         request = RequestFactory().get("/genai/fleet/install/linux/")
@@ -693,6 +974,28 @@ class FleetInstallScriptTests(SimpleTestCase):
         self.assertIn('AGENT_AUTH_TOKEN=', script)
         self.assertIn('aiops-command-agent.service', script)
         self.assertIn('/opt/aiops-agent/agent_server.py', script)
+
+    def test_kubernetes_install_prereqs_do_not_require_agent_secret(self):
+        prereqs = _fleet_install_prereqs("kubernetes")
+        self.assertTrue(prereqs["control_plane_ready"])
+
+    def test_kubernetes_manifest_contains_cluster_agent_resources(self):
+        from genai.models import EnrollmentToken, TelemetryProfile
+        profile = TelemetryProfile(slug="kubernetes-observability", name="Kubernetes", default_for_target="kubernetes")
+        token = EnrollmentToken(token="k8s_demo_token", target_type="kubernetes", target_name="prod-cluster")
+        with patch("genai.views.EnrollmentToken.objects") as token_objects:
+            token.profile = profile
+            token.revoked = False
+            token_objects.select_related.return_value.filter.return_value.first.return_value = token
+            with patch.object(EnrollmentToken, "is_valid", new_callable=PropertyMock, return_value=True):
+                request = RequestFactory().get("/genai/fleet/install/kubernetes/?token=k8s_demo_token")
+                response = fleet_kubernetes_install_manifest_view(request)
+        manifest = response.content.decode("utf-8")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("opsmitra-cluster-agent", manifest)
+        self.assertIn("ClusterRole", manifest)
+        self.assertIn("CONTROL_PLANE_URL", manifest)
+        self.assertIn("ENROLL_TOKEN", manifest)
 
 
 class FleetSerializationTests(TestCase):
@@ -740,3 +1043,175 @@ class FleetSerializationTests(TestCase):
         self.assertEqual(payload["runtime_summary"]["host_service_count"], 1)
         self.assertEqual(len(payload["workload_preview"]), 1)
         self.assertEqual(payload["workload_preview"][0]["service_name"], "app-orders")
+
+
+class InvestigationDurabilityTests(TestCase):
+    def test_orchestrator_persists_evidence_bundle_snapshots_and_transcript(self):
+        retention = DataRetentionPolicy.objects.create(
+            slug="evidence-memory-default",
+            name="Evidence Memory Default",
+            data_category="evidence_memory",
+            primary_store="postgres",
+            archive_store="object_storage",
+            retention_days=30,
+            archive_after_days=14,
+            purge_after_days=120,
+            is_default=True,
+        )
+        run = InvestigationRun.objects.create(
+            question="why are 503s happening on orders?",
+            application="customer-portal",
+            service="app-orders",
+            route="investigation",
+            status="scoping",
+            current_stage="scoping",
+        )
+        orchestrator = InvestigationMCPOrchestrator(
+            question=run.question,
+            logger=logging.getLogger("test"),
+            incident_model=None,
+            find_investigation_incident=lambda *_args, **_kwargs: None,
+            build_application_overview=lambda **_kwargs: {},
+            incident_timeline_payload=lambda *_args, **_kwargs: {},
+            get_dependency_context=lambda *_args, **_kwargs: {},
+            application_graph_payload=lambda *_args, **_kwargs: {},
+            fetch_elasticsearch_logs=lambda *_args, **_kwargs: {},
+            fetch_jaeger_traces=lambda *_args, **_kwargs: {},
+            fetch_metrics_query=lambda *_args, **_kwargs: {},
+        )
+        orchestrator.investigation_run = run
+
+        orchestrator.update_run_state(
+            status="collecting_evidence",
+            current_stage="collecting_evidence",
+            target_host="orders-prod-01",
+            planner_json={"next_step": "logs.search", "iteration_plan": {"should_continue": True}},
+            workflow_json=[{"stage": "collecting_evidence", "status": "running"}],
+            evidence_bundle_json={"evidence_assessment": {"summary": "Logs and metrics suggest backend dependency failure."}},
+            missing_evidence_json=["confirm downstream dependency state"],
+            contradicting_evidence_json=["ingress metrics remained healthy"],
+            confidence_score=0.64,
+        )
+        run.refresh_from_db()
+        bundle = EvidenceBundle.objects.get(investigation_run=run)
+
+        self.assertEqual(bundle.retention_policy, retention)
+        self.assertEqual(bundle.primary_store, "postgres")
+        self.assertEqual(bundle.archive_store, "object_storage")
+        self.assertGreaterEqual(EvidenceSnapshot.objects.filter(investigation_run=run).count(), 1)
+        self.assertGreaterEqual(InvestigationTranscript.objects.filter(investigation_run=run).count(), 1)
+
+        latest_snapshot = EvidenceSnapshot.objects.filter(investigation_run=run).order_by("-created_at").first()
+        self.assertEqual(latest_snapshot.stage, "collecting_evidence")
+        self.assertEqual(latest_snapshot.confidence_score, 0.64)
+        self.assertEqual(latest_snapshot.missing_evidence_json, ["confirm downstream dependency state"])
+        self.assertEqual(latest_snapshot.contradicting_evidence_json, ["ingress metrics remained healthy"])
+
+    def test_investigation_detail_view_surfaces_bundle_snapshot_and_transcript_refs(self):
+        retention = DataRetentionPolicy.objects.create(
+            slug="evidence-memory-default",
+            name="Evidence Memory Default",
+            data_category="evidence_memory",
+            primary_store="postgres",
+            archive_store="object_storage",
+            retention_days=30,
+            archive_after_days=14,
+            purge_after_days=120,
+            is_default=True,
+        )
+        run = InvestigationRun.objects.create(
+            question="orders api 503s",
+            application="customer-portal",
+            service="app-orders",
+            route="investigation",
+            status="resolved",
+            current_stage="resolved",
+            confidence_score=0.82,
+        )
+        bundle = EvidenceBundle.objects.create(
+            investigation_run=run,
+            retention_policy=retention,
+            data_category="evidence_memory",
+            primary_store="postgres",
+            archive_store="object_storage",
+            evidence_summary_json={"summary": "backend issue"},
+        )
+        EvidenceSnapshot.objects.create(
+            evidence_bundle=bundle,
+            investigation_run=run,
+            stage="resolved",
+            iteration_index=1,
+            title="Final evidence snapshot",
+            summary="Dependency failure confirmed.",
+            confidence_score=0.82,
+        )
+        InvestigationTranscript.objects.create(
+            evidence_bundle=bundle,
+            investigation_run=run,
+            sequence_index=1,
+            entry_type="summary",
+            stage="resolved",
+            title="Investigation completed",
+            content_json={"status": "resolved"},
+        )
+
+        request = RequestFactory().get(f"/genai/investigations/{run.run_id}/")
+        from genai.views import investigation_detail_view
+
+        response = investigation_detail_view(request, str(run.run_id))
+        payload = json.loads(response.content.decode("utf-8"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["evidence_bundle_ref"]["bundle_id"], str(bundle.bundle_id))
+        self.assertEqual(payload["evidence_bundle_ref"]["retention_policy"], "evidence-memory-default")
+        self.assertEqual(payload["evidence_bundle_ref"]["snapshot_count"], 1)
+        self.assertEqual(payload["evidence_bundle_ref"]["transcript_entry_count"], 1)
+        self.assertEqual(len(payload["evidence_snapshots"]), 1)
+        self.assertEqual(len(payload["investigation_transcript"]), 1)
+
+
+class RetentionPolicyViewTests(TestCase):
+    def test_lifecycle_retention_policies_view_groups_by_deployment_mode(self):
+        DataRetentionPolicy.objects.create(
+            slug="logs-default",
+            name="Logs Default",
+            data_category="hot_telemetry",
+            subject_type="logs",
+            deployment_mode="any",
+            primary_store="opensearch",
+            archive_store="object_storage",
+            retention_days=14,
+            archive_after_days=7,
+            purge_after_days=30,
+            hold_supported=True,
+            object_storage_required=True,
+            is_default=True,
+            storage_defaults_json={"opensearch_stream_families": ["logs-linux-default"]},
+        )
+        DataRetentionPolicy.objects.create(
+            slug="metrics-kubernetes-default",
+            name="Metrics Kubernetes Default",
+            data_category="hot_telemetry",
+            subject_type="metrics",
+            deployment_mode="kubernetes_standard",
+            primary_store="victoriametrics",
+            archive_store="object_storage",
+            retention_days=21,
+            archive_after_days=14,
+            purge_after_days=45,
+            is_default=True,
+        )
+
+        request = RequestFactory().get("/genai/lifecycle/retention-policies/?deployment_mode=kubernetes_standard")
+        request.user = type("User", (), {"is_authenticated": True})()
+
+        from genai.views import lifecycle_retention_policies_view
+
+        response = lifecycle_retention_policies_view(request)
+        payload = json.loads(response.content.decode("utf-8"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["count"], 2)
+        self.assertIn("kubernetes_standard", payload["grouped_by_deployment_mode"])
+        self.assertIn("any", payload["grouped_by_deployment_mode"])
+        self.assertEqual(payload["storage_direction"]["tempo"], "traces")

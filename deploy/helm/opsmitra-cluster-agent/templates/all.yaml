@@ -1,0 +1,96 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespaceOverride }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "opsmitra-cluster-agent.fullname" . }}
+  namespace: {{ .Values.namespaceOverride }}
+type: Opaque
+stringData:
+  CONTROL_PLANE_URL: {{ .Values.agent.controlPlaneUrl | quote }}
+  ENROLL_TOKEN: {{ .Values.agent.enrollToken | quote }}
+  CLUSTER_NAME: {{ .Values.agent.clusterName | quote }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "opsmitra-cluster-agent.fullname" . }}
+  namespace: {{ .Values.namespaceOverride }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "opsmitra-cluster-agent.fullname" . }}-readonly
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces", "nodes", "pods", "services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "opsmitra-cluster-agent.fullname" . }}-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "opsmitra-cluster-agent.fullname" . }}-readonly
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "opsmitra-cluster-agent.fullname" . }}
+    namespace: {{ .Values.namespaceOverride }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opsmitra-cluster-agent.fullname" . }}
+  namespace: {{ .Values.namespaceOverride }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "opsmitra-cluster-agent.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "opsmitra-cluster-agent.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ include "opsmitra-cluster-agent.fullname" . }}
+      containers:
+        - name: agent
+          image: "{{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag }}"
+          imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+          envFrom:
+            - secretRef:
+                name: {{ include "opsmitra-cluster-agent.fullname" . }}
+          env:
+            - name: TARGET_ENVIRONMENT
+              value: {{ .Values.agent.targetEnvironment | quote }}
+            - name: VERIFY_SSL
+              value: {{ ternary "true" "false" .Values.agent.verifySsl | quote }}
+            - name: HEARTBEAT_INTERVAL_SECONDS
+              value: {{ .Values.agent.heartbeatIntervalSeconds | quote }}
+            - name: COMMAND_POLL_INTERVAL_SECONDS
+              value: "5"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,121 @@
+{{- if .Values.observability.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opsmitra.fullname" . }}-jaeger
+  labels:
+    {{- include "opsmitra.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "opsmitra.name" . }}
+      app.kubernetes.io/component: jaeger
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "opsmitra.name" . }}
+        app.kubernetes.io/component: jaeger
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: jaeger
+          image: "{{ .Values.images.jaeger.repository }}:{{ .Values.images.jaeger.tag }}"
+          imagePullPolicy: {{ .Values.images.jaeger.pullPolicy }}
+          command: ["--collector.otlp.enabled=true"]
+          ports:
+            - containerPort: 16686
+              name: ui
+            - containerPort: 14269
+              name: metrics
+            - containerPort: 4317
+              name: otlp-grpc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opsmitra.fullname" . }}-otel-collector
+  labels:
+    {{- include "opsmitra.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "opsmitra.name" . }}
+      app.kubernetes.io/component: otel-collector
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "opsmitra.name" . }}
+        app.kubernetes.io/component: otel-collector
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: otel-collector
+          image: "{{ .Values.images.otelCollector.repository }}:{{ .Values.images.otelCollector.tag }}"
+          imagePullPolicy: {{ .Values.images.otelCollector.pullPolicy }}
+          command: ["--config=/etc/otelcol-contrib/config.yaml"]
+          ports:
+            - containerPort: {{ .Values.observability.otelGrpcPort }}
+              name: otlp-grpc
+            - containerPort: {{ .Values.observability.otelHttpPort }}
+              name: otlp-http
+            - containerPort: {{ .Values.observability.otelMetricsPort }}
+              name: prom
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol-contrib
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "opsmitra.fullname" . }}-otel-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opsmitra.fullname" . }}-metrics
+  labels:
+    {{- include "opsmitra.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "opsmitra.name" . }}
+      app.kubernetes.io/component: metrics
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "opsmitra.name" . }}
+        app.kubernetes.io/component: metrics
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: metrics
+          image: "{{ .Values.images.metrics.repository }}:{{ .Values.images.metrics.tag }}"
+          imagePullPolicy: {{ .Values.images.metrics.pullPolicy }}
+          command:
+            - -promscrape.config=/etc/prometheus/prometheus.yml
+            - -storageDataPath=/victoria-metrics-data
+            - -httpListenAddr=:{{ .Values.observability.metricsPort }}
+            - -retentionPeriod={{ .Values.observability.metricsRetention }}
+            - -search.latencyOffset=0s
+            - -search.maxUniqueTimeseries=300000
+          ports:
+            - containerPort: {{ .Values.observability.metricsPort }}
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: data
+              mountPath: /victoria-metrics-data
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "opsmitra.fullname" . }}-metrics-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "opsmitra.fullname" . }}-metrics
+{{- end }}

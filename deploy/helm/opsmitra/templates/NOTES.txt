@@ -1,0 +1,16 @@
+OpsMitra control plane has been installed.
+
+Primary services:
+- Web API: {{ include "opsmitra.webServiceName" . }}:{{ .Values.service.webPort }}
+- Frontend: {{ include "opsmitra.frontendServiceName" . }}:{{ .Values.service.frontendPort }}
+
+{{- if .Values.observability.enabled }}
+Observability services:
+- OTEL Collector: {{ include "opsmitra.otelServiceName" . }}:{{ .Values.observability.otelGrpcPort }}
+- Jaeger UI: {{ include "opsmitra.jaegerServiceName" . }}:{{ .Values.observability.jaegerUiPort }}
+- Metrics API: {{ include "opsmitra.metricsServiceName" . }}:{{ .Values.observability.metricsPort }}
+{{- end }}
+
+If ingress is disabled, you can port-forward the frontend:
+
+  kubectl port-forward svc/{{ include "opsmitra.frontendServiceName" . }} 8089:{{ .Values.service.frontendPort }}

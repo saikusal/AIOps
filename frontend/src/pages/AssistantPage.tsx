@@ -14,11 +14,28 @@ import { useRefreshQueryOptions } from "../lib/refresh";
 type RcaMeta = {
   confidence?: string;
   confidence_reason?: string;
+  confidence_assessment?: {
+    level?: string;
+    score?: number;
+    posture?: string;
+    summary?: string;
+  };
   decision_policy?: string;
   hard_evidence?: string[];
   missing_evidence?: string[];
   supporting_evidence?: string[];
   contradicting_evidence?: string[];
+  contradiction_assessment?: {
+    severity?: string;
+    count?: number;
+    blocks_dependency_claim?: boolean;
+    summary?: string;
+  };
+  evidence_gap_assessment?: {
+    status?: string;
+    count?: number;
+    summary?: string;
+  };
   next_verification_step?: string;
   target_host?: string;
   business_impact?: Record<string, unknown>;
@@ -45,6 +62,7 @@ function CodeContextPanel({ meta }: { meta: RcaMeta }) {
   const routeBinding = safeRecord(codeContext.route_binding);
   const spanBinding = safeRecord(codeContext.span_binding);
   const blastRadius = safeRecord(safeRecord(codeContext.blast_radius).blast_radius);
+  const quality = safeRecord(codeContext.quality_assessment);
   const snippets = safeList(codeContext.snippets);
   const recentChanges = safeList(safeRecord(codeContext.recent_changes).recent_changes);
   const searchMatches = safeList(safeRecord(codeContext.search_context).matches);
@@ -91,6 +109,11 @@ function CodeContextPanel({ meta }: { meta: RcaMeta }) {
           <small>{typeof blastRadius.affected_symbol_count === "number" ? `${blastRadius.affected_symbol_count} related symbols` : "No code blast-radius estimate yet."}</small>
         </div>
         <div className="assistant-code-context__card">
+          <span>Code Context Quality</span>
+          <strong>{String(quality.quality || "unknown")}</strong>
+          <small>{String(quality.summary || "No code-context quality assessment yet.")}</small>
+        </div>
+        <div className="assistant-code-context__card">
           <span>Business Impact</span>
           <strong>
             {Object.keys(businessImpact).length
@@ -129,6 +152,17 @@ function CodeContextPanel({ meta }: { meta: RcaMeta }) {
         </div>
       ) : null}
 
+      {Array.isArray(quality.weak_signals) && quality.weak_signals.length > 0 ? (
+        <div className="assistant-code-context__section">
+          <span>Code Context Cautions</span>
+          <ul>
+            {(quality.weak_signals as unknown[]).slice(0, 3).map((item, index) => (
+              <li key={`quality-${index}`}>{String(item)}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
       {snippets.length > 0 ? (
         <div className="assistant-code-context__section">
           <span>Snippet Evidence</span>
@@ -161,6 +195,9 @@ function RcaPanel({ meta }: { meta: RcaMeta }) {
   const level = meta.confidence ?? "medium";
   const decisionPolicy = meta.decision_policy ?? "diagnose";
   const confidenceReason = meta.confidence_reason ?? "";
+  const confidenceAssessment = safeRecord(meta.confidence_assessment);
+  const contradictionAssessment = safeRecord(meta.contradiction_assessment);
+  const evidenceGapAssessment = safeRecord(meta.evidence_gap_assessment);
   const hardEvidence = meta.hard_evidence ?? [];
   const missingEvidence = meta.missing_evidence ?? [];
   const supporting = meta.supporting_evidence ?? [];
@@ -173,6 +210,28 @@ function RcaPanel({ meta }: { meta: RcaMeta }) {
         <span className={`decision-policy decision-policy--${decisionPolicy}`}>{decisionPolicy.toUpperCase()}</span>
         {nextStep && <span className="rca-confidence__next">Next: {nextStep}</span>}
       </div>
+      {(confidenceAssessment.score !== undefined || Boolean(contradictionAssessment.severity) || Boolean(evidenceGapAssessment.status)) && (
+        <div className="assistant-code-context__trace">
+          <span>Assessment</span>
+          <div className="assistant-code-context__trace-list">
+            {confidenceAssessment.score !== undefined ? (
+              <code>
+                Score {Math.round(Number(confidenceAssessment.score) * 100)}% · {String(confidenceAssessment.posture || confidenceAssessment.level || "developing")}
+              </code>
+            ) : null}
+            {contradictionAssessment.severity ? (
+              <code>
+                Contradictions {String(contradictionAssessment.severity)} ({String(contradictionAssessment.count || 0)})
+              </code>
+            ) : null}
+            {evidenceGapAssessment.status ? (
+              <code>
+                Gaps {String(evidenceGapAssessment.status)} ({String(evidenceGapAssessment.count || 0)})
+              </code>
+            ) : null}
+          </div>
+        </div>
+      )}
       {confidenceReason && <div className="rca-confidence__reason">{confidenceReason}</div>}
       {hardEvidence.length > 0 && (
         <div className="rca-evidence rca-evidence--hard">

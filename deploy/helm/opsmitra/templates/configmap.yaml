@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "opsmitra.fullname" . }}-env
+  labels:
+    {{- include "opsmitra.labels" . | nindent 4 }}
+data:
+  POSTGRES_HOST: {{ include "opsmitra.postgresServiceName" . | quote }}
+  REDIS_HOST: {{ include "opsmitra.redisServiceName" . | quote }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ default (printf "http://%s:%v" (include "opsmitra.otelServiceName" .) .Values.observability.otelGrpcPort) .Values.application.env.OTEL_EXPORTER_OTLP_ENDPOINT | quote }}
+  METRICS_API_URL: {{ default (printf "http://%s:%v" (include "opsmitra.metricsServiceName" .) .Values.observability.metricsPort) .Values.application.env.METRICS_API_URL | quote }}
+  PROMETHEUS_URL: {{ default (printf "http://%s:%v" (include "opsmitra.metricsServiceName" .) .Values.observability.metricsPort) .Values.application.env.PROMETHEUS_URL | quote }}
+  JAEGER_URL: {{ default (printf "http://%s:%v" (include "opsmitra.jaegerServiceName" .) .Values.observability.jaegerUiPort) .Values.application.env.JAEGER_URL | quote }}
+  {{- range $key, $value := .Values.application.env }}
+  {{- if and (ne $key "OTEL_EXPORTER_OTLP_ENDPOINT") (ne $key "METRICS_API_URL") (ne $key "PROMETHEUS_URL") (ne $key "JAEGER_URL") }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+  {{- end }}

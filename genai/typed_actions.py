@@ -61,6 +61,46 @@ def infer_typed_action(
         )
         return action
 
+    kubectl_restart_match = re.match(
+        r"^kubectl rollout restart (deployment|statefulset|daemonset)/([A-Za-z0-9_.-]+)(?: -n ([A-Za-z0-9_.-]+))?$",
+        normalized_command,
+    )
+    if kubectl_restart_match:
+        workload_kind = kubectl_restart_match.group(1)
+        workload_name = kubectl_restart_match.group(2)
+        namespace = kubectl_restart_match.group(3) or "default"
+        action.update(
+            {
+                "action": "restart_service",
+                "target": normalized_service or workload_name,
+                "reason": why or "Kubernetes workload restart recommended from runtime evidence.",
+                "validation_plan": build_validation_plan("restart_service", normalized_service or workload_name),
+                "metadata": {
+                    "executor": "kubernetes",
+                    "resource_kind": workload_kind,
+                    "resource_name": workload_name,
+                    "namespace": namespace,
+                },
+            }
+        )
+        return action
+
+    kubectl_diagnostic_prefixes = (
+        "kubectl get ",
+        "kubectl describe ",
+        "kubectl logs ",
+    )
+    if normalized_command.lower().startswith(kubectl_diagnostic_prefixes):
+        action.update(
+            {
+                "action": "diagnostic",
+                "target": normalized_service or target_host or "",
+                "validation_plan": build_validation_plan("diagnostic", normalized_service),
+                "metadata": {"executor": "kubernetes"},
+            }
+        )
+        return action
+
     if normalized_command.lower().startswith("psql "):
         sql_match = re.search(r'-c\s+"(.*)"', normalized_command)
         sql = sql_match.group(1) if sql_match else ""
@@ -99,6 +139,13 @@ def command_from_typed_action(action_payload: Optional[Dict[str, Any]]) -> str:
 
     if action_type == "restart_service":
         metadata = action_payload.get("metadata") or {}
+        executor = str(metadata.get("executor") or "").strip()
+        if executor == "kubernetes":
+            resource_kind = str(metadata.get("resource_kind") or "deployment").strip()
+            resource_name = str(metadata.get("resource_name") or "").strip()
+            namespace = str(metadata.get("namespace") or "default").strip()
+            if resource_name:
+                return f"kubectl rollout restart {resource_kind}/{resource_name} -n {namespace}".strip()
         container_name = str(metadata.get("container_name") or "").strip()
         return f"docker restart {container_name}".strip() if container_name else ""
 

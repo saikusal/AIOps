@@ -9,6 +9,7 @@ const navItems = [
   { to: "/intelligence",      label: "AI/ML Intelligence",       meta: "Anomaly · RCA · Prediction" },
   { to: "/alerts",            label: "Alerts",                   meta: "Signal Feed · Anomaly Explainer" },
   { to: "/incidents",         label: "Incidents",                meta: "SLA · War Room · PIR" },
+  { to: "/investigations",    label: "Investigations",           meta: "Live RCA · Tool Trace · Stages" },
   { to: "/topology",          label: "Topology & CMDB",          meta: "Service Graph · Blast Radius" },
   { to: "/code-context",      label: "Code Context",             meta: "Repo Graph · Runtime To Code" },
   { to: "/genai",             label: "Assistant",                meta: "RCA · AI Chat" },
@@ -16,6 +17,15 @@ const navItems = [
   { to: "/automation",        label: "Knowledge Base",           meta: "Runbooks · Auto-Remediation" },
   { to: "/analytics",         label: "Analytics & Reporting",    meta: "SLO · MTTR · Exec Views" },
 ];
+
+function navGlyph(label: string): string {
+  return label
+    .split(/[^\w]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? "")
+    .join("");
+}
 
 export function AppShell() {
   const location = useLocation();
@@ -56,6 +66,9 @@ export function AppShell() {
               className={({ isActive }) => `shell__nav-link${isActive ? " is-active" : ""}`}
               to={item.to}
             >
+              <span className="shell__nav-glyph" aria-hidden="true">
+                {navGlyph(item.label)}
+              </span>
               <span className="shell__nav-copy">
                 <strong>{item.label}</strong>
                 <span>{item.meta}</span>

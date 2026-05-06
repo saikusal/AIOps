@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opsmitra.fullname" . }}-web
+  labels:
+    {{- include "opsmitra.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "opsmitra.name" . }}
+      app.kubernetes.io/component: web
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "opsmitra.name" . }}
+        app.kubernetes.io/component: web
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: web
+          image: "{{ .Values.images.web.repository }}:{{ .Values.images.web.tag }}"
+          imagePullPolicy: {{ .Values.images.web.pullPolicy }}
+          command: ["sh", "/code/entrypoint.sh"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "opsmitra.fullname" . }}-env
+            - secretRef:
+                name: {{ include "opsmitra.fullname" . }}-secret
+          ports:
+            - containerPort: 8000
+              name: http
+          volumeMounts:
+            - name: media
+              mountPath: /code/mediafiles
+            - name: applogs
+              mountPath: /var/log/aiops
+          readinessProbe:
+            httpGet:
+              path: /genai/login/
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.resources.web | nindent 12 }}
+      volumes:
+        - name: media
+          persistentVolumeClaim:
+            claimName: {{ include "opsmitra.fullname" . }}-media
+        - name: applogs
+          emptyDir: {}

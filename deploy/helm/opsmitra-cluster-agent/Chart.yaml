@@ -1,0 +1,6 @@
+apiVersion: v2
+name: opsmitra-cluster-agent
+description: Read-only Kubernetes cluster agent for OpsMitra monitored cluster onboarding.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

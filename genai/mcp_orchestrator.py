@@ -82,6 +82,106 @@ class InvestigationMCPOrchestrator:
         self.tool_results = []
         self._register_tools()
 
+    def _ensure_evidence_bundle(self):
+        if not self.investigation_run:
+            return None
+        try:
+            from .models import DataRetentionPolicy, EvidenceBundle
+
+            retention_policy = (
+                DataRetentionPolicy.objects.filter(data_category="evidence_memory", is_default=True)
+                .order_by("slug")
+                .first()
+            )
+            bundle, created = EvidenceBundle.objects.get_or_create(
+                investigation_run=self.investigation_run,
+                defaults={
+                    "incident": getattr(self.investigation_run, "incident", None),
+                    "retention_policy": retention_policy,
+                    "data_category": "evidence_memory",
+                    "primary_store": "postgres",
+                    "archive_store": "object_storage",
+                    "evidence_summary_json": {
+                        "question": self.investigation_run.question,
+                        "application": self.investigation_run.application,
+                        "service": self.investigation_run.service,
+                    },
+                },
+            )
+            if not created and retention_policy and bundle.retention_policy_id is None:
+                bundle.retention_policy = retention_policy
+                bundle.save(update_fields=["retention_policy", "updated_at"])
+            return bundle
+        except Exception as exc:
+            self.logger.warning("Failed to ensure EvidenceBundle for %s: %s", getattr(self.investigation_run, "run_id", "unknown"), exc)
+            return None
+
+    def _record_transcript_entry(self, *, entry_type: str, stage: str, title: str, content_json: Optional[Dict[str, Any]] = None) -> None:
+        if not self.investigation_run:
+            return
+        bundle = self._ensure_evidence_bundle()
+        if not bundle:
+            return
+        try:
+            from .models import InvestigationTranscript
+
+            sequence_index = bundle.transcript_entries.filter(investigation_run=self.investigation_run).count() + 1
+            InvestigationTranscript.objects.create(
+                evidence_bundle=bundle,
+                investigation_run=self.investigation_run,
+                sequence_index=sequence_index,
+                entry_type=entry_type,
+                stage=stage or "",
+                title=title[:255],
+                content_json=_safe_json_payload(content_json or {}) or {},
+            )
+        except Exception as exc:
+            self.logger.warning("Failed to persist InvestigationTranscript for %s: %s", getattr(self.investigation_run, "run_id", "unknown"), exc)
+
+    def _record_evidence_snapshot(
+        self,
+        *,
+        stage: str,
+        planner_json: Optional[Dict[str, Any]] = None,
+        evidence_bundle_json: Optional[Dict[str, Any]] = None,
+        missing_evidence_json: Optional[Any] = None,
+        contradicting_evidence_json: Optional[Any] = None,
+        confidence_score: Optional[float] = None,
+        title: str = "",
+    ) -> None:
+        if not self.investigation_run:
+            return
+        bundle = self._ensure_evidence_bundle()
+        if not bundle:
+            return
+        try:
+            from .models import EvidenceSnapshot
+
+            iteration_index = bundle.snapshots.filter(investigation_run=self.investigation_run).count()
+            summary = ""
+            if evidence_bundle_json:
+                evidence_assessment = (evidence_bundle_json or {}).get("evidence_assessment") or {}
+                summary = str(evidence_assessment.get("summary") or evidence_assessment.get("confidence_reason") or "")
+            EvidenceSnapshot.objects.create(
+                evidence_bundle=bundle,
+                investigation_run=self.investigation_run,
+                stage=stage or "",
+                iteration_index=iteration_index,
+                title=(title or stage or "snapshot")[:255],
+                summary=summary[:4000],
+                planner_json=_safe_json_payload(planner_json) or {},
+                evidence_bundle_json=_safe_json_payload(evidence_bundle_json) or {},
+                missing_evidence_json=_safe_json_payload(missing_evidence_json) or [],
+                contradicting_evidence_json=_safe_json_payload(contradicting_evidence_json) or [],
+                confidence_score=float(confidence_score or 0.0),
+                metadata_json={
+                    "status": self.investigation_run.status,
+                    "target_host": self.investigation_run.target_host,
+                },
+            )
+        except Exception as exc:
+            self.logger.warning("Failed to persist EvidenceSnapshot for %s: %s", getattr(self.investigation_run, "run_id", "unknown"), exc)
+
     def _register_tools(self) -> None:
         self.registry.register(MCPToolDefinition("incidents-mcp", "incidents.get_timeline", "Fetch incident timeline and summary", self._tool_incidents_get_timeline, endpoint_path="/genai/mcp/incidents/timeline/"))
         self.registry.register(MCPToolDefinition("applications-mcp", "applications.get_graph", "Fetch application graph", self._tool_applications_get_graph, endpoint_path="/genai/mcp/applications/graph/"))
@@ -116,22 +216,135 @@ class InvestigationMCPOrchestrator:
                 service=scope.get("service") or "",
                 scope_json=scope,
                 route="investigation",
-                status="running",
+                status="scoping",
+                current_stage="scoping",
             )
         except Exception as exc:
             self.logger.warning("Failed to create InvestigationRun: %s", exc)
             self.investigation_run = None
+        if self.investigation_run:
+            self._ensure_evidence_bundle()
+            self._record_transcript_entry(
+                entry_type="stage_transition",
+                stage="scoping",
+                title="Investigation created",
+                content_json={"scope": scope, "question": self.question},
+            )
+            self._record_evidence_snapshot(
+                stage="scoping",
+                planner_json={},
+                evidence_bundle_json={},
+                title="Initial scope",
+            )
+
+    def update_run_state(
+        self,
+        *,
+        status: Optional[str] = None,
+        current_stage: Optional[str] = None,
+        target_host: str = "",
+        planner_json: Optional[Dict[str, Any]] = None,
+        workflow_json: Optional[Any] = None,
+        evidence_bundle_json: Optional[Dict[str, Any]] = None,
+        hypotheses_json: Optional[Any] = None,
+        missing_evidence_json: Optional[Any] = None,
+        contradicting_evidence_json: Optional[Any] = None,
+        confidence_score: Optional[float] = None,
+    ) -> None:
+        if not self.investigation_run:
+            return
+        try:
+            changed_fields = ["updated_at"]
+            if status:
+                self.investigation_run.status = status
+                changed_fields.append("status")
+            if current_stage:
+                self.investigation_run.current_stage = current_stage
+                changed_fields.append("current_stage")
+            if target_host:
+                self.investigation_run.target_host = target_host
+                changed_fields.append("target_host")
+            if planner_json is not None:
+                self.investigation_run.planner_json = _safe_json_payload(planner_json) or {}
+                changed_fields.append("planner_json")
+            if workflow_json is not None:
+                self.investigation_run.workflow_json = _safe_json_payload(workflow_json) or []
+                changed_fields.append("workflow_json")
+            if evidence_bundle_json is not None:
+                self.investigation_run.evidence_bundle_json = _safe_json_payload(evidence_bundle_json) or {}
+                changed_fields.append("evidence_bundle_json")
+            if hypotheses_json is not None:
+                self.investigation_run.hypotheses_json = _safe_json_payload(hypotheses_json) or []
+                changed_fields.append("hypotheses_json")
+            if missing_evidence_json is not None:
+                self.investigation_run.missing_evidence_json = _safe_json_payload(missing_evidence_json) or []
+                changed_fields.append("missing_evidence_json")
+            if contradicting_evidence_json is not None:
+                self.investigation_run.contradicting_evidence_json = _safe_json_payload(contradicting_evidence_json) or []
+                changed_fields.append("contradicting_evidence_json")
+            if confidence_score is not None:
+                self.investigation_run.confidence_score = float(confidence_score)
+                changed_fields.append("confidence_score")
+            self.investigation_run.save(update_fields=changed_fields)
+            self._record_transcript_entry(
+                entry_type="stage_transition",
+                stage=current_stage or self.investigation_run.current_stage,
+                title=f"Stage update: {current_stage or status or self.investigation_run.current_stage}",
+                content_json={
+                    "status": status or self.investigation_run.status,
+                    "target_host": target_host or self.investigation_run.target_host,
+                    "planner": planner_json or self.investigation_run.planner_json,
+                    "missing_evidence": missing_evidence_json if missing_evidence_json is not None else self.investigation_run.missing_evidence_json,
+                    "contradicting_evidence": contradicting_evidence_json if contradicting_evidence_json is not None else self.investigation_run.contradicting_evidence_json,
+                    "confidence_score": confidence_score if confidence_score is not None else self.investigation_run.confidence_score,
+                },
+            )
+            self._record_evidence_snapshot(
+                stage=current_stage or self.investigation_run.current_stage,
+                planner_json=planner_json if planner_json is not None else self.investigation_run.planner_json,
+                evidence_bundle_json=evidence_bundle_json if evidence_bundle_json is not None else self.investigation_run.evidence_bundle_json,
+                missing_evidence_json=missing_evidence_json if missing_evidence_json is not None else self.investigation_run.missing_evidence_json,
+                contradicting_evidence_json=contradicting_evidence_json if contradicting_evidence_json is not None else self.investigation_run.contradicting_evidence_json,
+                confidence_score=confidence_score if confidence_score is not None else self.investigation_run.confidence_score,
+                title=f"{current_stage or self.investigation_run.current_stage} snapshot",
+            )
+        except Exception as exc:
+            self.logger.warning("Failed to update InvestigationRun %s state: %s", getattr(self.investigation_run, "run_id", "unknown"), exc)
 
     def finish_run(self, *, status: str, context_summary: Optional[Dict[str, Any]] = None, target_host: str = "") -> None:
         if not self.investigation_run:
             return
         try:
             self.investigation_run.status = status
+            self.investigation_run.current_stage = "resolved" if status in {"resolved", "completed"} else "failed"
             self.investigation_run.target_host = target_host or self.investigation_run.target_host
             if context_summary:
                 self.investigation_run.evidence_summary = _safe_json_payload(context_summary)
             self.investigation_run.completed_at = timezone.now()
-            self.investigation_run.save(update_fields=["status", "target_host", "evidence_summary", "completed_at", "updated_at"])
+            self.investigation_run.save(update_fields=["status", "current_stage", "target_host", "evidence_summary", "completed_at", "updated_at"])
+            bundle = self._ensure_evidence_bundle()
+            if bundle and context_summary:
+                bundle.evidence_summary_json = _safe_json_payload(context_summary) or {}
+                bundle.save(update_fields=["evidence_summary_json", "updated_at"])
+            self._record_transcript_entry(
+                entry_type="summary",
+                stage=self.investigation_run.current_stage,
+                title="Investigation completed",
+                content_json={
+                    "status": status,
+                    "target_host": self.investigation_run.target_host,
+                    "evidence_summary": context_summary or {},
+                },
+            )
+            self._record_evidence_snapshot(
+                stage=self.investigation_run.current_stage,
+                planner_json=self.investigation_run.planner_json,
+                evidence_bundle_json=self.investigation_run.evidence_bundle_json,
+                missing_evidence_json=self.investigation_run.missing_evidence_json,
+                contradicting_evidence_json=self.investigation_run.contradicting_evidence_json,
+                confidence_score=self.investigation_run.confidence_score,
+                title="Final evidence snapshot",
+            )
         except Exception as exc:
             self.logger.warning("Failed to finalize InvestigationRun %s: %s", self.investigation_run.run_id, exc)
 

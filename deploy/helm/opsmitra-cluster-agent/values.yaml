@@ -1,0 +1,16 @@
+nameOverride: ""
+fullnameOverride: ""
+
+agent:
+  image:
+    repository: opsmitra/k8s-cluster-agent
+    tag: latest
+    pullPolicy: IfNotPresent
+  controlPlaneUrl: https://opsmitra.example.com
+  enrollToken: replace-with-enrollment-token
+  clusterName: customer-cluster
+  targetEnvironment: production
+  verifySsl: false
+  heartbeatIntervalSeconds: 60
+
+namespaceOverride: opsmitra-system

@@ -12,6 +12,8 @@ import { FleetTargetPage } from "./pages/FleetTargetPage";
 import { GraphPage } from "./pages/GraphPage";
 import { IngestionPage } from "./pages/IngestionPage";
 import { IncidentsPage } from "./pages/IncidentsPage";
+import { InvestigationDetailPage } from "./pages/InvestigationDetailPage";
+import { InvestigationsPage } from "./pages/InvestigationsPage";
 import { PredictionsPage } from "./pages/PredictionsPage";
 
 function LegacyAssistantRedirect() {
@@ -30,6 +32,8 @@ export function App() {
         <Route path="/intelligence" element={<PredictionsPage />} />
         <Route path="/alerts" element={<AlertsPage />} />
         <Route path="/incidents" element={<IncidentsPage />} />
+        <Route path="/investigations" element={<InvestigationsPage />} />
+        <Route path="/investigations/:runId" element={<InvestigationDetailPage />} />
         <Route path="/topology" element={<ApplicationsPage />} />
         <Route path="/code-context" element={<CodeContextPage />} />
         <Route path="/genai" element={<AssistantPage />} />
