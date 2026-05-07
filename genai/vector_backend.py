@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
@@ -58,6 +59,31 @@ VECTOR_COLLECTIONS = [
     "runbook_embeddings",
     "incident_memory",
 ]
+
+_embedding_endpoint_disabled_reason: Optional[str] = None
+
+
+def _resolve_embedding_endpoint() -> str:
+    explicit_url = os.environ.get("VLLM_EMBEDDING_URL", "").strip()
+    if explicit_url:
+        return explicit_url
+
+    base_url = os.environ.get("VLLM_API_URL", "").strip()
+    if not base_url:
+        return ""
+
+    replacements = [
+        ("/v1/chat/completions", "/v1/embeddings"),
+        ("/chat/completions", "/v1/embeddings"),
+        ("/v1/completions", "/v1/embeddings"),
+    ]
+    for source, target in replacements:
+        if base_url.endswith(source):
+            return f"{base_url[:-len(source)]}{target}"
+
+    if base_url.endswith("/v1/embeddings"):
+        return base_url
+    return f"{base_url.rstrip('/')}/v1/embeddings"
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +357,9 @@ class WeaviateBackend(VectorBackend):
         """Weaviate class names must be PascalCase."""
         return "".join(word.capitalize() for word in collection.split("_"))
 
+    def _uuid_for_object(self, collection: str, object_id: str) -> str:
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"opsmitra:{collection}:{object_id}"))
+
     def _ensure_collection(self, collection: str) -> None:
         client = self._get_client()
         class_name = self._class_name(collection)
@@ -356,6 +385,11 @@ class WeaviateBackend(VectorBackend):
             self._ensure_collection(collection)
             client = self._get_client()
             col = client.collections.get(self._class_name(collection))
+            weaviate_uuid = self._uuid_for_object(collection, object_id)
+            try:
+                col.data.delete_by_id(weaviate_uuid)
+            except Exception:
+                pass
             col.data.insert(
                 properties={
                     "object_id": object_id,
@@ -363,7 +397,7 @@ class WeaviateBackend(VectorBackend):
                     "metadata_json": _json.dumps(metadata or {}),
                 },
                 vector=vector,
-                uuid=object_id,  # use object_id as deterministic UUID (must be UUID4 format)
+                uuid=weaviate_uuid,
             )
             return True
         except Exception as exc:
@@ -398,7 +432,7 @@ class WeaviateBackend(VectorBackend):
         try:
             client = self._get_client()
             col = client.collections.get(self._class_name(collection))
-            col.data.delete_by_id(object_id)
+            col.data.delete_by_id(self._uuid_for_object(collection, object_id))
             return True
         except Exception as exc:
             logger.error("weaviate delete failed: %s", exc)
@@ -483,6 +517,12 @@ def reset_vector_backend() -> None:
     _backend_instance = None
 
 
+def reset_embedding_endpoint_state() -> None:
+    """Clear cached embedding endpoint failure state (used in tests or after config changes)."""
+    global _embedding_endpoint_disabled_reason
+    _embedding_endpoint_disabled_reason = None
+
+
 # ---------------------------------------------------------------------------
 # High-level helpers — used by the investigation loop and code-context engine
 # ---------------------------------------------------------------------------
@@ -541,15 +581,19 @@ def _generate_embedding(text: str) -> Optional[List[float]]:
     Tries the local vLLM embeddings endpoint first.
     Returns None on failure (callers should handle gracefully).
     """
-    import os, json
-    vllm_url = os.environ.get("VLLM_API_URL", "")
+    global _embedding_endpoint_disabled_reason
+    embedding_url = _resolve_embedding_endpoint()
     embed_model = VECTOR_EMBED_MODEL
 
-    if vllm_url:
+    if _embedding_endpoint_disabled_reason:
+        logger.debug("Embedding endpoint disabled: %s", _embedding_endpoint_disabled_reason)
+        return None
+
+    if embedding_url:
         try:
             import requests as _req
             resp = _req.post(
-                f"{vllm_url.rstrip('/')}/v1/embeddings",
+                embedding_url,
                 json={"model": embed_model, "input": text[:8192]},
                 timeout=15,
             )
@@ -557,8 +601,15 @@ def _generate_embedding(text: str) -> Optional[List[float]]:
             data = resp.json()
             return data["data"][0]["embedding"]
         except Exception as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code == 404:
+                _embedding_endpoint_disabled_reason = (
+                    f"{embedding_url} returned 404; embedding API unavailable for current model/server"
+                )
+                logger.warning("vllm embeddings unavailable at %s; disabling semantic embeddings until restart or config change", embedding_url)
+                return None
             logger.warning("vllm embedding failed: %s — returning None", exc)
             return None
 
-    logger.debug("VLLM_API_URL not configured, skipping embedding")
+    logger.debug("Embedding endpoint not configured, skipping embedding")
     return None

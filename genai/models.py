@@ -1396,3 +1396,151 @@ class SymbolRelation(models.Model):
 
     def __str__(self):
         return f"{self.source_symbol}->{self.target_symbol}"
+
+
+# ---------------------------------------------------------------------------
+# Track 4 — Integrations and Telemetry Adapters
+# ---------------------------------------------------------------------------
+
+class Integration(models.Model):
+    INTEGRATION_TYPE_CHOICES = (
+        ("prometheus", "Prometheus"),
+        ("victoriametrics", "VictoriaMetrics"),
+        ("tempo", "Tempo"),
+        ("jaeger", "Jaeger"),
+        ("opensearch", "OpenSearch"),
+        ("elasticsearch", "Elasticsearch"),
+        ("loki", "Loki"),
+        ("splunk", "Splunk"),
+        ("dynatrace", "Dynatrace"),
+        ("datadog", "Datadog"),
+        ("newrelic", "New Relic"),
+        ("nagios", "Nagios"),
+        ("aws", "AWS"),
+        ("azure", "Azure"),
+        ("gcp", "GCP"),
+        ("custom", "Custom"),
+    )
+
+    CATEGORY_CHOICES = (
+        ("metrics", "Metrics"),
+        ("logs", "Logs"),
+        ("traces", "Traces"),
+        ("alerts", "Alerts"),
+        ("topology", "Topology/Inventory"),
+        ("cloud", "Cloud Control Plane"),
+        ("mixed", "Mixed/Hybrid"),
+    )
+
+    AUTH_MODE_CHOICES = (
+        ("none", "None"),
+        ("basic", "Basic Auth"),
+        ("bearer", "Bearer Token"),
+        ("api_key", "API Key"),
+        ("oauth2", "OAuth2"),
+        ("iam_role", "IAM Role"),
+    )
+
+    STATUS_CHOICES = (
+        ("healthy", "Healthy"),
+        ("degraded", "Degraded"),
+        ("failing", "Failing"),
+        ("unknown", "Unknown"),
+    )
+
+    integration_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    name = models.CharField(max_length=255)
+    integration_type = models.CharField(max_length=64, choices=INTEGRATION_TYPE_CHOICES)
+    category = models.CharField(max_length=64, choices=CATEGORY_CHOICES)
+    endpoint_url = models.CharField(max_length=1024, blank=True, default="")
+    auth_mode = models.CharField(max_length=32, choices=AUTH_MODE_CHOICES, default="none")
+    enabled = models.BooleanField(default=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    health_status = models.CharField(max_length=32, choices=STATUS_CHOICES, default="unknown")
+    last_health_check_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["category", "name"]
+
+    def __str__(self):
+        return f"{self.name} ({self.get_integration_type_display()})"
+
+
+class IntegrationCredential(models.Model):
+    credential_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    integration = models.OneToOneField(Integration, on_delete=models.CASCADE, related_name="credential")
+    secret_ref = models.CharField(max_length=255, blank=True, default="", help_text="Reference to external secret manager or encrypted store")
+    credential_metadata = models.JSONField(default=dict, blank=True)
+    rotation_status = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"Creds for {self.integration.name}"
+
+
+class IntegrationBinding(models.Model):
+    binding_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    integration = models.ForeignKey(Integration, on_delete=models.CASCADE, related_name="bindings")
+    environment = models.CharField(max_length=120, blank=True, default="")
+    application_name = models.CharField(max_length=120, blank=True, default="")
+    target = models.ForeignKey("Target", null=True, blank=True, on_delete=models.SET_NULL, related_name="integration_bindings")
+    priority = models.PositiveIntegerField(default=10, help_text="Lower number means higher priority for query resolution")
+    enabled = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["priority", "-updated_at"]
+
+    def __str__(self):
+        scope = self.application_name or self.environment or (self.target.name if self.target else "Global")
+        return f"{self.integration.name} -> {scope} (Priority: {self.priority})"
+
+
+class IntegrationHealthCheck(models.Model):
+    STATUS_CHOICES = (
+        ("healthy", "Healthy"),
+        ("degraded", "Degraded"),
+        ("failing", "Failing"),
+    )
+
+    check_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    integration = models.ForeignKey(Integration, on_delete=models.CASCADE, related_name="health_checks")
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES)
+    checked_at = models.DateTimeField(auto_now_add=True)
+    latency_ms = models.PositiveIntegerField(default=0)
+    message = models.TextField(blank=True, default="")
+    details_json = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-checked_at"]
+
+    def __str__(self):
+        return f"{self.integration.name} check at {self.checked_at.isoformat()} - {self.status}"
+
+
+class CloudAccountBinding(models.Model):
+    binding_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    integration = models.ForeignKey(Integration, on_delete=models.CASCADE, related_name="cloud_bindings")
+    provider = models.CharField(max_length=64, default="aws")
+    account_id = models.CharField(max_length=120, blank=True, default="")
+    subscription_id = models.CharField(max_length=120, blank=True, default="")
+    project_id = models.CharField(max_length=120, blank=True, default="")
+    scope_name = models.CharField(max_length=255, blank=True, default="")
+    environment = models.CharField(max_length=120, blank=True, default="")
+    enabled = models.BooleanField(default=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"{self.integration.name} -> {self.provider} ({self.scope_name or 'Global'})"

@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from django.utils import timezone
 
 from .code_context_extractors import extract_python_artifacts
+from .vector_backend import embed_and_store
 from .models import (
     CodeChangeRecord,
     DeploymentBinding,
@@ -393,6 +394,54 @@ def sync_repository_index(repository: RepositoryIndex, *, recent_commit_limit: O
                 for service_name in service_names
             ],
             ignore_conflicts=True,
+        )
+
+    # Optional Track 3.7 vector enrichment for semantic code retrieval.
+    for binding in RouteBinding.objects.filter(repository_index=repository):
+        embed_and_store(
+            "code_embeddings",
+            f"route:{repository.repository_id}:{binding.id}",
+            "\n".join(
+                [
+                    binding.route_pattern or "",
+                    binding.handler_name or "",
+                    binding.handler_file_path or "",
+                    binding.http_method or "",
+                ]
+            ),
+            metadata={
+                "repository": repository.name,
+                "service_name": binding.service_name or "",
+                "kind": "route",
+                "label": f"{binding.http_method} {binding.route_pattern}".strip(),
+                "module_path": binding.handler_file_path or "",
+                "symbol": binding.handler_name or "",
+                "line_start": binding.line_start,
+                "line_end": binding.line_end,
+            },
+        )
+
+    for binding in SpanBinding.objects.filter(repository_index=repository):
+        embed_and_store(
+            "code_embeddings",
+            f"span:{repository.repository_id}:{binding.id}",
+            "\n".join(
+                [
+                    binding.span_name or "",
+                    binding.symbol_name or "",
+                    binding.symbol_file_path or "",
+                ]
+            ),
+            metadata={
+                "repository": repository.name,
+                "service_name": binding.service_name or "",
+                "kind": "span",
+                "label": binding.span_name or "",
+                "module_path": binding.symbol_file_path or "",
+                "symbol": binding.symbol_name or "",
+                "line_start": binding.line_start,
+                "line_end": binding.line_end,
+            },
         )
 
     repository.default_branch = (repository.default_branch or "").strip() or _default_branch(repo_path)

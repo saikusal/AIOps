@@ -15,6 +15,8 @@
     ["docker", "inspect"],
     ["docker", "ps"],
     ["docker", "restart"],
+    ["pg_isready", "-h", "db"],
+    ["psql", "-h", "db", "-U", "user", "-d", "aiops", "-c"],
     ["kubectl", "get"],
     ["kubectl", "describe"],
     ["kubectl", "logs"]

@@ -4,17 +4,24 @@ import json
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 from unittest.mock import PropertyMock, patch
 
-from django.test import RequestFactory, SimpleTestCase, TestCase
+from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.contrib.sessions.middleware import SessionMiddleware
+from django.test import Client, RequestFactory, SimpleTestCase, TestCase
 
 from genai.code_context_extractors import extract_python_artifacts
 from genai.code_context_ingestion import auto_register_target_code_context, ensure_builtin_repository_indexes, sync_repository_index
 from genai.code_context_services import find_service_owner, read_code_snippet, route_to_handler, search_code_context, span_to_symbol
 from genai.tools.investigation import _assess_code_context_quality, _infer_runtime_entities_from_question
+from genai.tools.router import deterministic_route
+from genai.archive_service import verify_archive_manifest
 from genai.mcp_client import MCPClient
 from genai.mcp_registry import MCPRegistry
 from genai.mcp_orchestrator import InvestigationMCPOrchestrator
+from genai.integrations.registry import IntegrationRegistry
 from genai.mcp_services import (
     applications_get_component_snapshot,
     applications_get_overview,
@@ -54,12 +61,17 @@ from genai.policy_engine import (
 )
 from genai.replay_evaluation import build_replay_scores
 from genai.typed_actions import command_from_typed_action, infer_typed_action
+from genai.vector_backend import WeaviateBackend, _generate_embedding, _resolve_embedding_endpoint, reset_embedding_endpoint_state
 from genai.models import (
     CodeChangeRecord,
     DataRetentionPolicy,
     DiscoveredService,
     EvidenceBundle,
     EvidenceSnapshot,
+    Incident,
+    Integration,
+    IntegrationBinding,
+    IntegrationHealthCheck,
     InvestigationRun,
     InvestigationTranscript,
     RepositoryIndex,
@@ -76,6 +88,12 @@ from genai.models import (
     TargetServiceBinding,
 )
 from genai.views import (
+    _default_policy_profile_for_target,
+    _ensure_investigation_run_for_incident,
+    _ensure_target_policy_profiles,
+    _fetch_elasticsearch_logs,
+    _fetch_metrics_query,
+    _fetch_jaeger_traces,
     _fleet_install_prereqs,
     _mark_target_config_apply_requested,
     _serialize_target,
@@ -83,7 +101,10 @@ from genai.views import (
     _update_target_configuration_from_payload,
     fleet_kubernetes_install_manifest_view,
     fleet_linux_install_script_view,
+    genai_chat,
 )
+
+User = get_user_model()
 
 
 class MCPClientTests(SimpleTestCase):
@@ -116,6 +137,438 @@ class MCPServiceTests(SimpleTestCase):
         )
         self.assertEqual(payload["count"], 1)
         self.assertEqual(payload["results"][0]["application"], "b")
+
+    def test_metrics_query_service_overview_uses_demo_metrics_for_demo_services(self):
+        queries = []
+
+        def _fetch(query: str):
+            queries.append(query)
+            return {"result": []}
+
+        metrics_query_service_overview(service_name="app-inventory", fetch_metrics_query=_fetch)
+        self.assertEqual(len(queries), 2)
+        self.assertIn('demo_http_request_duration_seconds_bucket{service="app-inventory"}', queries[0])
+        self.assertIn('demo_http_requests_total{service="app-inventory",status=~"5.."}', queries[1])
+
+
+class RouterTests(SimpleTestCase):
+    def test_genai_root_route_exists(self):
+        response = Client().get("/genai/")
+        self.assertIn(response.status_code, {200, 302})
+
+    def test_deterministic_route_sends_code_context_questions_to_investigation(self):
+        route = deterministic_route("List down all the endpoints in the current application")
+        self.assertEqual(route, "investigation")
+
+    def test_deterministic_route_sends_technology_questions_to_investigation(self):
+        route = deterministic_route("What technologies or frameworks are used in the development of this application?")
+        self.assertEqual(route, "investigation")
+
+    def test_deterministic_route_sends_code_flow_questions_to_investigation(self):
+        route = deterministic_route("Can you explain the code flow for this application?")
+        self.assertEqual(route, "investigation")
+
+    def test_deterministic_route_keeps_document_queries_on_docs_route(self):
+        route = deterministic_route("Search the runbook documentation for rollback steps")
+        self.assertEqual(route, "docs")
+
+    def test_fetch_jaeger_traces_uses_trace_backend_abstraction(self):
+        class FakeBackend:
+            backend_name = "tempo"
+
+            def search_traces(self, service, limit=5):
+                return [{"trace_id": "trace-1", "root_service": service, "root_operation": "checkout", "duration_ms": 12, "span_count": 1, "spans": []}]
+
+            def get_trace(self, trace_id):
+                return {
+                    "trace_id": trace_id,
+                    "root_service": "orders-api",
+                    "root_operation": "checkout",
+                    "duration_ms": 12,
+                    "span_count": 1,
+                    "spans": [
+                        {
+                            "span_id": "span-1",
+                            "operation": "checkout",
+                            "start_time": 100,
+                            "duration_us": 5000,
+                            "tags": {"service.name": "orders-api"},
+                            "references": [],
+                        }
+                    ],
+                }
+
+        with patch("genai.views.get_trace_backend", return_value=FakeBackend()), patch(
+            "genai.views.metadata_cache_get_or_fetch",
+            side_effect=lambda _scope, _key, fetcher, **_kwargs: fetcher(),
+        ):
+            payload = _fetch_jaeger_traces("orders-api")
+
+        self.assertEqual(payload["backend"], "tempo")
+        self.assertEqual(payload["data"][0]["traceID"], "trace-1")
+        self.assertEqual(payload["data"][0]["spans"][0]["operationName"], "checkout")
+
+
+class LogSearchTests(TestCase):
+    def test_fetch_elasticsearch_logs_prefers_onboarded_target_metadata_for_prod(self):
+        target = Target.objects.create(
+            name="orders-prod-01",
+            hostname="orders-prod-01.internal",
+            environment="production",
+            target_type="linux",
+        )
+        binding = TargetServiceBinding.objects.create(
+            target=target,
+            service_name="orders-api",
+            service_kind="systemd",
+            systemd_unit="orders-api.service",
+            container_name="orders-api",
+            is_primary=True,
+        )
+        TargetLogSource.objects.create(
+            target=target,
+            service_binding=binding,
+            source_type="file",
+            file_path="/var/log/orders/orders-api.log",
+            stream_family="logs-orders",
+            is_primary=True,
+        )
+
+        captured = {}
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"hits": {"hits": []}}
+
+        class FakeSession:
+            def post(self, _url, json=None, **_kwargs):
+                captured["body"] = json
+                return FakeResponse()
+
+        with patch("genai.views.ELASTICSEARCH_URL", "http://opensearch:9200"), patch(
+            "genai.views.get_http_session",
+            return_value=FakeSession(),
+        ), patch(
+            "genai.views.metadata_cache_get_or_fetch",
+            side_effect=lambda _scope, _key, fetcher, **_kwargs: fetcher(),
+        ):
+            _fetch_elasticsearch_logs("orders-prod-01", "timeout", service_name="orders-api")
+
+        body = captured["body"]
+        filters = body["query"]["bool"]["filter"]
+        must = body["query"]["bool"]["must"]
+        serialized_filter = json.dumps(filters, sort_keys=True)
+        serialized_must = json.dumps(must, sort_keys=True)
+
+        self.assertIn('"service_name.keyword": "orders-api"', serialized_filter)
+        self.assertIn('"service.name.keyword": "orders-api"', serialized_filter)
+        self.assertIn('"target_name.keyword": "orders-prod-01"', serialized_filter)
+        self.assertIn('"hostname.keyword": "orders-prod-01.internal"', serialized_filter)
+        self.assertIn('"container_name.keyword": "orders-api"', serialized_filter)
+        self.assertIn('"journal_unit.keyword": "orders-api.service"', serialized_filter)
+        self.assertIn('"/var/log/orders/orders-api.log"', serialized_filter)
+        self.assertNotIn('*orders-prod-01.log', serialized_filter)
+        self.assertIn('"message": "timeout"', serialized_must)
+
+    def test_fetch_elasticsearch_logs_keeps_demo_file_path_fallback_for_demo_apps(self):
+        captured = {}
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"hits": {"hits": []}}
+
+        class FakeSession:
+            def post(self, _url, json=None, **_kwargs):
+                captured["body"] = json
+                return FakeResponse()
+
+        with patch("genai.views.ELASTICSEARCH_URL", "http://opensearch:9200"), patch(
+            "genai.views.get_http_session",
+            return_value=FakeSession(),
+        ), patch(
+            "genai.views.metadata_cache_get_or_fetch",
+            side_effect=lambda _scope, _key, fetcher, **_kwargs: fetcher(),
+        ):
+            _fetch_elasticsearch_logs("app-inventory", "unauthorized", service_name="app-inventory")
+
+        serialized_filter = json.dumps(captured["body"]["query"]["bool"]["filter"], sort_keys=True)
+        self.assertIn('*app-inventory.log', serialized_filter)
+
+
+class ChatRoutingTests(TestCase):
+    @patch("genai.views.investigation_route_tool")
+    @patch("genai.views.simple_cache.search")
+    def test_genai_chat_skips_simple_cache_for_investigation_questions(self, mocked_cache_search, mocked_investigation_route):
+        mocked_cache_search.return_value = {
+            "question": "What technologies or frameworks are used in the development of this application?",
+            "answer": "Stale cached general answer.",
+            "follow_up_questions": [],
+        }
+        mocked_investigation_route.return_value = {
+            "question": "What technologies or frameworks are used in the development of this application?",
+            "answer": "Fresh investigation answer.",
+            "follow_up_questions": [],
+            "cached": False,
+        }
+
+        request = RequestFactory().post(
+            "/genai/chat/",
+            data=json.dumps({"question": "What technologies or frameworks are used in the development of this application?"}),
+            content_type="application/json",
+        )
+        session_middleware = SessionMiddleware(lambda req: None)
+        session_middleware.process_request(request)
+        request.session.save()
+        request.user = type("AnonymousUserStub", (), {"is_authenticated": False})()
+
+        response = genai_chat(request)
+        payload = json.loads(response.content.decode("utf-8"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["answer"], "Fresh investigation answer.")
+        mocked_cache_search.assert_not_called()
+        mocked_investigation_route.assert_called_once()
+
+
+class IntegrationApiTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="integration-tester", password="secret123")
+        self.client.force_login(self.user)
+
+    def test_integration_api_persists_configuration_and_records_health_check(self):
+        response = self.client.post(
+            "/genai/integrations/prometheus/",
+            data=json.dumps(
+                {
+                    "name": "Prometheus Main",
+                    "integration_type": "prometheus",
+                    "category": "metrics",
+                    "endpoint_url": "http://prometheus:9090",
+                    "auth_mode": "none",
+                    "enabled": True,
+                    "credential": {"secret_ref": "", "credential_metadata": {}},
+                    "bindings": [{"environment": "production", "application_name": "customer-portal", "priority": 5, "enabled": True}],
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        integration = Integration.objects.get(integration_type="prometheus")
+        self.assertEqual(integration.endpoint_url, "http://prometheus:9090")
+        self.assertEqual(integration.bindings.first().application_name, "customer-portal")
+
+        listing = self.client.get("/genai/integrations/")
+        self.assertEqual(listing.status_code, 200)
+        payload = json.loads(listing.content.decode("utf-8"))
+        self.assertEqual(payload["count"], 1)
+
+        class StubAdapter:
+            def __init__(self, _integration):
+                self.integration = _integration
+
+            def test_connection(self):
+                return True
+
+        with patch("genai.views.IntegrationRegistry.get_adapter", return_value=StubAdapter(integration)):
+            health = self.client.post("/genai/integrations/prometheus/test/")
+        self.assertEqual(health.status_code, 200)
+        integration.refresh_from_db()
+        self.assertEqual(integration.health_status, "healthy")
+        self.assertEqual(IntegrationHealthCheck.objects.filter(integration=integration).count(), 1)
+
+    def test_known_vendor_without_saved_integration_returns_defaults(self):
+        response = self.client.get("/genai/integrations/victoriametrics/")
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content.decode("utf-8"))
+        self.assertFalse(payload["exists"])
+        self.assertEqual(payload["integration_type"], "victoriametrics")
+
+    def test_registry_resolves_advertised_vendor_types(self):
+        for integration_type in ("victoriametrics", "newrelic", "nagios", "azure", "gcp", "jaeger", "elasticsearch", "loki", "custom"):
+            adapter = IntegrationRegistry.get_adapter(Integration(integration_type=integration_type, endpoint_url="http://example.invalid", name=integration_type, category="mixed"))
+            self.assertIsNotNone(adapter)
+
+
+class IntegrationBindingResolutionTests(TestCase):
+    def test_fetch_metrics_query_prefers_bound_integration(self):
+        target = Target.objects.create(name="orders-prod-01", hostname="orders-prod-01.internal", environment="production", target_type="linux")
+        integration = Integration.objects.create(
+            name="Prom Main",
+            integration_type="prometheus",
+            category="metrics",
+            endpoint_url="http://prometheus:9090",
+            enabled=True,
+        )
+        IntegrationBinding.objects.create(
+            integration=integration,
+            target=target,
+            application_name="customer-portal",
+            environment="production",
+            priority=1,
+            enabled=True,
+        )
+
+        class StubMetricsAdapter:
+            def __init__(self, _integration):
+                self.integration = _integration
+
+            def fetch_metrics(self, query, _time_range):
+                class Row:
+                    metric_name = "demo_metric"
+                    value = 3.5
+                    timestamp = __import__("django").utils.timezone.now()
+                    labels = {"service": "orders-api"}
+
+                self.last_query = query
+                return [Row()]
+
+        with patch("genai.views.IntegrationRegistry.get_adapter", return_value=StubMetricsAdapter(integration)), patch("genai.views.METRICS_API_URL", ""):
+            payload = _fetch_metrics_query(
+                "up",
+                application="customer-portal",
+                service_name="orders-api",
+                target_host="orders-prod-01",
+                environment="production",
+            )
+
+        self.assertEqual(payload["result"][0]["metric"]["__name__"], "demo_metric")
+        self.assertEqual(payload["result"][0]["metric"]["service"], "orders-api")
+
+    def test_fetch_logs_and_traces_prefer_bound_integration(self):
+        target = Target.objects.create(name="orders-prod-01", hostname="orders-prod-01.internal", environment="production", target_type="linux")
+        logs_integration = Integration.objects.create(
+            name="OpenSearch Main",
+            integration_type="opensearch",
+            category="logs",
+            endpoint_url="http://opensearch:9200",
+            enabled=True,
+        )
+        traces_integration = Integration.objects.create(
+            name="Tempo Main",
+            integration_type="tempo",
+            category="traces",
+            endpoint_url="http://tempo:3200",
+            enabled=True,
+        )
+        IntegrationBinding.objects.create(
+            integration=logs_integration,
+            target=target,
+            application_name="customer-portal",
+            environment="production",
+            priority=1,
+            enabled=True,
+        )
+        IntegrationBinding.objects.create(
+            integration=traces_integration,
+            target=target,
+            application_name="customer-portal",
+            environment="production",
+            priority=1,
+            enabled=True,
+        )
+
+        class StubLogsAdapter:
+            def __init__(self, _integration):
+                self.integration = _integration
+
+            def fetch_logs(self, _query, _time_range, limit=100):
+                class Row:
+                    timestamp = __import__("django").utils.timezone.now()
+                    message = "db timeout"
+                    level = "error"
+                    source = "orders-api"
+                    attributes = {"service_name": "orders-api"}
+
+                return [Row()]
+
+        class StubTracesAdapter:
+            def __init__(self, _integration):
+                self.integration = _integration
+
+            def fetch_traces(self, _service_name, _time_range, _tags=None):
+                class Row:
+                    trace_id = "trace-123"
+                    span_id = "span-1"
+                    service_name = "orders-api"
+                    operation_name = "checkout"
+                    duration_ms = 12.0
+                    start_time = __import__("django").utils.timezone.now()
+                    tags = {"service.name": "orders-api"}
+
+                return [Row()]
+
+        def _resolve_adapter(integration_model):
+            if integration_model.integration_type == "opensearch":
+                return StubLogsAdapter(integration_model)
+            return StubTracesAdapter(integration_model)
+
+        with patch("genai.views.IntegrationRegistry.get_adapter", side_effect=_resolve_adapter), patch("genai.views.ELASTICSEARCH_URL", ""), patch("genai.views.TRACE_BACKEND", "tempo"):
+            logs_payload = _fetch_elasticsearch_logs(
+                "orders-prod-01",
+                "timeout",
+                service_name="orders-api",
+                application="customer-portal",
+                environment="production",
+            )
+            traces_payload = _fetch_jaeger_traces(
+                "orders-api",
+                application="customer-portal",
+                target_host="orders-prod-01",
+                environment="production",
+            )
+
+        self.assertEqual(logs_payload["hits"]["hits"][0]["_source"]["message"], "db timeout")
+        self.assertEqual(traces_payload["backend"], "tempo")
+        self.assertEqual(traces_payload["data"][0]["traceID"], "trace-123")
+
+
+class IncidentAutoInvestigationTests(TestCase):
+    @patch("genai.views.investigation_route_tool")
+    def test_ensure_investigation_run_for_incident_launches_full_run(self, mocked_investigation_route):
+        incident = Incident.objects.create(
+            application="customer-portal",
+            title="Inventory latency incident",
+            status="open",
+            severity="warning",
+            primary_service="app-inventory",
+            target_host="app-inventory",
+            summary="Inventory is degraded.",
+            reasoning="Auto-created for test.",
+            blast_radius=["gateway", "app-inventory"],
+            dependency_graph={"depends_on": ["db"], "blast_radius": ["gateway", "app-inventory"]},
+        )
+
+        def _create_run(*_args, **_kwargs):
+            return InvestigationRun.objects.create(
+                incident=incident,
+                route="investigation",
+                question="Auto investigation test",
+                application="customer-portal",
+                service="app-inventory",
+                target_host="app-inventory",
+                current_stage="resolved",
+                status="resolved",
+            )
+
+        mocked_investigation_route.side_effect = _create_run
+
+        run = _ensure_investigation_run_for_incident(incident)
+        self.assertIsNotNone(run)
+        self.assertEqual(run.incident_id, incident.id)
+        self.assertEqual(run.route, "investigation")
+        self.assertEqual(run.status, "resolved")
+        self.assertEqual(run.target_host, "app-inventory")
+        mocked_investigation_route.assert_called_once()
+
+        second = _ensure_investigation_run_for_incident(incident)
+        self.assertEqual(run.id, second.id)
+        mocked_investigation_route.assert_called_once()
 
     def test_investigation_plan_and_evidence_bundle_are_normalized(self):
         context = {
@@ -380,6 +833,18 @@ class PolicyEngineTests(SimpleTestCase):
 
 
 class TargetConfigurationTests(TestCase):
+    def test_default_policy_profile_prefers_db_operator_for_db_targets(self):
+        _ensure_target_policy_profiles(target_type="linux", runtime_type="systemd")
+        profile = _default_policy_profile_for_target(
+            target_type="linux",
+            runtime_type="systemd",
+            target_role="db",
+        )
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile.slug, "linux-db-operator")
+        self.assertTrue(profile.allow_db_changes)
+        self.assertIn("psql -h db -U user -d aiops -c", profile.allowed_command_patterns or [])
+
     def test_generated_target_config_and_apply_request(self):
         target = Target.objects.create(
             target_id="target-123",
@@ -459,6 +924,14 @@ class TargetConfigurationTests(TestCase):
         target.refresh_from_db()
         self.assertEqual(target.policy_assignment.last_apply_status, "requested")
         self.assertEqual(target.log_ingestion_profile.last_apply_status, "requested")
+
+    def test_linux_agent_allowed_commands_include_db_psql_prefix(self):
+        allowed_commands_path = Path(settings.BASE_DIR) / "agent" / "allowed_commands.json"
+        payload = json.loads(allowed_commands_path.read_text())
+        self.assertIn(
+            ["psql", "-h", "db", "-U", "user", "-d", "aiops", "-c"],
+            payload.get("allowed_prefixes", []),
+        )
 
     @patch.dict(
         "os.environ",
@@ -865,6 +1338,15 @@ def health():
         )
         self.assertTrue(search_result["ok"])
         self.assertTrue(search_result["matches"])
+        endpoint_result = search_code_context(
+            repository="orders-repo",
+            query="Can you provide details about the application's endpoints?",
+            service_name="app-orders",
+            limit=6,
+        )
+        self.assertTrue(endpoint_result["ok"])
+        self.assertGreater(endpoint_result["route_inventory"]["route_count"], 0)
+        self.assertTrue(endpoint_result["route_inventory"]["sample_routes"])
         snippet_result = read_code_snippet(
             repository="orders-repo",
             module_path="views.py",
@@ -1043,6 +1525,71 @@ class FleetSerializationTests(TestCase):
         self.assertEqual(payload["runtime_summary"]["host_service_count"], 1)
         self.assertEqual(len(payload["workload_preview"]), 1)
         self.assertEqual(payload["workload_preview"][0]["service_name"], "app-orders")
+
+
+class TrackThreeFixTests(SimpleTestCase):
+    def test_resolve_embedding_endpoint_derives_from_chat_completion_url(self):
+        with patch.dict(
+            os.environ,
+            {"VLLM_API_URL": "http://10.0.0.8:8001/v1/chat/completions", "VLLM_EMBEDDING_URL": ""},
+            clear=False,
+        ):
+            self.assertEqual(_resolve_embedding_endpoint(), "http://10.0.0.8:8001/v1/embeddings")
+
+    def test_generate_embedding_disables_endpoint_after_404(self):
+        class FakeResponse:
+            status_code = 404
+
+            def raise_for_status(self):
+                import requests
+                error = requests.HTTPError("404 not found")
+                error.response = self
+                raise error
+
+        with patch.dict(
+            os.environ,
+            {"VLLM_EMBEDDING_URL": "http://10.0.0.8:8001/v1/embeddings"},
+            clear=False,
+        ), patch("requests.post", return_value=FakeResponse()) as mocked_post:
+            reset_embedding_endpoint_state()
+            self.assertIsNone(_generate_embedding("orders endpoint"))
+            self.assertIsNone(_generate_embedding("orders endpoint again"))
+        self.assertEqual(mocked_post.call_count, 1)
+        reset_embedding_endpoint_state()
+
+    def test_weaviate_uuid_mapping_is_deterministic(self):
+        backend = WeaviateBackend(url="http://weaviate:8080")
+        first = backend._uuid_for_object("code_embeddings", "route:repo:123")
+        second = backend._uuid_for_object("code_embeddings", "route:repo:123")
+        third = backend._uuid_for_object("code_embeddings", "route:repo:456")
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, third)
+
+    def test_verify_archive_manifest_local_fs_uses_object_url_path(self):
+        temp_dir = tempfile.mkdtemp(prefix="aiops-archive-")
+        try:
+            archive_file = Path(temp_dir) / "bundle.json"
+            payload = b'{"bundle":"ok"}'
+            archive_file.write_bytes(payload)
+
+            class DummyManifest:
+                archive_backend = "local_fs"
+                object_url = str(archive_file)
+                object_key = "evidence-bundles/2026-05-06/bundle.json"
+                checksum_sha256 = __import__("hashlib").sha256(payload).hexdigest()
+                manifest_json = {}
+                status = "uploaded"
+                verified_at = None
+                manifest_id = "manifest-1"
+
+                def save(self, **_kwargs):
+                    return None
+
+            manifest = DummyManifest()
+            self.assertTrue(verify_archive_manifest(manifest))
+            self.assertEqual(manifest.status, "verified")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 class InvestigationDurabilityTests(TestCase):

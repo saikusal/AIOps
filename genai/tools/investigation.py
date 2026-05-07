@@ -5,6 +5,7 @@ from datetime import timedelta
 
 from typing import Any, Callable, Dict, List, Optional
 from genai.code_context_extractors import extract_route_hint_from_text
+from genai.models import RepositoryIndex, ServiceRepositoryBinding
 from genai.mcp_orchestrator import InvestigationMCPOrchestrator
 from genai.multi_step_workflow import (
     annotate_investigation_workflow_with_iterations,
@@ -110,6 +111,17 @@ _DB_TOKENS = (
     "db",
     "pg_",
     "sql",
+)
+
+_ENDPOINT_INVENTORY_TOKENS = (
+    "endpoint",
+    "endpoints",
+    "route",
+    "routes",
+    "handler",
+    "handlers",
+    "api path",
+    "api paths",
 )
 
 
@@ -243,6 +255,61 @@ def _extract_route_hint(question: str, logs: Dict[str, Any]) -> str:
     return ""
 
 
+def _question_requests_endpoint_inventory(question: str) -> bool:
+    normalized = (question or "").strip().lower()
+    if not normalized:
+        return False
+    return any(token in normalized for token in _ENDPOINT_INVENTORY_TOKENS)
+
+
+def _candidate_repository_names_for_code_context(
+    *,
+    application_key: str = "",
+    service_name: str = "",
+) -> List[str]:
+    candidates: List[str] = []
+    seen = set()
+
+    def _add(name: str) -> None:
+        normalized = str(name or "").strip()
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        candidates.append(normalized)
+
+    if service_name:
+        bindings = (
+            ServiceRepositoryBinding.objects.select_related("repository_index")
+            .filter(service_name__iexact=service_name, repository_index__is_active=True)
+            .order_by("-ownership_confidence", "repository_index__name")
+        )
+        for binding in bindings:
+            _add(binding.repository_index.name)
+
+    if application_key:
+        app_bindings = (
+            ServiceRepositoryBinding.objects.select_related("repository_index")
+            .filter(application_name__iexact=application_key, repository_index__is_active=True)
+            .order_by("-ownership_confidence", "repository_index__name")
+        )
+        for binding in app_bindings:
+            _add(binding.repository_index.name)
+
+        app_repositories = RepositoryIndex.objects.filter(
+            is_active=True,
+            metadata__application_name__iexact=application_key,
+        ).order_by("name")
+        for repository in app_repositories:
+            _add(repository.name)
+
+    if not candidates:
+        repositories = list(RepositoryIndex.objects.filter(is_active=True).order_by("name")[:2])
+        if len(repositories) == 1:
+            _add(repositories[0].name)
+
+    return candidates
+
+
 def _code_context_summary(code_context: Dict[str, Any]) -> str:
     owner = code_context.get("owner") or {}
     route_binding = code_context.get("route_binding") or {}
@@ -261,6 +328,13 @@ def _code_context_summary(code_context: Dict[str, Any]) -> str:
     recent_changes = (code_context.get("recent_changes") or {}).get("recent_changes") or []
     if recent_changes:
         parts.append(f"{len(recent_changes)} recent code changes matched the likely failure path.")
+    route_inventory = (code_context.get("search_context") or {}).get("route_inventory") or {}
+    if route_inventory.get("route_count"):
+        methods = ", ".join(route_inventory.get("http_methods") or [])
+        parts.append(
+            f"Repository route inventory includes {route_inventory.get('route_count')} indexed endpoints"
+            + (f" across methods {methods}." if methods else ".")
+        )
     quality = code_context.get("quality_assessment") or {}
     if quality.get("summary"):
         parts.append(str(quality.get("summary")))
@@ -419,6 +493,7 @@ def _llm_safe_investigation_context(context: Dict[str, Any]) -> Dict[str, Any]:
         "recent_deployments": ((code_context.get("recent_deployments") or {}).get("recent_deployments") or [])[:4],
         "blast_radius": (code_context.get("blast_radius") or {}).get("blast_radius") or {},
         "search_matches": ((code_context.get("search_context") or {}).get("matches") or [])[:4],
+        "route_inventory": ((code_context.get("search_context") or {}).get("route_inventory") or {}),
         "snippets": (code_context.get("snippets") or [])[:3],
     }
     prompt_source_context = {
@@ -921,14 +996,25 @@ def build_investigation_context(
             mcp_orchestrator.call_tool(
                 "metrics.query_service_overview",
                 {"service_name": service_name},
-            ) if mcp_orchestrator and service_name else {
-                "latency_p95_seconds": fetch_metrics_query(
-                    f'histogram_quantile(0.95, sum by (le) (rate(flask_http_request_duration_seconds_bucket{{job="{service_name}"}}[5m])))'
-                ) if service_name else {},
-                "error_rate": fetch_metrics_query(
-                    f'sum(rate(flask_http_request_total{{job="{service_name}",status=~"5.."}}[5m]))'
-                ) if service_name else {},
-            }
+            ) if mcp_orchestrator and service_name else (
+                {
+                    "latency_p95_seconds": fetch_metrics_query(
+                        f'histogram_quantile(0.95, sum by (le) (rate(demo_http_request_duration_seconds_bucket{{service="{service_name}"}}[5m])))'
+                    ) if service_name else {},
+                    "error_rate": fetch_metrics_query(
+                        f'sum(rate(demo_http_requests_total{{service="{service_name}",status=~"5.."}}[5m]))'
+                    ) if service_name else {},
+                }
+                if service_name.startswith("app-")
+                else {
+                    "latency_p95_seconds": fetch_metrics_query(
+                        f'histogram_quantile(0.95, sum by (le) (rate(flask_http_request_duration_seconds_bucket{{job="{service_name}"}}[5m])))'
+                    ) if service_name else {},
+                    "error_rate": fetch_metrics_query(
+                        f'sum(rate(flask_http_request_total{{job="{service_name}",status=~"5.."}}[5m]))'
+                    ) if service_name else {},
+                }
+            )
         )
 
     if mcp_orchestrator and should_fetch_runbooks(question, incident):
@@ -953,9 +1039,10 @@ def build_investigation_context(
                 source_context = {}
 
     route_hint = _extract_route_hint(question, logs)
+    endpoint_inventory_requested = _question_requests_endpoint_inventory(question)
     span_hints = _extract_trace_span_hints(traces)
     deployment_hint = _extract_deployment_hint(incident, linked_recommendation)
-    if mcp_orchestrator and (service_name or route_hint):
+    if mcp_orchestrator and (service_name or route_hint or endpoint_inventory_requested):
         try:
             owner = mcp_orchestrator.call_tool(
                 "code.find_service_owner",
@@ -1017,6 +1104,24 @@ def build_investigation_context(
                 code_context["recent_deployments"] = recent_deployments
 
         repository_name = str(((code_context.get("owner") or {}).get("repository") or (code_context.get("route_binding") or {}).get("repository") or ""))
+        if not repository_name:
+            repository_candidates = _candidate_repository_names_for_code_context(
+                application_key=application_key,
+                service_name=service_name,
+            )
+            if repository_candidates:
+                repository_name = repository_candidates[0]
+                if not owner:
+                    owner = {
+                        "ok": True,
+                        "repository": repository_name,
+                        "service_name": service_name,
+                        "application_name": application_key,
+                        "repository_path": "",
+                        "ownership_confidence": 0.35,
+                        "metadata": {"matched_by": "repository_candidate_fallback"},
+                    }
+                    code_context["owner"] = owner
         module_path = str(((code_context.get("route_binding") or {}).get("module_path") or (code_context.get("span_binding") or {}).get("module_path") or ""))
         symbol_name = str(((code_context.get("span_binding") or {}).get("symbol") or (code_context.get("route_binding") or {}).get("handler") or ""))
         if repository_name:
@@ -1242,6 +1347,7 @@ def run_investigation_route(
         "- If a linked recommendation or diagnostic command exists, mention it directly.\n"
         "- If runbook guidance is available, reference it in 'answer' and mark guidance as runbook-backed.\n"
         "- If code_context is available, explain the likely repository, handler, symbol, and module responsibility in plain language.\n"
+        "- If code_context.route_inventory is available and the user asks about endpoints or routes, answer with the indexed endpoint count, methods, and representative paths instead of saying the information is unavailable.\n"
         "- If code snippets are available, use them to explain what the affected code path appears to do and why it could produce the observed symptoms.\n"
         "- If recent code changes are available, use them as supporting evidence only when they plausibly touch the failing path.\n"
         "- If code_context.quality_assessment says the evidence is weak, stale, or not safe to claim, avoid asserting a direct code root cause. Say the code mapping is tentative.\n"
@@ -1281,7 +1387,7 @@ def run_investigation_route(
         "missing_evidence": parsed.get("missing_evidence") or ((investigation_context.get("evidence_assessment") or {}).get("missing_evidence")) or [],
         "decision_policy": ((investigation_context.get("evidence_assessment") or {}).get("safe_action")) or "diagnose",
         "supporting_evidence": parsed.get("supporting_evidence") or [],
-        "contradicting_evidence": parsed.get("contradicting_evidence") or [],
+        "contradicting_evidence": parsed.get("contradicting_evidence") or ((investigation_context.get("evidence_assessment") or {}).get("contradicting_evidence")) or [],
         "next_verification_step": parsed.get("next_verification_step") or "",
         "follow_up_questions": parsed.get("follow_up_questions") or [],
         "suggested_command": ((investigation_context.get("linked_recommendation") or {}).get("diagnostic_command")),

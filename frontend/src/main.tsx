@@ -5,6 +5,7 @@ import { BrowserRouter } from "react-router-dom";
 import { App } from "./App";
 import { RefreshProvider } from "./lib/refresh";
 import "./styles.css";
+import "./premium-theme.css";
 
 const queryClient = new QueryClient();
 

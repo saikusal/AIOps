@@ -12,6 +12,10 @@ from .models import (
     EvidenceBundle,
     EvidenceSnapshot,
     ExecutionIntent,
+    Integration,
+    IntegrationBinding,
+    IntegrationCredential,
+    IntegrationHealthCheck,
     InvestigationRun,
     InvestigationTranscript,
     LifecycleJobRun,
@@ -32,6 +36,7 @@ from .models import (
     TargetRuntimeProfile,
     TargetServiceBinding,
     ToolInvocation,
+    CloudAccountBinding,
 )
 
 
@@ -294,3 +299,46 @@ class TargetLogIngestionProfileAdmin(admin.ModelAdmin):
     search_fields = ("target__name", "shipper_type", "stream_family", "opensearch_pipeline")
     list_filter = ("shipper_type", "last_apply_status", "updated_at")
     readonly_fields = ("profile_id", "created_at", "updated_at")
+
+
+# ---------------------------------------------------------------------------
+# Track 4 — Integrations
+# ---------------------------------------------------------------------------
+
+@admin.register(Integration)
+class IntegrationAdmin(admin.ModelAdmin):
+    list_display = ("name", "integration_type", "category", "auth_mode", "enabled", "health_status", "updated_at")
+    search_fields = ("name", "endpoint_url")
+    list_filter = ("integration_type", "category", "enabled", "health_status")
+    readonly_fields = ("integration_id", "created_at", "updated_at", "last_health_check_at")
+
+
+@admin.register(IntegrationCredential)
+class IntegrationCredentialAdmin(admin.ModelAdmin):
+    list_display = ("integration", "secret_ref", "rotation_status", "updated_at")
+    search_fields = ("integration__name", "secret_ref")
+    readonly_fields = ("credential_id", "created_at", "updated_at")
+
+
+@admin.register(IntegrationBinding)
+class IntegrationBindingAdmin(admin.ModelAdmin):
+    list_display = ("integration", "environment", "application_name", "target", "priority", "enabled")
+    search_fields = ("integration__name", "environment", "application_name", "target__name")
+    list_filter = ("enabled", "priority", "environment")
+    readonly_fields = ("binding_id", "created_at", "updated_at")
+
+
+@admin.register(IntegrationHealthCheck)
+class IntegrationHealthCheckAdmin(admin.ModelAdmin):
+    list_display = ("integration", "status", "latency_ms", "checked_at")
+    search_fields = ("integration__name", "message")
+    list_filter = ("status", "checked_at")
+    readonly_fields = ("check_id", "checked_at")
+
+
+@admin.register(CloudAccountBinding)
+class CloudAccountBindingAdmin(admin.ModelAdmin):
+    list_display = ("integration", "provider", "account_id", "scope_name", "environment", "enabled")
+    search_fields = ("integration__name", "provider", "account_id", "scope_name")
+    list_filter = ("provider", "enabled", "environment")
+    readonly_fields = ("binding_id", "created_at", "updated_at")

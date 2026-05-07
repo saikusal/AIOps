@@ -328,7 +328,9 @@ def verify_archive_manifest(manifest) -> bool:
     """
     try:
         if manifest.archive_backend == "local_fs":
-            path = Path(manifest.object_key)
+            path = Path(manifest.object_url or "")
+            if not str(path):
+                path = Path(ARCHIVE_ROOT) / manifest.object_key
             if not path.exists():
                 raise FileNotFoundError(f"Archive file not found: {path}")
             raw_data = path.read_bytes()

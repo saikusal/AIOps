@@ -48,6 +48,10 @@ from .models import (
     Incident,
     IncidentAlert,
     IncidentTimelineEvent,
+    Integration,
+    IntegrationBinding,
+    IntegrationCredential,
+    IntegrationHealthCheck,
     InvestigationRun,
     OperatorFeedback,
     RemediationOutcome,
@@ -118,6 +122,8 @@ from .mcp_services import (
 from .policy_engine import evaluate_execution_policy, record_execution_attempt
 from .behavior_versions import current_behavior_version_payload
 from .code_context_ingestion import auto_register_target_code_context, ensure_builtin_repository_indexes
+from .integrations.registry import IntegrationRegistry
+from .trace_backend import get_trace_backend
 from .execution_safety import (
     action_signature as execution_action_signature,
     context_fingerprint as execution_context_fingerprint,
@@ -200,6 +206,7 @@ TARGET_TABLE = os.getenv("GENAI_TABLE", "")
 METRICS_API_URL = os.getenv("METRICS_API_URL") or os.getenv("PROMETHEUS_URL")
 ELASTICSEARCH_URL = os.getenv("ELASTICSEARCH_URL")
 OPENSEARCH_URL = os.getenv("OPENSEARCH_URL") or ELASTICSEARCH_URL
+ELASTICSEARCH_VERIFY_SSL = str(os.getenv("ELASTICSEARCH_VERIFY_SSL", "false")).strip().lower() not in {"false", "0", "no"}
 JAEGER_URL = os.getenv("JAEGER_URL")
 AGENT_PORT = int(os.getenv("AGENT_PORT", "9999"))
 DB_AGENT_HOST = os.getenv("DB_AGENT_HOST", "db-agent")
@@ -233,6 +240,26 @@ MAX_RECENT_ALERTS = 20
 INCIDENT_STATE_CACHE_PREFIX = "aiops_incident_state"
 INCIDENT_STATE_CACHE_TTL = int(os.getenv("AIOPS_INCIDENT_STATE_CACHE_TTL", str(60 * 60 * 6)))
 REMEDIATION_VARIANCE_HISTORY_LIMIT = int(os.getenv("AIOPS_REMEDIATION_VARIANCE_HISTORY_LIMIT", "20"))
+AUTO_INCIDENT_INVESTIGATION_COOLDOWN_SECONDS = int(os.getenv("AIOPS_AUTO_INCIDENT_INVESTIGATION_COOLDOWN_SECONDS", "300"))
+
+INTEGRATION_VENDOR_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "prometheus": {"category": "metrics", "auth_mode": "none", "default_name": "Prometheus"},
+    "victoriametrics": {"category": "metrics", "auth_mode": "none", "default_name": "VictoriaMetrics"},
+    "tempo": {"category": "traces", "auth_mode": "none", "default_name": "Tempo"},
+    "jaeger": {"category": "traces", "auth_mode": "none", "default_name": "Jaeger"},
+    "opensearch": {"category": "logs", "auth_mode": "basic", "default_name": "OpenSearch"},
+    "elasticsearch": {"category": "logs", "auth_mode": "basic", "default_name": "Elasticsearch"},
+    "loki": {"category": "logs", "auth_mode": "none", "default_name": "Loki"},
+    "splunk": {"category": "logs", "auth_mode": "bearer", "default_name": "Splunk"},
+    "dynatrace": {"category": "traces", "auth_mode": "api_key", "default_name": "Dynatrace"},
+    "datadog": {"category": "mixed", "auth_mode": "api_key", "default_name": "Datadog"},
+    "newrelic": {"category": "mixed", "auth_mode": "api_key", "default_name": "New Relic"},
+    "nagios": {"category": "alerts", "auth_mode": "basic", "default_name": "Nagios"},
+    "aws": {"category": "cloud", "auth_mode": "iam_role", "default_name": "AWS"},
+    "azure": {"category": "cloud", "auth_mode": "oauth2", "default_name": "Azure"},
+    "gcp": {"category": "cloud", "auth_mode": "oauth2", "default_name": "GCP"},
+    "custom": {"category": "mixed", "auth_mode": "none", "default_name": "Custom"},
+}
 
 # ---------------------------------------------------------------------------
 # Prompt budget helpers
@@ -648,6 +675,9 @@ def _correlate_alert_to_incident(alert_payload: Dict[str, Any], context: Dict[st
             incident.resolved_at = None
             incident.save(update_fields=["status", "resolved_at", "updated_at"])
 
+    if incident.status in {"open", "investigating"}:
+        _ensure_investigation_run_for_incident(incident)
+
     return incident
 
 
@@ -1009,6 +1039,11 @@ def _find_component_snapshot(application_key: str, service: str) -> Optional[Dic
 
 
 def build_investigation_context(question: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    application = str((body or {}).get("application") or "").strip()
+    scope_service_name = str((body or {}).get("service") or (body or {}).get("service_name") or "").strip()
+    target_host = str((body or {}).get("target_host") or "").strip()
+    environment = str((body or {}).get("environment") or "").strip().lower()
+
     return build_investigation_context_tool(
         question,
         body,
@@ -1017,9 +1052,26 @@ def build_investigation_context(question: str, body: Dict[str, Any]) -> Dict[str
         incident_timeline_payload=_incident_timeline_payload,
         get_dependency_context=_get_dependency_context,
         application_graph_payload=_application_graph_payload,
-        fetch_elasticsearch_logs=_fetch_elasticsearch_logs,
-        fetch_jaeger_traces=_fetch_jaeger_traces,
-        fetch_metrics_query=_fetch_metrics_query,
+        fetch_elasticsearch_logs=lambda resolved_target, rendered_query, *, service_name=None: _fetch_elasticsearch_logs(
+            resolved_target,
+            rendered_query,
+            service_name=service_name or scope_service_name or "",
+            application=application,
+            environment=environment,
+        ),
+        fetch_jaeger_traces=lambda resolved_service: _fetch_jaeger_traces(
+            resolved_service,
+            application=application,
+            target_host=target_host,
+            environment=environment,
+        ),
+        fetch_metrics_query=lambda query: _fetch_metrics_query(
+            query,
+            application=application,
+            service_name=scope_service_name,
+            target_host=target_host,
+            environment=environment,
+        ),
     )
 
 
@@ -2291,8 +2343,195 @@ def _extract_target_host_from_payload(payload: Dict[str, Any]) -> Optional[str]:
                 return host
     return None
 
-def _fetch_metrics_alert_state(alert_name: str, target_host: Optional[str]) -> Dict[str, Any]:
-    if not METRICS_API_URL or not alert_name:
+
+def _integration_binding_candidates(
+    *,
+    category: str,
+    application: str = "",
+    service_name: str = "",
+    target_host: str = "",
+    environment: str = "",
+) -> List[IntegrationBinding]:
+    normalized_category = str(category or "").strip().lower()
+    normalized_application = str(application or "").strip().lower()
+    normalized_service = str(service_name or "").strip().lower()
+    normalized_target = str(target_host or "").strip()
+    normalized_environment = str(environment or "").strip().lower()
+
+    target = _find_target_by_host_alias(normalized_target) if normalized_target else None
+    if not normalized_environment and target:
+        normalized_environment = str(target.environment or "").strip().lower()
+    if not normalized_environment and normalized_service:
+        runtime = _inventory_runtime_context(normalized_service)
+        normalized_environment = str((runtime or {}).get("environment") or "").strip().lower()
+
+    queryset = (
+        IntegrationBinding.objects.select_related("integration", "target")
+        .filter(enabled=True, integration__enabled=True)
+        .filter(models.Q(integration__category=normalized_category) | models.Q(integration__category="mixed"))
+    )
+
+    bindings = list(queryset.order_by("priority", "-updated_at"))
+    aliases = set(_target_aliases(target)) if target else set()
+    if normalized_target:
+        aliases.add(normalized_target)
+
+    def _score(binding: IntegrationBinding) -> Optional[tuple[int, int, int, int, int]]:
+        score = 0
+        target_bound = binding.target is not None
+        application_bound = bool(str(binding.application_name or "").strip())
+        environment_bound = bool(str(binding.environment or "").strip())
+
+        if target_bound:
+            target_match = False
+            if binding.target:
+                target_match = any(
+                    str(value or "").strip() in aliases
+                    for value in (binding.target.target_id, binding.target.name, binding.target.hostname, binding.target.ip_address)
+                )
+            if not target_match:
+                return None
+            score += 100
+
+        if application_bound:
+            if str(binding.application_name or "").strip().lower() != normalized_application:
+                return None
+            score += 40
+
+        if environment_bound:
+            if str(binding.environment or "").strip().lower() != normalized_environment:
+                return None
+            score += 20
+
+        if not target_bound and not application_bound and not environment_bound:
+            score += 5
+
+        return (
+            score,
+            1 if target_bound else 0,
+            1 if application_bound else 0,
+            1 if environment_bound else 0,
+            -int(binding.priority or 10),
+        )
+
+    ranked: List[tuple[tuple[int, int, int, int, int], IntegrationBinding]] = []
+    for binding in bindings:
+        ranking = _score(binding)
+        if ranking is None:
+            continue
+        ranked.append((ranking, binding))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [binding for _ranking, binding in ranked]
+
+
+def _resolve_integration_for_scope(
+    *,
+    category: str,
+    application: str = "",
+    service_name: str = "",
+    target_host: str = "",
+    environment: str = "",
+) -> Optional[Integration]:
+    candidates = _integration_binding_candidates(
+        category=category,
+        application=application,
+        service_name=service_name,
+        target_host=target_host,
+        environment=environment,
+    )
+    if candidates:
+        return candidates[0].integration
+    fallback_type = {
+        "metrics": "victoriametrics",
+        "logs": "opensearch",
+        "traces": "tempo",
+    }.get(str(category or "").strip().lower(), "")
+    if fallback_type:
+        return Integration.objects.filter(integration_type=fallback_type, enabled=True).order_by("-updated_at").first()
+    return None
+
+
+def _normalized_metrics_to_prometheus_data(rows: List[Any]) -> Dict[str, Any]:
+    result = []
+    for row in rows:
+        metric_name = str(getattr(row, "metric_name", "") or "")
+        labels = dict(getattr(row, "labels", {}) or {})
+        if metric_name and "__name__" not in labels:
+            labels["__name__"] = metric_name
+        timestamp = getattr(row, "timestamp", None) or timezone.now()
+        result.append(
+            {
+                "metric": labels,
+                "value": [float(timestamp.timestamp()), str(getattr(row, "value", 0.0))],
+            }
+        )
+    return {"resultType": "vector", "result": result}
+
+
+def _normalized_logs_to_search_payload(rows: List[Any]) -> Dict[str, Any]:
+    return {
+        "hits": {
+            "total": {"value": len(rows), "relation": "eq"},
+            "hits": [
+                {
+                    "_source": {
+                        "@timestamp": getattr(row, "timestamp", timezone.now()).isoformat(),
+                        "message": getattr(row, "message", ""),
+                        "log.level": getattr(row, "level", "info"),
+                        "service_name": getattr(row, "source", ""),
+                        **(getattr(row, "attributes", {}) or {}),
+                    }
+                }
+                for row in rows
+            ],
+        }
+    }
+
+
+def _normalized_traces_to_legacy_payload(rows: List[Any], *, backend_name: str) -> Dict[str, Any]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        trace_id = str(getattr(row, "trace_id", "") or "")
+        span_id = str(getattr(row, "span_id", "") or "")
+        service_name = str(getattr(row, "service_name", "") or "")
+        operation_name = str(getattr(row, "operation_name", "") or "")
+        duration_ms = float(getattr(row, "duration_ms", 0.0) or 0.0)
+        start_time = getattr(row, "start_time", None)
+        tags = dict(getattr(row, "tags", {}) or {})
+        item = grouped.setdefault(
+            trace_id,
+            {
+                "traceID": trace_id,
+                "serviceName": service_name,
+                "operationName": operation_name,
+                "spanCount": 0,
+                "durationMs": 0.0,
+                "spans": [],
+            },
+        )
+        item["spanCount"] += 1
+        item["durationMs"] = max(float(item["durationMs"] or 0.0), duration_ms)
+        item["spans"].append(
+            {
+                "spanID": span_id,
+                "operationName": operation_name,
+                "startTime": int(start_time.timestamp() * 1_000_000) if start_time else 0,
+                "duration": int(duration_ms * 1000),
+                "tags": [{"key": str(key), "value": value} for key, value in tags.items()],
+                "references": [],
+            }
+        )
+    return {"backend": backend_name, "data": list(grouped.values())}
+
+def _fetch_metrics_alert_state(
+    alert_name: str,
+    target_host: Optional[str],
+    *,
+    application: str = "",
+    service_name: str = "",
+    environment: str = "",
+) -> Dict[str, Any]:
+    if not alert_name:
         return {}
     selectors = [f'alertname="{alert_name}"']
     if target_host:
@@ -2301,6 +2540,22 @@ def _fetch_metrics_alert_state(alert_name: str, target_host: Optional[str]) -> D
     cache_id = f"alert:{query}"
 
     def _do_fetch():
+        integration = _resolve_integration_for_scope(
+            category="metrics",
+            application=application,
+            service_name=service_name,
+            target_host=target_host or "",
+            environment=environment,
+        )
+        if integration:
+            try:
+                adapter = IntegrationRegistry.get_adapter(integration)
+                rows = getattr(adapter, "fetch_metrics", lambda *_args, **_kwargs: [])(query, (None, None))
+                return _normalized_metrics_to_prometheus_data(rows)
+            except Exception:
+                logger.exception("Integration-backed metrics alert query failed for %s", integration.integration_type)
+        if not METRICS_API_URL:
+            return {}
         session = get_http_session("victoriametrics")
         response = session.get(
             f"{METRICS_API_URL}/api/v1/query",
@@ -2312,11 +2567,34 @@ def _fetch_metrics_alert_state(alert_name: str, target_host: Optional[str]) -> D
 
     return metadata_cache_get_or_fetch("prom_alert", cache_id, _do_fetch, ttl=30, backend="victoriametrics")
 
-def _fetch_metrics_query(query: str) -> Dict[str, Any]:
-    if not METRICS_API_URL or not query:
+def _fetch_metrics_query(
+    query: str,
+    *,
+    application: str = "",
+    service_name: str = "",
+    target_host: str = "",
+    environment: str = "",
+) -> Dict[str, Any]:
+    if not query:
         return {}
 
     def _do_fetch(q: str) -> Dict[str, Any]:
+        integration = _resolve_integration_for_scope(
+            category="metrics",
+            application=application,
+            service_name=service_name,
+            target_host=target_host,
+            environment=environment,
+        )
+        if integration:
+            try:
+                adapter = IntegrationRegistry.get_adapter(integration)
+                rows = getattr(adapter, "fetch_metrics", lambda *_args, **_kwargs: [])(q, (None, None))
+                return _normalized_metrics_to_prometheus_data(rows)
+            except Exception:
+                logger.exception("Integration-backed metrics query failed for %s", integration.integration_type)
+        if not METRICS_API_URL:
+            return {}
         session = get_http_session("victoriametrics")
         response = session.get(
             f"{METRICS_API_URL}/api/v1/query",
@@ -2328,62 +2606,332 @@ def _fetch_metrics_query(query: str) -> Dict[str, Any]:
 
     return instant_cache_get_or_fetch(query, _do_fetch, backend="victoriametrics")
 
-def _fetch_elasticsearch_logs(target_host: Optional[str], query_text: str) -> Dict[str, Any]:
-    if not ELASTICSEARCH_URL:
-        return {}
-    should = []
-    if target_host:
-        should.extend([
-            {"term": {"host.name.keyword": target_host}},
-            {"term": {"host.hostname.keyword": target_host}},
-            {"term": {"agent.hostname.keyword": target_host}},
-        ])
+
+def _append_exact_match_clause(clauses: List[Dict[str, Any]], field: str, value: str) -> None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return
+    clauses.append({"term": {f"{field}.keyword": normalized}})
+    clauses.append({"term": {field: normalized}})
+
+
+def _elasticsearch_identity_clauses(
+    *,
+    target_host: Optional[str],
+    service_name: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    clauses: List[Dict[str, Any]] = []
+    normalized_target_host = str(target_host or "").strip()
+    normalized_service_name = str(service_name or "").strip()
+
+    if normalized_service_name:
+        for field in ("service_name", "service.name"):
+            _append_exact_match_clause(clauses, field, normalized_service_name)
+
+    if normalized_target_host:
+        for field in (
+            "host.name",
+            "host.hostname",
+            "agent.hostname",
+            "hostname",
+            "target_name",
+            "container_name",
+        ):
+            _append_exact_match_clause(clauses, field, normalized_target_host)
+
+    target = _find_target_by_host_alias(normalized_target_host) if normalized_target_host else None
+    if target:
+        for alias in _target_aliases(target):
+            for field in ("host.name", "host.hostname", "agent.hostname", "hostname", "target_name"):
+                _append_exact_match_clause(clauses, field, alias)
+        if target.environment:
+            _append_exact_match_clause(clauses, "environment", target.environment)
+
+        bindings = list(target.service_bindings.all().order_by("-is_primary", "service_name"))
+        for binding in bindings:
+            for field in ("service_name", "service.name"):
+                _append_exact_match_clause(clauses, field, binding.service_name)
+            if binding.container_name:
+                _append_exact_match_clause(clauses, "container_name", binding.container_name)
+            if binding.systemd_unit:
+                _append_exact_match_clause(clauses, "journal_unit", binding.systemd_unit)
+
+        for log_source in target.log_sources.select_related("service_binding").all():
+            bound_service = log_source.service_binding.service_name if log_source.service_binding else ""
+            if bound_service:
+                for field in ("service_name", "service.name"):
+                    _append_exact_match_clause(clauses, field, bound_service)
+            if log_source.container_name:
+                _append_exact_match_clause(clauses, "container_name", log_source.container_name)
+            if log_source.journal_unit:
+                _append_exact_match_clause(clauses, "journal_unit", log_source.journal_unit)
+            if log_source.file_path:
+                _append_exact_match_clause(clauses, "log_file_path", log_source.file_path)
+                _append_exact_match_clause(clauses, "log.file.path", log_source.file_path)
+
+    is_demo_target = normalized_target_host.startswith("app-") or normalized_service_name.startswith("app-")
+    if is_demo_target and normalized_target_host:
+        clauses.append({"wildcard": {"log.file.path.keyword": f"*{normalized_target_host}.log"}})
+        clauses.append({"match_phrase": {"log.file.path": f"{normalized_target_host}.log"}})
+
+    deduped: List[Dict[str, Any]] = []
+    seen = set()
+    for clause in clauses:
+        fingerprint = json.dumps(clause, sort_keys=True)
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        deduped.append(clause)
+    return deduped
+
+
+def _fetch_elasticsearch_logs(
+    target_host: Optional[str],
+    query_text: str,
+    *,
+    service_name: Optional[str] = None,
+    application: str = "",
+    environment: str = "",
+) -> Dict[str, Any]:
+    identity_clauses = _elasticsearch_identity_clauses(target_host=target_host, service_name=service_name)
+    must_clauses: List[Dict[str, Any]] = []
+    filter_clauses: List[Dict[str, Any]] = []
+
+    if identity_clauses:
+        filter_clauses.append({"bool": {"should": identity_clauses, "minimum_should_match": 1}})
     if query_text:
-        should.append({"match": {"message": query_text}})
-    if not should:
+        must_clauses.append({"match": {"message": query_text}})
+    if not identity_clauses and not must_clauses:
         return {}
-    cache_id = f"es:{target_host or ''}:{query_text or ''}"
+    cache_id = f"es:{target_host or ''}:{service_name or ''}:{query_text or ''}"
 
     def _do_fetch():
+        integration = _resolve_integration_for_scope(
+            category="logs",
+            application=application,
+            service_name=service_name or "",
+            target_host=target_host or "",
+            environment=environment,
+        )
+        if integration:
+            try:
+                adapter = IntegrationRegistry.get_adapter(integration)
+                rows = getattr(adapter, "fetch_logs", lambda *_args, **_kwargs: [])(query_text, (None, None), limit=5)
+                return _normalized_logs_to_search_payload(rows)
+            except Exception:
+                logger.exception("Integration-backed logs query failed for %s", integration.integration_type)
+        if not ELASTICSEARCH_URL:
+            return {}
         session = get_http_session("elasticsearch")
         body = {
             "size": 5,
             "sort": [{"@timestamp": {"order": "desc"}}],
             "query": {
                 "bool": {
-                    "should": should,
-                    "minimum_should_match": 1,
+                    "must": must_clauses,
+                    "filter": filter_clauses,
                 }
             },
-            "_source": ["@timestamp", "message", "host.name", "host.hostname", "agent.hostname", "log.level"],
+            "_source": [
+                "@timestamp",
+                "message",
+                "host.name",
+                "host.hostname",
+                "agent.hostname",
+                "service.name",
+                "service_name",
+                "target_name",
+                "hostname",
+                "container_name",
+                "log.level",
+                "log.file.path",
+                "log_file_path",
+                "environment",
+            ],
         }
         response = session.post(
             f"{ELASTICSEARCH_URL.rstrip('/')}/_search",
             json=body,
             timeout=(3, 10),
-            verify=VERIFY_PARAM,
+            verify=ELASTICSEARCH_VERIFY_SSL,
         )
         response.raise_for_status()
         return response.json()
 
     return metadata_cache_get_or_fetch("es_logs", cache_id, _do_fetch, ttl=60, backend="elasticsearch")
 
-def _fetch_jaeger_traces(service_name: Optional[str]) -> Dict[str, Any]:
-    if not JAEGER_URL or not service_name:
+
+def _ensure_investigation_run_for_incident(incident: Incident, *, question: str = "") -> Optional[InvestigationRun]:
+    if not incident:
+        return None
+    existing = InvestigationRun.objects.filter(incident=incident).order_by("-updated_at").first()
+    if existing:
+        active_statuses = {
+            "queued",
+            "scoping",
+            "collecting_evidence",
+            "assessing_evidence",
+            "planning_next_step",
+            "awaiting_approval",
+            "executing",
+            "verifying",
+            "running",
+        }
+        terminal_statuses = {"resolved", "completed", "failed"}
+        if existing.status in active_statuses and not existing.completed_at:
+            return existing
+        completion_marker = existing.completed_at or existing.updated_at or existing.created_at
+        if (
+            existing.status in terminal_statuses
+            and completion_marker
+            and (timezone.now() - completion_marker).total_seconds() < AUTO_INCIDENT_INVESTIGATION_COOLDOWN_SECONDS
+        ):
+            return existing
+
+    scope = {
+        "application": incident.application or "",
+        "service": incident.primary_service or incident.target_host or "",
+        "incident": str(incident.incident_key),
+    }
+    run_question = (
+        question.strip()
+        if question and question.strip()
+        else (
+            f"Auto-investigate incident={incident.incident_key} "
+            f"application={incident.application or ''} "
+            f"service={incident.primary_service or incident.target_host or ''}. "
+            "Start with the likely RCA, blast radius, and next diagnostic step."
+        ).strip()
+    )
+    try:
+        investigation_route_tool(
+            run_question,
+            {
+                "application": incident.application or "",
+                "service": incident.primary_service or "",
+                "incident": str(incident.incident_key),
+                "target_host": incident.target_host or "",
+            },
+            "",
+            llm_query=query_llm,
+            incident_model=Incident,
+            build_application_overview=_build_application_overview,
+            incident_timeline_payload=_incident_timeline_payload,
+            get_dependency_context=_get_dependency_context,
+            application_graph_payload=_application_graph_payload,
+            fetch_elasticsearch_logs=_fetch_elasticsearch_logs,
+            fetch_jaeger_traces=_fetch_jaeger_traces,
+            fetch_metrics_query=_fetch_metrics_query,
+            compute_incident_revenue_impact=_compute_incident_revenue_impact,
+            logger=logger,
+            chat_session=None,
+            user=None,
+            source_path_map=MCP_SOURCE_PATH_MAP,
+            source_root=MCP_SOURCE_ROOT,
+        )
+    except Exception as exc:
+        logger.warning("Auto investigation launch failed for incident %s: %s", incident.incident_key, exc)
+
+    latest = InvestigationRun.objects.filter(incident=incident).order_by("-updated_at").first()
+    if latest:
+        return latest
+
+    return InvestigationRun.objects.create(
+        incident=incident,
+        route="incident_auto",
+        question=run_question,
+        application=incident.application or "",
+        service=incident.primary_service or "",
+        target_host=incident.target_host or "",
+        scope_json=scope,
+        planner_json={
+            "goal": "Initialize an investigation record when an incident is opened.",
+            "question": run_question,
+            "scope": scope,
+            "mode": "auto_seeded_from_incident_fallback",
+        },
+        workflow_json=[
+            {
+                "stage": "queued",
+                "status": "completed",
+                "summary": "Investigation record created automatically from incident correlation.",
+                "details": {"incident_key": str(incident.incident_key)},
+            }
+        ],
+        current_stage="queued",
+        status="queued",
+    )
+
+def _fetch_jaeger_traces(
+    service_name: Optional[str],
+    *,
+    application: str = "",
+    target_host: str = "",
+    environment: str = "",
+) -> Dict[str, Any]:
+    if not service_name:
         return {}
-    cache_id = f"jaeger:{service_name}"
+    backend = get_trace_backend()
+    integration = _resolve_integration_for_scope(
+        category="traces",
+        application=application,
+        service_name=service_name or "",
+        target_host=target_host,
+        environment=environment,
+    )
+    backend_name = integration.integration_type if integration else backend.backend_name
+    cache_id = f"traces:{backend_name}:{service_name}:{application}:{target_host}:{environment}"
+
+    def _to_legacy_trace_payload(trace_items: List[Dict[str, Any]], *, backend_name: str) -> Dict[str, Any]:
+        data = []
+        for item in trace_items:
+            normalized_spans = item.get("spans") or []
+            spans = [
+                {
+                    "spanID": str(span.get("span_id") or ""),
+                    "operationName": str(span.get("operation") or ""),
+                    "startTime": int(span.get("start_time") or 0),
+                    "duration": int(span.get("duration_us") or 0),
+                    "tags": [
+                        {"key": str(key), "value": value}
+                        for key, value in (span.get("tags") or {}).items()
+                    ],
+                    "references": span.get("references") or [],
+                }
+                for span in normalized_spans
+            ]
+            data.append(
+                {
+                    "traceID": str(item.get("trace_id") or ""),
+                    "serviceName": str(item.get("root_service") or ""),
+                    "operationName": str(item.get("root_operation") or ""),
+                    "spanCount": int(item.get("span_count") or len(spans)),
+                    "durationMs": item.get("duration_ms") or 0,
+                    "spans": spans,
+                }
+            )
+        return {"backend": backend_name, "data": data}
 
     def _do_fetch():
-        session = get_http_session("jaeger")
-        response = session.get(
-            f"{JAEGER_URL.rstrip('/')}/api/traces",
-            params={"service": service_name, "limit": 5, "lookback": "1h"},
-            timeout=(3, 10),
-        )
-        response.raise_for_status()
-        return response.json()
+        if integration:
+            try:
+                adapter = IntegrationRegistry.get_adapter(integration)
+                rows = getattr(adapter, "fetch_traces", lambda *_args, **_kwargs: [])(service_name, (None, None), None)
+                return _normalized_traces_to_legacy_payload(rows, backend_name=integration.integration_type)
+            except Exception:
+                logger.exception("Integration-backed trace query failed for %s", integration.integration_type)
+        traces = backend.search_traces(service_name, limit=5)
+        hydrated: List[Dict[str, Any]] = []
+        for item in traces:
+            if item.get("spans"):
+                hydrated.append(item)
+                continue
+            trace_id = str(item.get("trace_id") or "")
+            detail = backend.get_trace(trace_id) if trace_id else None
+            hydrated.append(detail or item)
+        return _to_legacy_trace_payload(hydrated, backend_name=backend.backend_name)
 
-    return metadata_cache_get_or_fetch("jaeger", cache_id, _do_fetch, ttl=120, backend="jaeger")
+    return metadata_cache_get_or_fetch("traces", cache_id, _do_fetch, ttl=120, backend=backend_name)
 
 def collect_alert_context(alert_payload: Dict[str, Any]) -> Dict[str, Any]:
     labels = alert_payload.get("labels") if isinstance(alert_payload.get("labels"), dict) else {}
@@ -2411,6 +2959,7 @@ def collect_alert_context(alert_payload: Dict[str, Any]) -> Dict[str, Any]:
     dependency_context = _get_dependency_context(service_name or target_host)
     recent_incident_memory = _recent_incident_memory(service_name, target_host, alert_name)
     inventory_runtime = _inventory_runtime_context(service_name)
+    environment = str((labels.get("environment") or labels.get("env") or (inventory_runtime or {}).get("environment") or "")).strip().lower()
 
     return {
         "alert_name": alert_name,
@@ -2420,11 +2969,34 @@ def collect_alert_context(alert_payload: Dict[str, Any]) -> Dict[str, Any]:
         "recent_incident_memory": recent_incident_memory,
         "inventory_runtime": inventory_runtime,
         "metrics": {
-            "alert_state": _fetch_metrics_alert_state(alert_name, target_host),
-            "custom_query": _fetch_metrics_query(metrics_query) if metrics_query else {},
+            "alert_state": _fetch_metrics_alert_state(
+                alert_name,
+                target_host,
+                application=dependency_context.get("application") or "",
+                service_name=service_name or "",
+                environment=environment,
+            ),
+            "custom_query": _fetch_metrics_query(
+                metrics_query,
+                application=dependency_context.get("application") or "",
+                service_name=service_name or "",
+                target_host=target_host or "",
+                environment=environment,
+            ) if metrics_query else {},
         },
-        "elasticsearch": _fetch_elasticsearch_logs(target_host, query_text),
-        "jaeger": _fetch_jaeger_traces(service_name),
+        "elasticsearch": _fetch_elasticsearch_logs(
+            target_host,
+            query_text,
+            service_name=service_name,
+            application=dependency_context.get("application") or "",
+            environment=environment,
+        ),
+        "jaeger": _fetch_jaeger_traces(
+            service_name,
+            application=dependency_context.get("application") or "",
+            target_host=target_host or "",
+            environment=environment,
+        ),
     }
 
 
@@ -3589,8 +4161,20 @@ def _build_application_overview(include_ai: bool = True, include_predictions: bo
             }
             alerts = _recent_alerts_for_service(component["service"], component["target_host"])
             status = _derive_overview_status(component, metrics, alerts)
-            logs = _fetch_elasticsearch_logs(component["target_host"], component["service"])
-            traces = _fetch_jaeger_traces(component["service"] if component["kind"] == "microservice" else None)
+            environment = str(application.get("environment") or "").strip().lower()
+            logs = _fetch_elasticsearch_logs(
+                component["target_host"],
+                component["service"],
+                service_name=component["service"],
+                application=application["application"],
+                environment=environment,
+            )
+            traces = _fetch_jaeger_traces(
+                component["service"] if component["kind"] == "microservice" else None,
+                application=application["application"],
+                target_host=component["target_host"],
+                environment=environment,
+            )
             dependency_context = _get_dependency_context(component["service"])
             flat_components.append({
                 "application": application["application"],
@@ -4172,13 +4756,6 @@ def genai_chat(request: HttpRequest):
     conversation_history = _chat_history_for_prompt(chat_session)
     _append_chat_message(chat_session, "user", question, {"request_body": body})
 
-    # --- Simple Caching Logic ---
-    cached_result = simple_cache.search(question)
-    if cached_result:
-        cached_result['cached'] = True
-        return _chat_json_response(chat_session, cached_result)
-    # --- End Caching Logic ---
-
     # Profanity check
     if profanity.contains_profanity(question):
         return _chat_json_response(chat_session, {"answer": "Your message contains language or content that violates our community guidelines. Please keep the conversation respectful and appropriate so we can assist you better. Thank you for understanding."}, status=400)
@@ -4203,6 +4780,16 @@ def genai_chat(request: HttpRequest):
             route = "docs" if client_use_docs else "general"
 
     logger.info("genai_chat: question=%s route=%s (client_use_docs=%s)", question[:200], route, client_use_docs)
+
+    # Broad code-context / investigation questions should not reuse stale
+    # general-chat cache entries keyed only by question text.
+    if route != "investigation":
+        cached_result = simple_cache.search(question)
+        if cached_result:
+            cached_result['cached'] = True
+            return _chat_json_response(chat_session, cached_result)
+    else:
+        logger.info("genai_chat: skipping simple cache for investigation route question=%s", question[:200])
 
     # --- Password Reset Intent ---
     if route == "initiate_password_reset":
@@ -4691,11 +5278,20 @@ def mcp_metrics_service_view(request: HttpRequest):
     if request.method != "GET":
         return JsonResponse({"error": "GET required"}, status=405)
     service_name = (request.GET.get("service_name") or "").strip()
+    application = (request.GET.get("application") or "").strip()
+    target_host = (request.GET.get("target_host") or "").strip()
+    environment = (request.GET.get("environment") or "").strip()
     if not service_name:
         return JsonResponse({"error": "service_name is required"}, status=400)
     payload = metrics_query_service_overview_service(
         service_name=service_name,
-        fetch_metrics_query=_fetch_metrics_query,
+        fetch_metrics_query=lambda query: _fetch_metrics_query(
+            query,
+            application=application,
+            service_name=service_name,
+            target_host=target_host,
+            environment=environment,
+        ),
     )
     return JsonResponse(payload)
 
@@ -4706,11 +5302,21 @@ def mcp_metrics_query_view(request: HttpRequest):
     if request.method != "GET":
         return JsonResponse({"error": "GET required"}, status=405)
     query = (request.GET.get("query") or "").strip()
+    application = (request.GET.get("application") or "").strip()
+    service_name = (request.GET.get("service_name") or "").strip()
+    target_host = (request.GET.get("target_host") or "").strip()
+    environment = (request.GET.get("environment") or "").strip()
     if not query:
         return JsonResponse({"error": "query is required"}, status=400)
     payload = metrics_query_raw_service(
         query=query,
-        fetch_metrics_query=_fetch_metrics_query,
+        fetch_metrics_query=lambda rendered_query: _fetch_metrics_query(
+            rendered_query,
+            application=application,
+            service_name=service_name,
+            target_host=target_host,
+            environment=environment,
+        ),
     )
     return JsonResponse(payload)
 
@@ -4721,13 +5327,23 @@ def mcp_logs_search_view(request: HttpRequest):
     if request.method != "GET":
         return JsonResponse({"error": "GET required"}, status=405)
     target_host = (request.GET.get("target_host") or "").strip() or None
+    service_name = (request.GET.get("service_name") or "").strip() or None
+    application = (request.GET.get("application") or "").strip()
+    environment = (request.GET.get("environment") or "").strip()
     query = (request.GET.get("query") or "").strip()
-    if not target_host and not query:
-        return JsonResponse({"error": "target_host or query is required"}, status=400)
+    if not target_host and not service_name and not query:
+        return JsonResponse({"error": "target_host, service_name, or query is required"}, status=400)
     payload = logs_search_service(
         target_host=target_host,
+        service_name=service_name,
         query=query,
-        fetch_elasticsearch_logs=_fetch_elasticsearch_logs,
+        fetch_elasticsearch_logs=lambda resolved_target, rendered_query, *, service_name=None: _fetch_elasticsearch_logs(
+            resolved_target,
+            rendered_query,
+            service_name=service_name,
+            application=application,
+            environment=environment,
+        ),
     )
     return JsonResponse(payload)
 
@@ -4738,11 +5354,19 @@ def mcp_traces_search_view(request: HttpRequest):
     if request.method != "GET":
         return JsonResponse({"error": "GET required"}, status=405)
     service_name = (request.GET.get("service_name") or "").strip() or None
+    application = (request.GET.get("application") or "").strip()
+    target_host = (request.GET.get("target_host") or "").strip()
+    environment = (request.GET.get("environment") or "").strip()
     if not service_name:
         return JsonResponse({"error": "service_name is required"}, status=400)
     payload = traces_search_service(
         service_name=service_name,
-        fetch_jaeger_traces=_fetch_jaeger_traces,
+        fetch_jaeger_traces=lambda resolved_service: _fetch_jaeger_traces(
+            resolved_service,
+            application=application,
+            target_host=target_host,
+            environment=environment,
+        ),
     )
     return JsonResponse(payload)
 
@@ -4873,6 +5497,249 @@ def mcp_code_read_snippet_view(request: HttpRequest):
         context_lines=int(request.GET.get("context_lines", "18") or "18"),
     )
     return JsonResponse(payload)
+
+
+def _resolve_integration_ref(integration_ref: str) -> Optional[Integration]:
+    normalized = str(integration_ref or "").strip()
+    if not normalized:
+        return None
+    return (
+        Integration.objects.filter(integration_id=normalized).first()
+        or Integration.objects.filter(integration_type=normalized).order_by("-updated_at").first()
+    )
+
+
+def _serialize_integration(integration: Optional[Integration]) -> Dict[str, Any]:
+    if not integration:
+        return {}
+    credential = getattr(integration, "credential", None)
+    bindings = list(integration.bindings.select_related("target").all().order_by("priority", "-updated_at"))
+    latest_health = integration.health_checks.order_by("-checked_at").first()
+    return {
+        "integration_id": str(integration.integration_id),
+        "name": integration.name,
+        "integration_type": integration.integration_type,
+        "category": integration.category,
+        "endpoint_url": integration.endpoint_url or "",
+        "auth_mode": integration.auth_mode,
+        "enabled": bool(integration.enabled),
+        "metadata_json": integration.metadata_json or {},
+        "health_status": integration.health_status,
+        "last_health_check_at": integration.last_health_check_at.isoformat() if integration.last_health_check_at else None,
+        "credential": {
+            "credential_id": str(credential.credential_id) if credential else "",
+            "secret_ref": credential.secret_ref if credential else "",
+            "credential_metadata": credential.credential_metadata if credential else {},
+            "rotation_status": credential.rotation_status if credential else "",
+        },
+        "bindings": [
+            {
+                "binding_id": str(binding.binding_id),
+                "environment": binding.environment or "",
+                "application_name": binding.application_name or "",
+                "target_id": str(binding.target.target_id) if binding.target else "",
+                "target_name": binding.target.name if binding.target else "",
+                "priority": int(binding.priority or 10),
+                "enabled": bool(binding.enabled),
+            }
+            for binding in bindings
+        ],
+        "latest_health_check": {
+            "check_id": str(latest_health.check_id),
+            "status": latest_health.status,
+            "latency_ms": latest_health.latency_ms,
+            "message": latest_health.message,
+            "details_json": latest_health.details_json or {},
+            "checked_at": latest_health.checked_at.isoformat(),
+        } if latest_health else {},
+        "created_at": integration.created_at.isoformat(),
+        "updated_at": integration.updated_at.isoformat(),
+    }
+
+
+def _integration_defaults_payload(integration_type: str) -> Dict[str, Any]:
+    defaults = INTEGRATION_VENDOR_DEFAULTS.get(integration_type, INTEGRATION_VENDOR_DEFAULTS["custom"])
+    return {
+        "integration_id": "",
+        "name": defaults.get("default_name") or integration_type.title(),
+        "integration_type": integration_type,
+        "category": defaults.get("category") or "mixed",
+        "endpoint_url": "",
+        "auth_mode": defaults.get("auth_mode") or "none",
+        "enabled": True,
+        "metadata_json": {},
+        "health_status": "unknown",
+        "last_health_check_at": None,
+        "credential": {
+            "credential_id": "",
+            "secret_ref": "",
+            "credential_metadata": {},
+            "rotation_status": "",
+        },
+        "bindings": [],
+        "latest_health_check": {},
+        "created_at": "",
+        "updated_at": "",
+        "exists": False,
+    }
+
+
+def _parse_integration_request_body(request: HttpRequest) -> Dict[str, Any]:
+    try:
+        body = json.loads(request.body or "{}")
+    except Exception as exc:
+        raise ValueError(f"invalid_json:{exc}")
+    if not isinstance(body, dict):
+        raise ValueError("invalid_payload")
+    return body
+
+
+def _upsert_integration_from_payload(existing: Optional[Integration], payload: Dict[str, Any]) -> Integration:
+    integration_type = str(payload.get("integration_type") or (existing.integration_type if existing else "")).strip().lower()
+    if integration_type not in dict(Integration.INTEGRATION_TYPE_CHOICES):
+        raise ValueError("invalid_integration_type")
+    defaults = INTEGRATION_VENDOR_DEFAULTS.get(integration_type, INTEGRATION_VENDOR_DEFAULTS["custom"])
+    integration = existing or Integration(integration_type=integration_type)
+    integration.name = str(payload.get("name") or integration.name or defaults.get("default_name") or integration_type.title()).strip()
+    integration.integration_type = integration_type
+    integration.category = str(payload.get("category") or integration.category or defaults.get("category") or "mixed").strip().lower()
+    integration.endpoint_url = str(payload.get("endpoint_url") or integration.endpoint_url or "").strip()
+    integration.auth_mode = str(payload.get("auth_mode") or integration.auth_mode or defaults.get("auth_mode") or "none").strip().lower()
+    integration.enabled = bool(payload.get("enabled", integration.enabled if existing else True))
+    integration.metadata_json = payload.get("metadata_json") or integration.metadata_json or {}
+    integration.save()
+
+    credential_payload = payload.get("credential") or {}
+    credential, _ = IntegrationCredential.objects.get_or_create(integration=integration)
+    credential.secret_ref = str(credential_payload.get("secret_ref") or credential.secret_ref or "").strip()
+    credential.credential_metadata = credential_payload.get("credential_metadata") or credential.credential_metadata or {}
+    credential.rotation_status = str(credential_payload.get("rotation_status") or credential.rotation_status or "").strip()
+    credential.save()
+
+    bindings_payload = payload.get("bindings")
+    if bindings_payload is None:
+        single_binding = payload.get("binding")
+        bindings_payload = [single_binding] if isinstance(single_binding, dict) else []
+    integration.bindings.all().delete()
+    for raw_binding in bindings_payload:
+        if not isinstance(raw_binding, dict):
+            continue
+        target = None
+        target_ref = str(raw_binding.get("target_id") or raw_binding.get("target_name") or "").strip()
+        if target_ref:
+            target = (
+                Target.objects.filter(target_id=target_ref).first()
+                or Target.objects.filter(name=target_ref).first()
+                or Target.objects.filter(hostname=target_ref).first()
+            )
+        IntegrationBinding.objects.create(
+            integration=integration,
+            environment=str(raw_binding.get("environment") or "").strip(),
+            application_name=str(raw_binding.get("application_name") or "").strip(),
+            target=target,
+            priority=int(raw_binding.get("priority") or 10),
+            enabled=bool(raw_binding.get("enabled", True)),
+        )
+
+    return integration
+
+
+@login_required
+@csrf_exempt
+def integrations_view(request: HttpRequest):
+    if request.method == "GET":
+        integrations = Integration.objects.all().prefetch_related("bindings__target", "health_checks").select_related("credential")
+        results = [_serialize_integration(item) for item in integrations]
+        return JsonResponse({"count": len(results), "results": results})
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    try:
+        payload = _parse_integration_request_body(request)
+        integration_type = str(payload.get("integration_type") or "").strip().lower()
+        existing = Integration.objects.filter(integration_type=integration_type).order_by("-updated_at").first() if integration_type else None
+        integration = _upsert_integration_from_payload(existing, payload)
+    except ValueError as exc:
+        detail = str(exc)
+        if detail.startswith("invalid_json:"):
+            return JsonResponse({"error": "invalid_json", "detail": detail.split(":", 1)[1]}, status=400)
+        return JsonResponse({"error": detail}, status=400)
+    return JsonResponse(_serialize_integration(integration))
+
+
+@login_required
+@csrf_exempt
+def integration_detail_view(request: HttpRequest, integration_ref: str):
+    integration = _resolve_integration_ref(integration_ref)
+    normalized_ref = str(integration_ref or "").strip().lower()
+    if request.method == "GET":
+        if integration:
+            payload = _serialize_integration(integration)
+            payload["exists"] = True
+            return JsonResponse(payload)
+        if normalized_ref in dict(Integration.INTEGRATION_TYPE_CHOICES):
+            return JsonResponse(_integration_defaults_payload(normalized_ref))
+        return JsonResponse({"error": "integration_not_found"}, status=404)
+    if request.method == "DELETE":
+        if not integration:
+            return JsonResponse({"error": "integration_not_found"}, status=404)
+        integration.delete()
+        return JsonResponse({"status": "deleted"})
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    try:
+        payload = _parse_integration_request_body(request)
+        if not payload.get("integration_type") and normalized_ref in dict(Integration.INTEGRATION_TYPE_CHOICES):
+            payload["integration_type"] = normalized_ref
+        integration = _upsert_integration_from_payload(integration, payload)
+    except ValueError as exc:
+        detail = str(exc)
+        if detail.startswith("invalid_json:"):
+            return JsonResponse({"error": "invalid_json", "detail": detail.split(":", 1)[1]}, status=400)
+        return JsonResponse({"error": detail}, status=400)
+    payload = _serialize_integration(integration)
+    payload["exists"] = True
+    return JsonResponse(payload)
+
+
+@login_required
+@csrf_exempt
+def integration_test_view(request: HttpRequest, integration_ref: str):
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+    integration = _resolve_integration_ref(integration_ref)
+    if not integration:
+        return JsonResponse({"error": "integration_not_found"}, status=404)
+    start = time.perf_counter()
+    ok = False
+    detail = ""
+    try:
+        adapter = IntegrationRegistry.get_adapter(integration)
+        ok = bool(adapter.test_connection())
+        detail = "Connection successful." if ok else "Connection failed."
+    except Exception as exc:
+        ok = False
+        detail = str(exc)
+    latency_ms = max(0, int((time.perf_counter() - start) * 1000))
+    status_value = "healthy" if ok else "failing"
+    IntegrationHealthCheck.objects.create(
+        integration=integration,
+        status=status_value,
+        latency_ms=latency_ms,
+        message=detail,
+        details_json={"integration_type": integration.integration_type},
+    )
+    integration.health_status = status_value
+    integration.last_health_check_at = timezone.now()
+    integration.save(update_fields=["health_status", "last_health_check_at", "updated_at"])
+    return JsonResponse(
+        {
+            "integration": _serialize_integration(integration),
+            "healthy": ok,
+            "status": status_value,
+            "latency_ms": latency_ms,
+            "message": detail,
+        }
+    )
 
 
 @login_required
@@ -6495,6 +7362,34 @@ TARGET_POLICY_PROFILE_SEED = [
         "metadata_json": {"recommended_for": ["db", "readonly"]},
     },
     {
+        "slug": "linux-db-operator",
+        "name": "Linux DB Operator",
+        "description": "Database host profile with diagnostics plus approval-aware psql changes for controlled remediation.",
+        "target_type": "linux",
+        "runtime_type": "systemd",
+        "allow_service_status": True,
+        "allow_service_restart": False,
+        "allow_docker_logs": False,
+        "allow_docker_restart": False,
+        "allow_journal_logs": True,
+        "allow_file_logs": True,
+        "allow_db_diagnostics": True,
+        "allow_db_changes": True,
+        "allow_process_kill": False,
+        "requires_approval_for_restart": True,
+        "requires_approval_for_write_actions": True,
+        "sudo_mode": "limited",
+        "allowed_command_patterns": [
+            "systemctl status",
+            "journalctl -u",
+            "tail -n",
+            "grep ",
+            "pg_isready -h db",
+            "psql -h db -U user -d aiops -c",
+        ],
+        "metadata_json": {"recommended_for": ["db", "operator", "remediation"]},
+    },
+    {
         "slug": "prod-restricted",
         "name": "Production Restricted",
         "description": "Highly restricted production profile with read-heavy diagnostics and approval-required writes.",
@@ -6516,6 +7411,41 @@ TARGET_POLICY_PROFILE_SEED = [
         "metadata_json": {"recommended_for": ["prod", "restricted"]},
     },
 ]
+
+
+def _default_policy_profile_for_target(
+    *,
+    target_type: str,
+    runtime_type: str,
+    target_role: str = "",
+) -> Optional[TargetPolicyProfile]:
+    candidates = list(
+        TargetPolicyProfile.objects.filter(
+            target_type=target_type,
+            is_active=True,
+        )
+        .filter(models.Q(runtime_type="any") | models.Q(runtime_type=runtime_type))
+        .order_by("name")
+    )
+    if not candidates:
+        return None
+
+    normalized_role = str(target_role or "").strip().lower()
+    if not normalized_role:
+        return candidates[0]
+
+    def _score(profile: TargetPolicyProfile) -> tuple[int, int, int, str]:
+        recommended_for = {
+            str(item).strip().lower()
+            for item in ((profile.metadata_json or {}).get("recommended_for") or [])
+            if str(item).strip()
+        }
+        role_match = 1 if normalized_role in recommended_for else 0
+        db_write_match = 1 if normalized_role == "db" and profile.allow_db_changes else 0
+        exact_runtime = 1 if str(profile.runtime_type or "").strip().lower() == str(runtime_type or "").strip().lower() else 0
+        return (role_match, db_write_match, exact_runtime, profile.name or "")
+
+    return max(candidates, key=_score)
 
 
 def _ensure_fleet_profiles(target_type: Optional[str] = None) -> List[TelemetryProfile]:
@@ -6667,7 +7597,7 @@ def _serialize_target_service_binding(binding: TargetServiceBinding) -> Dict[str
 
 def _serialize_target_log_source(log_source: TargetLogSource) -> Dict[str, Any]:
     return {
-        "log_source_id": log_source.log_source_id,
+        "log_source_id": log_source.source_id,
         "service_binding_id": log_source.service_binding.binding_id if log_source.service_binding else None,
         "source_type": log_source.source_type,
         "journal_unit": log_source.journal_unit,
@@ -7191,9 +8121,9 @@ def _opensearch_connection_settings() -> Dict[str, Any]:
 
 
 def _fluent_bit_input_block(target: Target, log_source: TargetLogSource) -> str:
-    tag_suffix = re.sub(r"[^a-zA-Z0-9_.-]+", "-", f"{target.target_id}-{log_source.log_source_id}")[:80]
+    tag_suffix = re.sub(r"[^a-zA-Z0-9_.-]+", "-", f"{target.target_id}-{log_source.source_id}")[:80]
     tag = f"aiops.{tag_suffix}"
-    db_name = re.sub(r"[^a-zA-Z0-9_.-]+", "-", f"{target.target_id}-{log_source.log_source_id}.db")[:120]
+    db_name = re.sub(r"[^a-zA-Z0-9_.-]+", "-", f"{target.target_id}-{log_source.source_id}.db")[:120]
     if log_source.source_type == "journald":
         unit = log_source.journal_unit or (
             log_source.service_binding.systemd_unit if log_source.service_binding else ""
@@ -7237,7 +8167,7 @@ def _fluent_bit_input_block(target: Target, log_source: TargetLogSource) -> str:
 
 
 def _fluent_bit_filter_block(target: Target, log_source: TargetLogSource) -> str:
-    tag_suffix = re.sub(r"[^a-zA-Z0-9_.-]+", "-", f"{target.target_id}-{log_source.log_source_id}")[:80]
+    tag_suffix = re.sub(r"[^a-zA-Z0-9_.-]+", "-", f"{target.target_id}-{log_source.source_id}")[:80]
     tag = f"aiops.{tag_suffix}"
     service_binding = log_source.service_binding
     service_name = service_binding.service_name if service_binding else target.name
@@ -7603,7 +8533,7 @@ def fleet_policy_profiles_view(request: HttpRequest):
         return JsonResponse({"error": "Invalid request method"}, status=405)
     target_type = (request.GET.get("target_type") or "").strip().lower() or None
     runtime_type = (request.GET.get("runtime_type") or "").strip().lower() or None
-    profiles = _ensure_target_policy_profiles(target_type, runtime_type)
+    profiles = _ensure_target_policy_profiles(target_type=target_type, runtime_type=runtime_type)
     return JsonResponse({"count": len(profiles), "results": [_serialize_policy_profile(profile) for profile in profiles]})
 
 
@@ -7932,7 +8862,7 @@ def fleet_onboarding_requests_view(request: HttpRequest):
 
         profile = _get_profile_by_slug(profile_slug, target_type)
         track1_config = _extract_onboarding_track1_config(request.POST)
-        _ensure_target_policy_profiles(target_type, track1_config["runtime_type"])
+        _ensure_target_policy_profiles(target_type=target_type, runtime_type=track1_config["runtime_type"])
         policy_profile = None
         if track1_config["policy_profile_slug"]:
             policy_profile = (
@@ -7942,14 +8872,10 @@ def fleet_onboarding_requests_view(request: HttpRequest):
                 ).first()
             )
         if not policy_profile:
-            policy_profile = (
-                TargetPolicyProfile.objects.filter(
-                    target_type=target_type,
-                    is_active=True,
-                )
-                .filter(models.Q(runtime_type="any") | models.Q(runtime_type=track1_config["runtime_type"]))
-                .order_by("name")
-                .first()
+            policy_profile = _default_policy_profile_for_target(
+                target_type=target_type,
+                runtime_type=track1_config["runtime_type"],
+                target_role=track1_config["target_role"],
             )
         onboarding = TargetOnboardingRequest.objects.create(
             name=name,
@@ -8007,20 +8933,18 @@ def fleet_onboarding_request_detail_view(request: HttpRequest, onboarding_id: st
 
         profile = _get_profile_by_slug(profile_slug, target_type)
         track1_config = _extract_onboarding_track1_config(request.POST, existing=onboarding)
-        _ensure_target_policy_profiles(target_type, track1_config["runtime_type"])
+        _ensure_target_policy_profiles(target_type=target_type, runtime_type=track1_config["runtime_type"])
         policy_profile = None
         if track1_config["policy_profile_slug"]:
             policy_profile = TargetPolicyProfile.objects.filter(slug=track1_config["policy_profile_slug"], is_active=True).first()
         if not policy_profile:
             policy_profile = (
                 onboarding.policy_profile
-                or TargetPolicyProfile.objects.filter(
+                or _default_policy_profile_for_target(
                     target_type=target_type,
-                    is_active=True,
+                    runtime_type=track1_config["runtime_type"],
+                    target_role=track1_config["target_role"],
                 )
-                .filter(models.Q(runtime_type="any") | models.Q(runtime_type=track1_config["runtime_type"]))
-                .order_by("name")
-                .first()
             )
         onboarding.name = name
         onboarding.hostname = hostname

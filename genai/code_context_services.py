@@ -15,6 +15,7 @@ from .models import (
     SpanBinding,
     SymbolRelation,
 )
+from .vector_backend import semantic_search
 
 
 def _normalize(value: str) -> str:
@@ -409,6 +410,7 @@ def search_code_context(
 
     normalized_query = (query or "").strip().lower()
     tokens = [token for token in re.split(r"[^a-zA-Z0-9_./:-]+", normalized_query) if len(token) >= 3]
+    endpoint_inventory_requested = any(token in normalized_query for token in ("endpoint", "endpoints", "route", "routes", "api path", "handler"))
     if service_name:
         tokens.extend([service_name.lower(), service_name.lower().replace("-", "_"), service_name.lower().replace("_", "-")])
 
@@ -432,6 +434,18 @@ def search_code_context(
                 {
                     "kind": "route",
                     "score": score + binding.confidence,
+                    "label": f"{binding.http_method} {binding.route_pattern}",
+                    "module_path": binding.handler_file_path,
+                    "symbol": binding.handler_name,
+                    "line_start": binding.line_start,
+                    "line_end": binding.line_end,
+                }
+            )
+        elif endpoint_inventory_requested:
+            scored.append(
+                {
+                    "kind": "route",
+                    "score": max(0.5, float(binding.confidence or 0.0)),
                     "label": f"{binding.http_method} {binding.route_pattern}",
                     "module_path": binding.handler_file_path,
                     "symbol": binding.handler_name,
@@ -497,9 +511,52 @@ def search_code_context(
         if len(deduped) >= max(int(limit or 6), 1):
             break
 
+    if len(deduped) < max(int(limit or 6), 1) and query:
+        semantic_matches = semantic_search("code_embeddings", query, limit=max(int(limit or 6), 1) * 2)
+        for candidate in semantic_matches:
+            metadata = candidate.get("metadata") or {}
+            if str(metadata.get("repository") or "").lower() != repo.name.lower():
+                continue
+            if service_name and metadata.get("service_name") and _normalize(str(metadata.get("service_name") or "")) != _normalize(service_name):
+                continue
+            item = {
+                "kind": str(metadata.get("kind") or "semantic"),
+                "score": float(candidate.get("score") or 0.0),
+                "label": str(metadata.get("label") or metadata.get("symbol") or metadata.get("module_path") or "semantic match"),
+                "module_path": metadata.get("module_path"),
+                "symbol": metadata.get("symbol"),
+                "line_start": metadata.get("line_start"),
+                "line_end": metadata.get("line_end"),
+            }
+            key = (item["kind"], item["module_path"], item["symbol"], item["label"])
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+            if len(deduped) >= max(int(limit or 6), 1):
+                break
+
+    route_queryset = RouteBinding.objects.filter(repository_index=repo)
+    if service_name:
+        route_queryset = route_queryset.filter(Q(service_name__iexact=service_name) | Q(service_name=""))
+    route_inventory = {
+        "route_count": route_queryset.count(),
+        "http_methods": sorted({str(item.http_method or "ANY") for item in route_queryset}),
+        "sample_routes": [
+            {
+                "http_method": item.http_method,
+                "route": item.route_pattern,
+                "handler": item.handler_name,
+                "module_path": item.handler_file_path,
+            }
+            for item in route_queryset.order_by("route_pattern")[:12]
+        ],
+    } if endpoint_inventory_requested else {}
+
     return {
         "ok": True,
         "repository": repo.name,
         "query": query,
         "matches": deduped,
+        "route_inventory": route_inventory,
     }

@@ -230,7 +230,7 @@ services:
       context: .
       dockerfile: agent/db-agent.Dockerfile
     environment:
-      AGENT_AUTH_TOKEN: ${AGENT_SECRET_TOKEN:-87959db4d697a53b056f07b4edb5a2618ad0408a4d808b0865d65d06be02fe24}
+      AGENT_AUTH_TOKEN: ${AGENT_SECRET_TOKEN:-}
       AGENT_ALLOWED_COMMANDS_FILE: /app/db_allowed_commands.json
       AGENT_PORT: 9999
       PGPASSWORD: ${POSTGRES_PASSWORD:-password}
@@ -508,7 +508,7 @@ services:
       OTEL_SERVICE_NAME: app-orders
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       APP_DEFAULT_DB_SLEEP: ${ORDERS_DEFAULT_DB_SLEEP:-0}
-      AGENT_AUTH_TOKEN: ${AGENT_SECRET_TOKEN:-aiops-demo-agent-7f3c29d1b84e4a6f}
+      AGENT_AUTH_TOKEN: ${AGENT_SECRET_TOKEN:-}
       AGENT_ALLOWED_COMMANDS_FILE: /app/allowed_commands.json
       AGENT_PORT: 9999
     volumes:
@@ -540,7 +540,7 @@ services:
       OTEL_SERVICE_NAME: app-inventory
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       APP_DEFAULT_DB_SLEEP: ${INVENTORY_DEFAULT_DB_SLEEP:-0}
-      AGENT_AUTH_TOKEN: ${AGENT_SECRET_TOKEN:-aiops-demo-agent-7f3c29d1b84e4a6f}
+      AGENT_AUTH_TOKEN: ${AGENT_SECRET_TOKEN:-}
       AGENT_ALLOWED_COMMANDS_FILE: /app/allowed_commands.json
       AGENT_PORT: 9999
     volumes:
@@ -572,7 +572,7 @@ services:
       OTEL_SERVICE_NAME: app-billing
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       APP_DEFAULT_DB_SLEEP: ${BILLING_DEFAULT_DB_SLEEP:-0}
-      AGENT_AUTH_TOKEN: ${AGENT_SECRET_TOKEN:-aiops-demo-agent-7f3c29d1b84e4a6f}
+      AGENT_AUTH_TOKEN: ${AGENT_SECRET_TOKEN:-}
       AGENT_ALLOWED_COMMANDS_FILE: /app/allowed_commands.json
       AGENT_PORT: 9999
     volumes:

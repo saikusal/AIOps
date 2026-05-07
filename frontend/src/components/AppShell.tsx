@@ -10,6 +10,7 @@ const navItems = [
   { to: "/alerts",            label: "Alerts",                   meta: "Signal Feed · Anomaly Explainer" },
   { to: "/incidents",         label: "Incidents",                meta: "SLA · War Room · PIR" },
   { to: "/investigations",    label: "Investigations",           meta: "Live RCA · Tool Trace · Stages" },
+  { to: "/integrations",      label: "Integrations",             meta: "Connectors · External Sources" },
   { to: "/topology",          label: "Topology & CMDB",          meta: "Service Graph · Blast Radius" },
   { to: "/code-context",      label: "Code Context",             meta: "Repo Graph · Runtime To Code" },
   { to: "/genai",             label: "Assistant",                meta: "RCA · AI Chat" },
@@ -47,18 +48,26 @@ export function AppShell() {
     <div className="shell">
       <aside className="shell__sidebar">
         <div className="shell__brand">
-          <span className="shell__brand-mark">A</span>
+          <svg className="shell__brand-logo" width="36" height="36" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="logo-grad1" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stopColor="#00f0ff" />
+                <stop offset="100%" stopColor="#8a2be2" />
+              </linearGradient>
+              <linearGradient id="logo-grad2" x1="100%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stopColor="#ff00ff" />
+                <stop offset="100%" stopColor="#00f0ff" />
+              </linearGradient>
+            </defs>
+            <path d="M16 2 L28 8 L28 24 L16 30 L4 24 L4 8 Z" stroke="url(#logo-grad1)" strokeWidth="3" strokeLinejoin="round"/>
+            <circle cx="16" cy="16" r="6" fill="url(#logo-grad2)" />
+          </svg>
           <div>
-            <strong>AIOps</strong>
+            <strong>OpsMitra</strong>
             <div>Observability Control Plane</div>
           </div>
         </div>
-        <div className="shell__sidebar-section">
-          <div className="shell__sidebar-label">Workspace</div>
-          <div className="shell__sidebar-blurb">
-            Unified operations across Domain Onboarding, Data Ingestion, AI/ML Intelligence, Event & Incident Management, Topology, GenAI, Automation, and Analytics.
-          </div>
-        </div>
+
         <nav className="shell__nav">
           {navItems.map((item) => (
             <NavLink

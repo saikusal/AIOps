@@ -221,6 +221,49 @@ export type CodeContextGraphPayload = {
   };
 };
 
+export type IntegrationBindingPayload = {
+  binding_id?: string;
+  environment: string;
+  application_name: string;
+  target_id?: string;
+  target_name?: string;
+  priority: number;
+  enabled: boolean;
+};
+
+export type IntegrationCredentialPayload = {
+  credential_id?: string;
+  secret_ref: string;
+  credential_metadata: Record<string, unknown>;
+  rotation_status?: string;
+};
+
+export type IntegrationConfig = {
+  integration_id?: string;
+  name: string;
+  integration_type: string;
+  category: string;
+  endpoint_url: string;
+  auth_mode: string;
+  enabled: boolean;
+  metadata_json: Record<string, unknown>;
+  health_status?: string;
+  last_health_check_at?: string | null;
+  credential: IntegrationCredentialPayload;
+  bindings: IntegrationBindingPayload[];
+  latest_health_check?: {
+    check_id?: string;
+    status?: string;
+    latency_ms?: number;
+    message?: string;
+    details_json?: Record<string, unknown>;
+    checked_at?: string;
+  };
+  created_at?: string;
+  updated_at?: string;
+  exists?: boolean;
+};
+
 export type ApplicationComponent = {
   application: string;
   service: string;
@@ -688,7 +731,14 @@ export async function resetChatSession(sessionId?: string): Promise<ChatSessionI
   return response.json() as Promise<ChatSessionInit>;
 }
 
-export async function sendChatMessage(payload: { session_id?: string; question: string; use_documents?: boolean }): Promise<ChatReply> {
+export async function sendChatMessage(payload: {
+  session_id?: string;
+  question: string;
+  use_documents?: boolean;
+  application?: string;
+  service?: string;
+  incident?: string;
+}): Promise<ChatReply> {
   const response = await fetch("/genai/chat/", {
     method: "POST",
     credentials: "include",
@@ -1409,6 +1459,64 @@ export async function deleteOnboardingRequest(onboardingId: string): Promise<voi
     const body = await response.json().catch(() => ({}));
     throw new Error(body.detail || body.error || `Delete failed: ${response.status}`);
   }
+}
+
+export async function fetchIntegrations(): Promise<IntegrationConfig[]> {
+  const payload = await fetchJson<{ count: number; results: IntegrationConfig[] }>("/genai/integrations/");
+  return payload.results || [];
+}
+
+export async function fetchIntegrationConfig(integrationRef: string): Promise<IntegrationConfig> {
+  return fetchJson<IntegrationConfig>(`/genai/integrations/${encodeURIComponent(integrationRef)}/`);
+}
+
+export async function saveIntegrationConfig(payload: IntegrationConfig): Promise<IntegrationConfig> {
+  const integrationRef = payload.integration_id || payload.integration_type;
+  const response = await fetch(`/genai/integrations/${encodeURIComponent(integrationRef)}/`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "X-CSRFToken": getCsrfToken(),
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = (await response.json()) as IntegrationConfig & { error?: string; detail?: string };
+  if (!response.ok) {
+    throw new Error(body.detail || body.error || `Save integration failed: ${response.status}`);
+  }
+  return body;
+}
+
+export async function testIntegrationConnection(integrationRef: string): Promise<{
+  integration: IntegrationConfig;
+  healthy: boolean;
+  status: string;
+  latency_ms: number;
+  message: string;
+}> {
+  const response = await fetch(`/genai/integrations/${encodeURIComponent(integrationRef)}/test/`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+      "X-CSRFToken": getCsrfToken(),
+    },
+  });
+  const body = (await response.json()) as {
+    integration: IntegrationConfig;
+    healthy: boolean;
+    status: string;
+    latency_ms: number;
+    message: string;
+    error?: string;
+    detail?: string;
+  };
+  if (!response.ok) {
+    throw new Error(body.detail || body.error || `Integration test failed: ${response.status}`);
+  }
+  return body;
 }
 
 export async function fetchCacheStats(): Promise<Record<string, any>> {

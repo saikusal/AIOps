@@ -179,6 +179,15 @@ def metrics_query_service_overview(
 ) -> Dict[str, Any]:
     if not service_name:
         return {}
+    if service_name.startswith("app-"):
+        return {
+            "latency_p95_seconds": fetch_metrics_query(
+                f'histogram_quantile(0.95, sum by (le) (rate(demo_http_request_duration_seconds_bucket{{service="{service_name}"}}[5m])))'
+            ),
+            "error_rate": fetch_metrics_query(
+                f'sum(rate(demo_http_requests_total{{service="{service_name}",status=~"5.."}}[5m]))'
+            ),
+        }
     return {
         "latency_p95_seconds": fetch_metrics_query(
             f'histogram_quantile(0.95, sum by (le) (rate(flask_http_request_duration_seconds_bucket{{job="{service_name}"}}[5m])))'
@@ -202,12 +211,13 @@ def metrics_query_raw(
 def logs_search(
     *,
     target_host: Optional[str],
+    service_name: Optional[str] = None,
     query: str,
-    fetch_elasticsearch_logs: Callable[[Optional[str], str], Dict[str, Any]],
+    fetch_elasticsearch_logs: Callable[..., Dict[str, Any]],
 ) -> Dict[str, Any]:
-    if not target_host and not query:
+    if not target_host and not service_name and not query:
         return {}
-    return fetch_elasticsearch_logs(target_host, query)
+    return fetch_elasticsearch_logs(target_host, query, service_name=service_name)
 
 
 def traces_search(

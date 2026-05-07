@@ -4,6 +4,7 @@ from . import views
 app_name = 'genai'
 
 urlpatterns = [
+    path('', views.assistant_app_view, name='assistant_root'),
     path('login/', views.login_view, name='login'),
     path('sso/login/', views.sso_login_view, name='sso_login'),
     path('logout/', views.logout_view, name='logout'),
@@ -23,6 +24,9 @@ urlpatterns = [
     path('operations/remediation-learning/', views.remediation_learning_view, name='remediation_learning'),
     path('operations/preventive-recommendations/', views.preventive_recommendations_view, name='preventive_recommendations'),
     path('operations/operator-feedback/', views.operator_feedback_view, name='operator_feedback'),
+    path('integrations/', views.integrations_view, name='integrations'),
+    path('integrations/<str:integration_ref>/', views.integration_detail_view, name='integration_detail'),
+    path('integrations/<str:integration_ref>/test/', views.integration_test_view, name='integration_test'),
     path('applications/dashboard/', views.applications_dashboard_view, name='applications_dashboard'),
     path('applications/overview/', views.applications_overview_view, name='applications_overview'),
     path('applications/<str:application_key>/graph/', views.application_graph_view, name='application_graph'),

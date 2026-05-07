@@ -299,11 +299,14 @@ export function AssistantPage() {
     queryKey: ["chat-sessions"],
     queryFn: fetchChatSessions,
     ...refreshQueryOptions,
+    retry: 3,
   });
 
   const sessionInitQuery = useQuery({
     queryKey: ["chat-session", activeSessionId],
     queryFn: () => initChatSession(activeSessionId),
+    retry: 3,
+    refetchInterval: (query) => (query.state.status === "success" ? false : 3000),
   });
 
   useEffect(() => {
@@ -330,6 +333,9 @@ export function AssistantPage() {
       sendChatMessage({
         session_id: activeSessionId,
         question,
+        application: pinnedApplication || undefined,
+        service: pinnedService || undefined,
+        incident: pinnedIncident || undefined,
       }),
     onMutate: async (question: string) => {
       if (!question.trim()) return;
@@ -430,9 +436,16 @@ export function AssistantPage() {
     ];
   }, [messages]);
 
+  const sessionReady = sessionInitQuery.status === "success";
+  const sessionStartupMessage = sessionInitQuery.isPending
+    ? "Control plane is starting the investigation workspace."
+    : sessionInitQuery.isError
+      ? "The investigation workspace is not ready yet. Waiting for the backend to become available."
+      : "";
+
   function submitPrompt(question: string) {
     const nextQuestion = question.trim();
-    if (!nextQuestion || sendMutation.isPending) return;
+    if (!nextQuestion || sendMutation.isPending || !sessionReady) return;
     sendMutation.mutate(nextQuestion);
   }
 
@@ -488,6 +501,12 @@ export function AssistantPage() {
               Ask for RCA, blast radius, next diagnostics, predictions, or document-backed procedures.
             </div>
           </div>
+          {!sessionReady ? (
+            <div className="assistant-startup-notice">
+              <strong>Workspace Initializing</strong>
+              <span>{sessionStartupMessage}</span>
+            </div>
+          ) : null}
           <div className="assistant-chat__messages">
             {messages.map((message) => (
               <article key={`${message.id}-${message.created_at}`} className={`assistant-message assistant-message--${message.role}`}>
@@ -504,7 +523,7 @@ export function AssistantPage() {
           </div>
           <div className="assistant-prompts">
             {suggestedPrompts.map((prompt) => (
-              <button key={prompt} className="assistant-prompt-chip" onClick={() => submitPrompt(prompt)}>
+              <button key={prompt} className="assistant-prompt-chip" onClick={() => submitPrompt(prompt)} disabled={!sessionReady || sendMutation.isPending}>
                 {prompt}
               </button>
             ))}
@@ -513,17 +532,18 @@ export function AssistantPage() {
             <textarea
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
+              disabled={!sessionReady || sendMutation.isPending}
               onKeyDown={(event) => {
                 if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                   event.preventDefault();
                   submitPrompt(draft);
                 }
               }}
-              placeholder="Ask for RCA, blast radius, next diagnostics, or application health..."
+              placeholder={sessionReady ? "Ask for RCA, blast radius, next diagnostics, or application health..." : "Waiting for the backend workspace to become ready..."}
             />
             <button
               className="assistant-button"
-              disabled={sendMutation.isPending || !draft.trim()}
+              disabled={!sessionReady || sendMutation.isPending || !draft.trim()}
               onClick={() => submitPrompt(draft)}
             >
               {sendMutation.isPending ? "Thinking..." : "Send"}

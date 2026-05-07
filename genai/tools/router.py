@@ -12,6 +12,49 @@ ROUTE_CHOICES: Set[str] = {
     "initiate_password_reset",
 }
 
+_CODE_CONTEXT_KEYWORDS = (
+    "endpoint",
+    "endpoints",
+    "route",
+    "routes",
+    "handler",
+    "handlers",
+    "architecture",
+    "repository",
+    "repo",
+    "source code",
+    "code path",
+    "module",
+    "technology",
+    "technologies",
+    "framework",
+    "frameworks",
+    "language",
+    "languages",
+    "library",
+    "libraries",
+    "dependency",
+    "dependencies",
+    "deployment process",
+    "tech stack",
+    "code flow",
+    "request flow",
+    "execution flow",
+    "call flow",
+    "application structure",
+    "service architecture",
+    "internal architecture",
+    "built with",
+)
+
+_CODE_CONTEXT_PATTERNS = (
+    r"\blist(?:\s+down)?\s+(?:all\s+)?(?:the\s+)?(?:application\s+)?(?:api\s+)?(endpoints|routes|handlers|modules)\b",
+    r"\b(?:what|which)\s+(technologies|technology|frameworks|framework|languages|language|libraries|library|dependencies|dependency)\b",
+    r"\b(?:code|request|execution|call|deployment)\s+flow\b",
+    r"\bhow\s+(?:does|do)\s+.*\b(?:work|flow|handle|handled|implemented|structured)\b",
+    r"\b(?:how|where)\s+.*\b(?:implemented|defined|wired|structured)\b",
+)
+
 
 def deterministic_route(query: str) -> Optional[str]:
     """Fast path for explicit or safety-sensitive intents."""
@@ -66,6 +109,12 @@ def deterministic_route(query: str) -> Optional[str]:
     if any(tok in t for tok in doc_tokens):
         return "docs"
 
+    if any(keyword in t for keyword in _CODE_CONTEXT_KEYWORDS):
+        return "investigation"
+
+    if any(re.search(pattern, t, re.IGNORECASE) for pattern in _CODE_CONTEXT_PATTERNS):
+        return "investigation"
+
     if len(t.split()) <= 6 and any(t.startswith(g) for g in ("hi", "hello", "hey", "what's up", "how are you", "good")):
         return "general"
 
@@ -91,6 +140,7 @@ def llm_route_decision(
         "Do NOT choose docs just because the message contains the word 'document' unless the user is actually asking to search or use documentation.\n"
         "Do NOT choose prometheus_query for prediction or risk-scoring questions.\n"
         "Prefer investigation for incident, RCA, alert analysis, anomaly explanation, prediction, or \"highest risk in next 15 minutes\" style prompts.\n\n"
+        "Prefer investigation for repository and code-context questions such as endpoints, routes, handlers, modules, or application architecture.\n\n"
         "Return JSON only with keys: route, confidence, rationale.\n"
         f"USER_MESSAGE: {query}"
     )

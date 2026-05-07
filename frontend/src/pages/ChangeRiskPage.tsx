@@ -50,21 +50,18 @@ export function ChangeRiskPage() {
         <div className="eyebrow">Plan Details</div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: "1rem", marginTop: "0.75rem" }}>
-          <label style={{ display: "flex", flexDirection: "column", gap: "0.3rem", fontSize: "0.85rem" }}>
-            Service / Component
+          <label className="form-field">
+            <span>Service / Component</span>
             <input
-              className="assistant-input"
-              style={{ padding: "0.5rem 0.75rem", borderRadius: "0.375rem", border: "1px solid var(--color-border, #374151)", background: "var(--color-surface-2, #1e293b)", color: "inherit", fontSize: "0.9rem" }}
               placeholder="e.g. app-orders, payment-gateway, db-primary"
               value={service}
               onChange={(e: ChangeEvent<HTMLInputElement>) => setService(e.target.value)}
             />
           </label>
 
-          <label style={{ display: "flex", flexDirection: "column", gap: "0.3rem", fontSize: "0.85rem" }}>
-            Change Type
+          <label className="form-field">
+            <span>Change Type</span>
             <select
-              style={{ padding: "0.5rem 0.75rem", borderRadius: "0.375rem", border: "1px solid var(--color-border, #374151)", background: "var(--color-surface-2, #1e293b)", color: "inherit", fontSize: "0.9rem" }}
               value={changeType}
               onChange={(e: ChangeEvent<HTMLSelectElement>) => setChangeType(e.target.value)}
             >
@@ -74,21 +71,20 @@ export function ChangeRiskPage() {
             </select>
           </label>
 
-          <label style={{ display: "flex", flexDirection: "column", gap: "0.3rem", fontSize: "0.85rem" }}>
-            Change Description
+          <label className="form-field">
+            <span>Change Description</span>
             <textarea
-              style={{ padding: "0.5rem 0.75rem", borderRadius: "0.375rem", border: "1px solid var(--color-border, #374151)", background: "var(--color-surface-2, #1e293b)", color: "inherit", fontSize: "0.9rem", minHeight: "90px", resize: "vertical" }}
+              style={{ minHeight: "90px", resize: "vertical" }}
               placeholder="Describe exactly what is being changed, why, and the expected scope…"
               value={changeDescription}
               onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setChangeDescription(e.target.value)}
             />
           </label>
 
-          <label style={{ display: "flex", flexDirection: "column", gap: "0.3rem", fontSize: "0.85rem" }}>
-            Planned Date/Time (optional)
+          <label className="form-field">
+            <span>Planned Date/Time (optional)</span>
             <input
               type="datetime-local"
-              style={{ padding: "0.5rem 0.75rem", borderRadius: "0.375rem", border: "1px solid var(--color-border, #374151)", background: "var(--color-surface-2, #1e293b)", color: "inherit", fontSize: "0.9rem" }}
               value={plannedAt}
               onChange={(e: ChangeEvent<HTMLInputElement>) => setPlannedAt(e.target.value)}
             />
@@ -96,7 +92,7 @@ export function ChangeRiskPage() {
 
           <div>
             <button
-              className="assistant-button"
+              className="action-button"
               onClick={() => analyseMutation.mutate()}
               disabled={analyseMutation.isPending || !changeDescription.trim()}
             >
