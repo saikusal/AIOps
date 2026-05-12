@@ -17,10 +17,44 @@ filebeat.inputs:
     fields_under_root: true
 
   - type: filestream
-    id: demo-app-logs
+    id: demo-app-inventory
+    enabled: true
+    paths:
+      - /var/log/demo/app-inventory.log
+    fields:
+      service.name: app-inventory
+      log_type: demo_app
+    fields_under_root: true
+
+  - type: filestream
+    id: demo-app-orders
+    enabled: true
+    paths:
+      - /var/log/demo/app-orders.log
+    fields:
+      service.name: app-orders
+      log_type: demo_app
+    fields_under_root: true
+
+  - type: filestream
+    id: demo-app-billing
+    enabled: true
+    paths:
+      - /var/log/demo/app-billing.log
+    fields:
+      service.name: app-billing
+      log_type: demo_app
+    fields_under_root: true
+
+  - type: filestream
+    id: demo-app-other
     enabled: true
     paths:
       - /var/log/demo/app-*.log
+    exclude_files:
+      - 'app-inventory\.log$'
+      - 'app-orders\.log$'
+      - 'app-billing\.log$'
     fields:
       service.name: demo-services
       log_type: demo_app

@@ -27,6 +27,26 @@ def _score_to_confidence_label(score: float) -> str:
     return "medium"
 
 
+def _extract_log_hit_count(logs: Dict[str, Any]) -> int:
+    if not isinstance(logs, dict) or not logs:
+        return 0
+    direct_count = logs.get("count")
+    if direct_count is not None:
+        try:
+            return int(direct_count)
+        except (TypeError, ValueError):
+            pass
+    hits = logs.get("hits") if isinstance(logs.get("hits"), dict) else {}
+    total = hits.get("total")
+    if isinstance(total, dict):
+        try:
+            return int(total.get("value") or 0)
+        except (TypeError, ValueError):
+            return 0
+    rows = hits.get("hits")
+    return len(rows) if isinstance(rows, list) else 0
+
+
 def _normalize_assessment_shapes(evidence: Dict[str, Any]) -> Dict[str, Any]:
     normalized = dict(evidence or {})
     hard = [item for item in (normalized.get("hard_evidence") or []) if item]
@@ -239,7 +259,7 @@ def normalize_investigation_evidence(context: Dict[str, Any]) -> Dict[str, Any]:
         },
         "logs": {
             "ok": bool(logs),
-            "hit_count": int(logs.get("count") or 0) if isinstance(logs, dict) else 0,
+            "hit_count": _extract_log_hit_count(logs),
         },
         "traces": {
             "ok": bool(traces),
@@ -307,7 +327,7 @@ def build_investigation_workflow(*, question: str, scope: Dict[str, Any], contex
             "Collected metrics, logs, traces, topology, runbooks, and code-context evidence.",
             {
                 "metrics_present": bool((context or {}).get("metrics")),
-                "logs_present": bool((context or {}).get("elasticsearch")),
+                "logs_present": _extract_log_hit_count((context or {}).get("elasticsearch") or {}) > 0,
                 "traces_present": bool((context or {}).get("jaeger")),
                 "code_context_present": bool((context or {}).get("code_context")),
             },

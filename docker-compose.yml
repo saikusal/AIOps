@@ -15,7 +15,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-}
+      ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-http://elasticsearch:9200}
       JAEGER_URL: ${JAEGER_URL:-http://jaeger:16686}
       AGENT_SECRET_TOKEN: ${AGENT_SECRET_TOKEN:-}
       AGENT_PORT: ${AGENT_PORT:-9999}
@@ -131,7 +131,7 @@ services:
       POSTGRES_PORT: 5432
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-}
+      ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-http://elasticsearch:9200}
       JAEGER_URL: ${JAEGER_URL:-http://jaeger:16686}
       APP_LOG_DIR: /var/log/aiops
       METRICS_API_URL: ${METRICS_API_URL:-http://prometheus:9090}

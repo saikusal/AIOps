@@ -433,6 +433,7 @@ class InvestigationMCPOrchestrator:
         return logs_search(
             target_host=str(params.get("target_host") or "") or None,
             query=str(params.get("query") or ""),
+            service_name=str(params.get("service_name") or "") or None,
             fetch_elasticsearch_logs=self.fetch_elasticsearch_logs,
         ) or {}
 

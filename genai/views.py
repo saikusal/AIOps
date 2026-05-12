@@ -43,6 +43,8 @@ from .models import (
     DataRetentionPolicy,
     DiscoveredService,
     EnrollmentToken,
+    EvidenceBundle,
+    EvidenceSnapshot,
     ExecutionIntent,
     GenAIChatHistory,
     Incident,
@@ -1589,6 +1591,214 @@ def _collect_log_error_messages(log_payload: Dict[str, Any], *, limit: int = 3) 
     return [_normalize_signature_text(msg) for msg in filtered[:limit] if msg]
 
 
+def _command_output_to_log_payload(command_output: str, *, target_host: str = "", service_name: str = "") -> Dict[str, Any]:
+    lines = [str(line).rstrip() for line in str(command_output or "").splitlines() if str(line).strip()]
+    if not lines:
+        return {}
+    timestamp = timezone.now().isoformat()
+    hits = [
+        {
+            "_source": {
+                "@timestamp": timestamp,
+                "message": line,
+                "host.name": target_host,
+                "target_name": target_host,
+                "service.name": service_name,
+                "service_name": service_name,
+            }
+        }
+        for line in lines[:80]
+    ]
+    return {
+        "hits": {
+            "total": {"value": len(hits), "relation": "eq"},
+            "hits": hits,
+        }
+    }
+
+
+def _extract_log_hit_count(log_payload: Dict[str, Any]) -> int:
+    if not isinstance(log_payload, dict) or not log_payload:
+        return 0
+    direct_count = log_payload.get("count")
+    if direct_count is not None:
+        try:
+            return int(direct_count)
+        except (TypeError, ValueError):
+            pass
+    total = ((log_payload.get("hits") or {}).get("total") or {})
+    if isinstance(total, dict):
+        try:
+            return int(total.get("value") or 0)
+        except (TypeError, ValueError):
+            return 0
+    hits = ((log_payload.get("hits") or {}).get("hits") or [])
+    return len(hits) if isinstance(hits, list) else 0
+
+
+def _merge_command_output_into_investigation_run(
+    *,
+    incident: Optional[Incident],
+    target_host: str,
+    service_name: str,
+    command_output: str,
+    analysis_sections: Optional[Dict[str, Any]] = None,
+    execution_type: str = "diagnostic",
+) -> None:
+    if not incident or not str(command_output or "").strip():
+        return
+    run = InvestigationRun.objects.filter(incident=incident).order_by("-updated_at").first()
+    if not run:
+        return
+
+    log_payload = _command_output_to_log_payload(
+        command_output,
+        target_host=target_host or run.target_host or "",
+        service_name=service_name or run.service or "",
+    )
+    hit_count = _extract_log_hit_count(log_payload)
+    if hit_count <= 0:
+        return
+
+    evidence_bundle_json = dict(run.evidence_bundle_json or {})
+    logs_section = dict(evidence_bundle_json.get("logs") or {})
+    logs_section["ok"] = True
+    logs_section["hit_count"] = max(int(logs_section.get("hit_count") or 0), hit_count)
+    logs_section["post_command_hit_count"] = hit_count
+    evidence_bundle_json["logs"] = logs_section
+    evidence_bundle_json["post_command_log_excerpt"] = [line for line in str(command_output).splitlines() if line.strip()][:20]
+
+    evidence_assessment = dict((evidence_bundle_json.get("evidence_assessment") or {}))
+    confidence_assessment = dict(evidence_assessment.get("confidence_assessment") or {})
+    contradiction_assessment = dict(evidence_assessment.get("contradiction_assessment") or {})
+    evidence_gap_assessment = dict(evidence_assessment.get("evidence_gap_assessment") or {})
+    missing = [str(item) for item in (evidence_assessment.get("missing_evidence") or []) if item]
+    contradicting = [str(item) for item in (evidence_assessment.get("contradicting_evidence") or []) if item]
+    hard = [str(item) for item in (evidence_assessment.get("hard_evidence") or []) if item]
+
+    missing = [item for item in missing if "log" not in item.lower()]
+    contradicting = [item for item in contradicting if "log" not in item.lower()]
+
+    command_evidence = []
+    if isinstance(analysis_sections, dict):
+        raw_evidence = analysis_sections.get("evidence") or []
+        if isinstance(raw_evidence, list):
+            command_evidence.extend(str(item) for item in raw_evidence if item)
+        root_cause = str(analysis_sections.get("root_cause") or "").strip()
+        if root_cause:
+            command_evidence.append(root_cause)
+    if not command_evidence:
+        command_evidence.extend(_collect_log_error_messages(log_payload, limit=3))
+    for item in command_evidence:
+        if item and item not in hard:
+            hard.append(item)
+
+    evidence_assessment["hard_evidence"] = hard
+    evidence_assessment["missing_evidence"] = missing
+    evidence_assessment["contradicting_evidence"] = contradicting
+    if hard:
+        evidence_assessment["confidence_reason"] = "Recent command-output logs provide direct failure evidence."
+    if confidence_assessment:
+        confidence_assessment["supporting_evidence_count"] = max(int(confidence_assessment.get("supporting_evidence_count") or 0), len(hard))
+        confidence_assessment["hard_evidence_count"] = len(hard)
+        confidence_assessment["missing_evidence_count"] = len(missing)
+        confidence_assessment["contradicting_evidence_count"] = len(contradicting)
+        confidence_assessment["summary"] = evidence_assessment.get("confidence_reason") or confidence_assessment.get("summary") or ""
+        evidence_assessment["confidence_assessment"] = confidence_assessment
+    if contradiction_assessment:
+        contradiction_assessment["count"] = len(contradicting)
+        if len(contradicting) <= 0:
+            contradiction_assessment["severity"] = "none"
+            contradiction_assessment["blocks_dependency_claim"] = False
+            contradiction_assessment["summary"] = "No contradicting evidence currently weakens the working hypothesis."
+        evidence_assessment["contradiction_assessment"] = contradiction_assessment
+    if evidence_gap_assessment:
+        evidence_gap_assessment["count"] = len(missing)
+        if len(missing) <= 0:
+            evidence_gap_assessment["status"] = "none"
+            evidence_gap_assessment["summary"] = "No unresolved evidence gaps are currently tracked."
+        elif len(missing) == 1:
+            evidence_gap_assessment["status"] = "low"
+            evidence_gap_assessment["summary"] = "A small evidence gap remains before the RCA can be considered complete."
+        evidence_assessment["evidence_gap_assessment"] = evidence_gap_assessment
+    evidence_bundle_json["evidence_assessment"] = evidence_assessment
+
+    planner_json = dict(run.planner_json or {})
+    iteration_plan = dict(planner_json.get("iteration_plan") or {})
+    candidate_steps = [dict(item) for item in (iteration_plan.get("candidate_steps") or []) if isinstance(item, dict)]
+    iterations = [dict(item) for item in (iteration_plan.get("iterations") or []) if isinstance(item, dict)]
+    candidate_steps = [item for item in candidate_steps if str(item.get("tool_name") or "") != "logs.search"]
+    iterations = [item for item in iterations if str(item.get("selected_tool") or "") != "logs.search"]
+    iteration_plan["candidate_steps"] = candidate_steps
+    iteration_plan["iterations"] = iterations
+    planner_json["iteration_plan"] = iteration_plan
+
+    workflow_json = [dict(item) for item in (run.workflow_json or []) if isinstance(item, dict)]
+    for item in workflow_json:
+        stage = str(item.get("stage") or "")
+        details = dict(item.get("details") or {})
+        if stage == "collecting_evidence":
+            details["logs_present"] = True
+            item["details"] = details
+        elif stage == "assessing_evidence":
+            details["hard_evidence"] = hard
+            details["missing_evidence"] = missing
+            details["contradicting_evidence"] = contradicting
+            details["confidence_reason"] = evidence_assessment.get("confidence_reason") or details.get("confidence_reason") or ""
+            item["details"] = details
+        elif stage == "planning_next_step":
+            details["iteration_plan"] = iteration_plan
+            details["selected_next_tool"] = (candidate_steps[0] or {}).get("tool_name") if candidate_steps else "none"
+            item["details"] = details
+
+    run.evidence_bundle_json = evidence_bundle_json
+    run.planner_json = planner_json
+    run.workflow_json = workflow_json
+    run.missing_evidence_json = missing
+    run.contradicting_evidence_json = contradicting
+    run.current_stage = "verifying"
+    run.save(
+        update_fields=[
+            "evidence_bundle_json",
+            "planner_json",
+            "workflow_json",
+            "missing_evidence_json",
+            "contradicting_evidence_json",
+            "current_stage",
+            "updated_at",
+        ]
+    )
+
+    bundle, _created = EvidenceBundle.objects.get_or_create(
+        investigation_run=run,
+        defaults={
+            "incident": incident,
+            "data_category": "evidence_memory",
+            "primary_store": "postgres",
+            "archive_store": "object_storage",
+        },
+    )
+    bundle.evidence_summary_json = {
+        **(bundle.evidence_summary_json or {}),
+        "latest_execution_type": execution_type,
+        "post_command_log_hit_count": hit_count,
+    }
+    bundle.save(update_fields=["evidence_summary_json", "updated_at"])
+    EvidenceSnapshot.objects.create(
+        evidence_bundle=bundle,
+        investigation_run=run,
+        stage="verifying",
+        title="Post-command evidence merged",
+        summary="Command-output logs were merged into the investigation evidence bundle.",
+        planner_json=planner_json,
+        evidence_bundle_json=evidence_bundle_json,
+        missing_evidence_json=missing,
+        contradicting_evidence_json=contradicting,
+        confidence_score=float(run.confidence_score or 0.0),
+        metadata_json={"execution_type": execution_type, "target_host": target_host, "service_name": service_name},
+    )
+
+
 def _structured_evidence_from_context(
     context: Optional[Dict[str, Any]],
     *,
@@ -2669,10 +2879,9 @@ def _elasticsearch_identity_clauses(
                 _append_exact_match_clause(clauses, "log_file_path", log_source.file_path)
                 _append_exact_match_clause(clauses, "log.file.path", log_source.file_path)
 
-    is_demo_target = normalized_target_host.startswith("app-") or normalized_service_name.startswith("app-")
-    if is_demo_target and normalized_target_host:
-        clauses.append({"wildcard": {"log.file.path.keyword": f"*{normalized_target_host}.log"}})
-        clauses.append({"match_phrase": {"log.file.path": f"{normalized_target_host}.log"}})
+    # No hardcoded path fallback here. The correct log.file.path is registered per-app
+    # in TargetLogSource.file_path during onboarding and read above via target.log_sources.
+    # Adding path guesses here would generate incorrect clauses for real production apps.
 
     deduped: List[Dict[str, Any]] = []
     seen = set()
@@ -6642,6 +6851,14 @@ def ingest_alert_view(request: HttpRequest):
         command=diagnostic_command,
         agent_success=success,
     )
+    _merge_command_output_into_investigation_run(
+        incident=incident,
+        target_host=target_host,
+        service_name=str(context.get("service_name") or target_host or ""),
+        command_output=command_output,
+        analysis_sections=analysis_sections,
+        execution_type="diagnostic",
+    )
     _store_cached_state_decision(
         state_fingerprint,
         {
@@ -7070,6 +7287,14 @@ def execute_command_view(request: HttpRequest):
             if incident_key:
                 incident = Incident.objects.filter(incident_key=incident_key).first()
                 if incident:
+                    _merge_command_output_into_investigation_run(
+                        incident=incident,
+                        target_host=target_host,
+                        service_name=service_name,
+                        command_output=command_output,
+                        analysis_sections=analysis_sections,
+                        execution_type=execution_type,
+                    )
                     incident.status = "investigating"
                     incident.summary = incident.summary or original_question
                     incident.save(update_fields=["status", "summary", "updated_at"])

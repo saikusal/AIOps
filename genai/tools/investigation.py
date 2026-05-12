@@ -719,6 +719,25 @@ def _extract_log_messages(logs: Dict[str, Any]) -> List[str]:
     return messages
 
 
+def _extract_log_hit_count(logs: Dict[str, Any]) -> int:
+    if not isinstance(logs, dict) or not logs:
+        return 0
+    direct_count = logs.get("count")
+    if direct_count is not None:
+        try:
+            return int(direct_count)
+        except (TypeError, ValueError):
+            pass
+    total = ((logs.get("hits") or {}).get("total") or {})
+    if isinstance(total, dict):
+        try:
+            return int(total.get("value") or 0)
+        except (TypeError, ValueError):
+            return 0
+    hits = ((logs.get("hits") or {}).get("hits") or [])
+    return len(hits) if isinstance(hits, list) else 0
+
+
 def _trace_has_error(traces: Dict[str, Any], *, db_related: bool = False) -> bool:
     for trace in (traces or {}).get("data") or []:
         if not isinstance(trace, dict):
@@ -833,6 +852,12 @@ def _build_evidence_assessment(
 
     if linked_recommendation and not _recommendation_is_fresh(linked_recommendation):
         contradicting_evidence.append("A stale cached recommendation was ignored because it was older than the freshness window.")
+
+    # Absence of errors in collected data is a contradicting signal (mirrors views.py logic)
+    if logs and not log_messages:
+        contradicting_evidence.append("Logs were collected but contained no error messages for this service.")
+    if traces and not generic_trace_error and not db_trace_error:
+        contradicting_evidence.append("Traces were collected but show no service or dependency failures.")
 
     safe_action = "observe"
     confidence_reason = "No hard failure evidence is present; treat the signal as informational until confirmed."
@@ -980,11 +1005,15 @@ def build_investigation_context(
     )
 
     if target_host or service_name:
+        # Fetch recent scoped logs without assuming a particular severity token.
+        # Error extraction happens after retrieval, so this works across different
+        # log formats such as RuntimeError, stack traces, status=503, db_write_failed,
+        # structured levels, or vendor-specific schemas.
         logs = (
             mcp_orchestrator.call_tool(
                 "logs.search",
-                {"target_host": target_host, "query": question or service_name},
-            ) if mcp_orchestrator else fetch_elasticsearch_logs(target_host, question or service_name)
+                {"target_host": target_host, "query": "", "service_name": service_name},
+            ) if mcp_orchestrator else fetch_elasticsearch_logs(target_host, "", service_name=service_name)
         )
         traces = (
             mcp_orchestrator.call_tool(

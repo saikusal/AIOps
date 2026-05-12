@@ -15,7 +15,11 @@ from django.test import Client, RequestFactory, SimpleTestCase, TestCase
 from genai.code_context_extractors import extract_python_artifacts
 from genai.code_context_ingestion import auto_register_target_code_context, ensure_builtin_repository_indexes, sync_repository_index
 from genai.code_context_services import find_service_owner, read_code_snippet, route_to_handler, search_code_context, span_to_symbol
-from genai.tools.investigation import _assess_code_context_quality, _infer_runtime_entities_from_question
+from genai.tools.investigation import (
+    _assess_code_context_quality,
+    _infer_runtime_entities_from_question,
+    build_investigation_context,
+)
 from genai.tools.router import deterministic_route
 from genai.archive_service import verify_archive_manifest
 from genai.mcp_client import MCPClient
@@ -95,6 +99,7 @@ from genai.views import (
     _fetch_metrics_query,
     _fetch_jaeger_traces,
     _fleet_install_prereqs,
+    _merge_command_output_into_investigation_run,
     _mark_target_config_apply_requested,
     _serialize_target,
     _target_generated_config_payload,
@@ -508,7 +513,7 @@ class IntegrationBindingResolutionTests(TestCase):
                 return StubLogsAdapter(integration_model)
             return StubTracesAdapter(integration_model)
 
-        with patch("genai.views.IntegrationRegistry.get_adapter", side_effect=_resolve_adapter), patch("genai.views.ELASTICSEARCH_URL", ""), patch("genai.views.TRACE_BACKEND", "tempo"):
+        with patch("genai.views.IntegrationRegistry.get_adapter", side_effect=_resolve_adapter), patch("genai.views.ELASTICSEARCH_URL", ""), patch("genai.views.JAEGER_URL", ""):
             logs_payload = _fetch_elasticsearch_logs(
                 "orders-prod-01",
                 "timeout",
@@ -641,6 +646,78 @@ class IncidentAutoInvestigationTests(TestCase):
         self.assertEqual(finalized[-2]["stage"], "verifying")
         self.assertEqual(finalized[-1]["stage"], "post_check_validator")
         self.assertEqual(finalized[-1]["details"]["confidence_assessment"]["level"], "medium")
+
+    def test_open_search_hit_totals_count_as_logs_present(self):
+        context = {
+            "service_name": "orders-api",
+            "target_host": "orders-prod-01",
+            "metrics": {"latency_p95_seconds": {"query": "demo"}},
+            "elasticsearch": {
+                "hits": {
+                    "total": {"value": 2, "relation": "eq"},
+                    "hits": [
+                        {"_source": {"message": "RuntimeError: boom"}},
+                        {"_source": {"message": "db_write_failed"}},
+                    ],
+                }
+            },
+            "jaeger": {"data": [{"spans": [{"operationName": "checkout"}]}]},
+            "dependency_graph": {"depends_on": ["postgres"], "blast_radius": ["gateway"]},
+            "code_context": {"owner": {"repository": "orders-repo"}},
+            "evidence_assessment": {"hard_evidence": ["runtime failure"]},
+        }
+
+        evidence_bundle = normalize_investigation_evidence(context)
+        workflow = build_investigation_workflow(
+            question="why is orders failing",
+            scope={"service": "orders-api"},
+            context=context,
+        )
+
+        self.assertEqual(evidence_bundle["logs"]["hit_count"], 2)
+        self.assertTrue(workflow[1]["details"]["logs_present"])
+
+    def test_build_investigation_context_fetches_recent_scoped_logs_without_error_keyword(self):
+        log_queries = []
+
+        def _fake_fetch_logs(target_host, query_text, *, service_name=None):
+            log_queries.append(query_text)
+            return {
+                "hits": {
+                    "total": {"value": 1, "relation": "eq"},
+                    "hits": [
+                        {
+                            "_source": {
+                                "message": "RuntimeError: Insufficient inventory for SKU-100: available=0, requested=1"
+                            }
+                        }
+                    ],
+                }
+            }
+
+        context = build_investigation_context(
+            "Auto-investigate incident=inc-1 application=customer-portal service=app-inventory",
+            {"application": "customer-portal", "service": "app-inventory", "incident": "inc-1"},
+            incident_model=Incident,
+            build_application_overview=lambda **_: {
+                "results": [
+                    {
+                        "application": "customer-portal",
+                        "components": [{"service": "app-inventory", "target_host": "app-inventory"}],
+                    }
+                ]
+            },
+            incident_timeline_payload=lambda _incident: {},
+            get_dependency_context=lambda _service: {"depends_on": ["db"], "blast_radius": ["app-inventory", "db"]},
+            application_graph_payload=lambda _application: {"nodes": []},
+            fetch_elasticsearch_logs=_fake_fetch_logs,
+            fetch_jaeger_traces=lambda _service: {},
+            fetch_metrics_query=lambda _query: {},
+            mcp_orchestrator=None,
+        )
+
+        self.assertEqual(log_queries, [""])
+        self.assertIn("RuntimeError", context["elasticsearch"]["hits"]["hits"][0]["_source"]["message"])
 
     def test_code_context_quality_flags_stale_or_weak_mappings(self):
         assessment = _assess_code_context_quality(
@@ -1653,6 +1730,102 @@ class InvestigationDurabilityTests(TestCase):
         self.assertEqual(latest_snapshot.confidence_score, 0.64)
         self.assertEqual(latest_snapshot.missing_evidence_json, ["confirm downstream dependency state"])
         self.assertEqual(latest_snapshot.contradicting_evidence_json, ["ingress metrics remained healthy"])
+
+    def test_command_output_merges_back_into_latest_investigation_run(self):
+        incident = Incident.objects.create(
+            application="customer-portal",
+            title="Inventory 503s",
+            status="open",
+            severity="critical",
+            primary_service="app-inventory",
+            target_host="app-inventory",
+            summary="Inventory writes are failing.",
+        )
+        run = InvestigationRun.objects.create(
+            incident=incident,
+            question="Investigate inventory incident",
+            application="customer-portal",
+            service="app-inventory",
+            target_host="app-inventory",
+            route="investigation",
+            status="resolved",
+            current_stage="resolved",
+            planner_json={
+                "iteration_plan": {
+                    "candidate_steps": [
+                        {"tool_name": "logs.search", "reason": "Relevant log evidence is missing or empty for the current scope."},
+                        {"tool_name": "topology.get_dependency_context", "reason": "Dependency context should be re-checked."},
+                    ],
+                    "iterations": [
+                        {"iteration": 1, "selected_tool": "logs.search", "status": "planned"},
+                        {"iteration": 2, "selected_tool": "topology.get_dependency_context", "status": "planned"},
+                    ],
+                }
+            },
+            workflow_json=[
+                {"stage": "collecting_evidence", "details": {"logs_present": False, "metrics_present": True, "traces_present": True}},
+                {"stage": "assessing_evidence", "details": {"hard_evidence": [], "missing_evidence": ["No logs found"], "contradicting_evidence": []}},
+                {"stage": "planning_next_step", "details": {"selected_next_tool": "logs.search", "iteration_plan": {"candidate_steps": [{"tool_name": "logs.search"}]}}},
+            ],
+            evidence_bundle_json={
+                "logs": {"ok": False, "hit_count": 0},
+                "evidence_assessment": {
+                    "hard_evidence": [],
+                    "missing_evidence": ["No logs found"],
+                    "contradicting_evidence": [],
+                    "confidence_assessment": {
+                        "supporting_evidence_count": 0,
+                        "hard_evidence_count": 0,
+                        "missing_evidence_count": 1,
+                        "contradicting_evidence_count": 0,
+                        "summary": "",
+                    },
+                    "contradiction_assessment": {
+                        "severity": "none",
+                        "count": 0,
+                        "blocks_dependency_claim": False,
+                        "summary": "",
+                    },
+                    "evidence_gap_assessment": {
+                        "status": "low",
+                        "count": 1,
+                        "summary": "",
+                    },
+                },
+            },
+            missing_evidence_json=["No logs found"],
+            contradicting_evidence_json=[],
+        )
+        bundle = EvidenceBundle.objects.create(
+            investigation_run=run,
+            incident=incident,
+            data_category="evidence_memory",
+            primary_store="postgres",
+            archive_store="object_storage",
+        )
+
+        _merge_command_output_into_investigation_run(
+            incident=incident,
+            target_host="app-inventory",
+            service_name="app-inventory",
+            command_output='Traceback (most recent call last):\nRuntimeError: Insufficient inventory for SKU-100: available=0, requested=1\nstatus=503',
+            analysis_sections={"evidence": ["RuntimeError: Insufficient inventory for SKU-100", "status=503"]},
+            execution_type="diagnostic",
+        )
+
+        run.refresh_from_db()
+        bundle.refresh_from_db()
+        self.assertEqual(run.current_stage, "verifying")
+        self.assertTrue(run.evidence_bundle_json["logs"]["ok"])
+        self.assertGreaterEqual(run.evidence_bundle_json["logs"]["hit_count"], 1)
+        self.assertTrue(run.workflow_json[0]["details"]["logs_present"])
+        self.assertEqual(run.workflow_json[2]["details"]["selected_next_tool"], "topology.get_dependency_context")
+        self.assertFalse(any(step.get("tool_name") == "logs.search" for step in run.planner_json["iteration_plan"]["candidate_steps"]))
+        self.assertFalse(any(step.get("selected_tool") == "logs.search" for step in run.planner_json["iteration_plan"]["iterations"]))
+        self.assertIn("RuntimeError: Insufficient inventory for SKU-100", run.evidence_bundle_json["evidence_assessment"]["hard_evidence"])
+        latest_snapshot = EvidenceSnapshot.objects.filter(investigation_run=run).order_by("-created_at").first()
+        self.assertEqual(latest_snapshot.stage, "verifying")
+        self.assertEqual(bundle.evidence_summary_json["post_command_log_hit_count"], run.evidence_bundle_json["logs"]["post_command_hit_count"])
 
     def test_investigation_detail_view_surfaces_bundle_snapshot_and_transcript_refs(self):
         retention = DataRetentionPolicy.objects.create(
