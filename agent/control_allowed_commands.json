@@ -1,5 +1,13 @@
 {
   "allowed_prefixes": [
+    ["docker", "ps", "-a"],
+    ["docker", "inspect", "aiops-db"],
+    ["docker", "inspect", "aiops-frontend"],
+    ["docker", "inspect", "aiops-gateway"],
+    ["docker", "inspect", "aiops-app-orders"],
+    ["docker", "inspect", "aiops-app-inventory"],
+    ["docker", "inspect", "aiops-app-billing"],
+    ["docker", "inspect", "aiops-toxiproxy"],
     ["docker", "restart", "aiops-db"],
     ["docker", "restart", "aiops-frontend"],
     ["docker", "restart", "aiops-gateway"],

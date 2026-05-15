@@ -23,9 +23,13 @@ spec:
           image: "{{ .Values.images.web.repository }}:{{ .Values.images.web.tag }}"
           imagePullPolicy: {{ .Values.images.web.pullPolicy }}
           command:
-            - /bin/sh
-            - -c
-            - python3 manage.py run_prediction_loop --interval {{ .Values.predictor.intervalSeconds }}
+            - sh
+            - /code/entrypoint.sh
+            - python3
+            - manage.py
+            - run_prediction_loop
+            - --interval
+            - "{{ .Values.predictor.intervalSeconds }}"
           envFrom:
             - configMapRef:
                 name: {{ include "opsmitra.fullname" . }}-env

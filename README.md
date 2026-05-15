@@ -1,346 +1,256 @@
-# AIOps Platform
+# OpsMitra
 
-> **Air-gapped, self-hosted, code-aware incident operations.**
+**The self-hosted AI incident control plane that runs entirely inside your network.**
 
-This project is an AIOps control plane for teams that want AI-assisted incident investigation and remediation without sending telemetry or source context to external SaaS platforms.
+OpsMitra traces live incidents from runtime telemetry all the way into your source code — handler, route, span, and recent commit — then executes governed remediation through a policy-gated execution pipeline. No cloud AI. No data egress. Ever.
 
-The product pitch is simple:
+Built for teams in manufacturing, finance, defence, healthcare, and regulated enterprise where SaaS AIOps is not an option.
 
-- **Self-hosted**: runs inside your environment on your own infrastructure.
-- **Air-gapped AI**: inference is served locally through `vLLM`.
-- **Code-context aware**: incidents are grounded not only in metrics, logs, and traces, but also in repository ownership, route handlers, spans, symbols, recent commits, and source snippets.
+---
 
-## What Makes This Different
+## Why OpsMitra
 
-Most observability copilots can summarize dashboards. This platform is aimed at the next step:
+Most observability copilots stop at summarizing dashboards. OpsMitra is built for the harder operational loop:
 
-1. ingest alerts and correlate incidents,
-2. retrieve telemetry evidence,
-3. map the failure back to code,
-4. suggest the safest validation or remediation path,
-5. optionally execute allowlisted actions through controlled agents.
+1. **Ingest** alerts from any Alertmanager-compatible source
+2. **Correlate** related events into incidents with full lifecycle tracking
+3. **Investigate** with multi-step streaming RCA — evidence collected, hypotheses scored, code path traced in real time
+4. **Explain** in plain language, grounded in handler code, spans, commits, and blast radius
+5. **Remediate** through `EGAP` — six gates between intent and execution
+6. **Verify** the outcome and store the investigation as durable, audited evidence
 
-The implemented stack already supports that story:
+Three capabilities the market does not combine in one product:
 
-- local LLM inference in [genai/llm_backend.py](./genai/llm_backend.py)
-- MCP-style investigation tooling in [genai/mcp_orchestrator.py](./genai/mcp_orchestrator.py)
-- local code indexing and enrichment in [genai/code_context_ingestion.py](./genai/code_context_ingestion.py)
-- runtime-to-code lookups in [genai/code_context_services.py](./genai/code_context_services.py)
-- code-aware assistant and graph UX in [frontend/src/pages/AssistantPage.tsx](./frontend/src/pages/AssistantPage.tsx) and [frontend/src/pages/CodeContextPage.tsx](./frontend/src/pages/CodeContextPage.tsx)
+| | OpsMitra | SaaS AIOps |
+|---|---|---|
+| Air-gapped, no data egress | ✓ | ✗ |
+| Code-aware RCA (handler/route/span/commit) | ✓ | ✗ |
+| Policy-gated, audited remediation | ✓ | partial |
 
-## Core Capabilities
+---
 
-| Capability | What it does |
-|---|---|
-| **Incident correlation** | Groups related alerts into incidents with timeline, severity, blast radius, and investigation context. |
-| **AI investigation** | Pulls metrics, logs, traces, runbooks, topology, and code context into a single grounded answer. |
-| **Code-context awareness** | Resolves service ownership, route handlers, spans, related symbols, recent deployments, and recent commits. |
-| **Source evidence retrieval** | Reads local source snippets and traceback-linked files for prompt grounding. |
-| **Topology + blast radius** | Combines application dependency graph context with code blast radius and runtime impact. |
-| **Guided remediation** | Produces typed actions and approval-aware remediation plans, then delegates execution to agents. |
-| **Prediction + risk** | Tracks service risk scores and short-horizon incident probability. |
-| **Runbook grounding** | Searches uploaded operational documents through `doc_search/`. |
+## Core Protocols
 
-## Architecture Summary
+OpsMitra ships four architectural primitives that no other platform combines:
 
-```text
-┌──────────────────────────────── CUSTOMER NETWORK ────────────────────────────┐
-│                                                                              │
-│  Control Plane Host                                                          │
-│       ├── React UI (frontend/, :8089)                                        │
-│       ├── Django control plane (genai + doc_search, :8000)                   │
-│       ├── PostgreSQL + Redis                                                 │
-│       ├── Prometheus / Alertmanager / Jaeger / Elasticsearch                 │
-│       ├── vLLM + Qwen (local inference, no telemetry egress)                 │
-│       ├── control-agent / db-agent                                           │
-│       └── Code-context engine                                                │
-│           ├── local repository indexes                                       │
-│           ├── service -> repo ownership                                      │
-│           ├── route -> handler mapping                                       │
-│           ├── span -> symbol mapping                                         │
-│           └── recent commit / snippet enrichment                             │
-│                                                                              │
-│  Monitored Linux Servers                                                     │
-│       ├── aiops-agent                                                        │
-│       ├── OpenTelemetry Collector                                            │
-│       ├── node_exporter                                                      │
-│       ├── log shipping / discovery                                           │
-│       └── optional Docker runtime                                            │
-│           └── applications and containers                                    │
-│                                                                              │
-└────────────────────────────── No external AI calls ──────────────────────────┘
-```
+- **EGAP** — Execution &amp; Governance Action Protocol. Every action passes through typed intent → policy → blast radius → approval → execute → verify.
+- **MCP** — Model Context Protocol. 18 structured tools that give the local LLM typed access to incidents, topology, metrics, logs, traces, code ownership, deployments, and blast radius.
+- **AIP** — Alert Ingest Pipeline. Normalizes Alertmanager payloads, dedupes by lifecycle key, correlates alerts to incidents without losing per-alert tracking.
+- **CCG** — Code Context Graph. Maps services to repos, routes to handlers, trace spans to source symbols, and deployments to recent commits.
 
-For the full write-up, see [ARCHITECTURE.md](./ARCHITECTURE.md).
+---
 
 ## Repository Layout
 
-```text
-aiops_platform/     Django project settings and wiring
-genai/              incidents, investigation flows, MCP services, remediation logic
-doc_search/         document ingestion and retrieval
-frontend/           React/Vite product UI
-opsmitra-site/      Next.js marketing site
-agent/              allowlisted remote execution agents
-demo/               demo application, dependencies, and chaos tooling
-Observability/      Grafana dashboards and provisioning
-diagrams/           Mermaid and draw.io architecture sources
-docker-compose.yml  stack orchestration
+```
+.
+├── aiops_platform/       # Django settings, routing, ASGI
+├── genai/                # Core backend: EGAP, MCP, alert pipeline, investigations, policy
+│   ├── egap_protocol.py
+│   ├── policy_engine.py
+│   ├── alert_pipeline.py
+│   ├── investigation_streams.py
+│   ├── code_context_*.py
+│   ├── mcp_*.py
+│   └── integrations/     # Provider adapters
+├── frontend/             # React 19 operator console (Vite)
+├── opsmitra-site/        # Public marketing site (Next.js 15)
+├── agent/                # Fleet agent for Linux/Kubernetes/OT enrollment
+├── predictor/            # Prediction engine deployment
+├── deploy/               # Helm chart and Kubernetes assets
+├── doc_search/           # Runbook and documentation indexing
+├── docker-compose.yml    # Single-node deployment
+└── manage.py
 ```
 
-## Key Runtime Areas
+---
 
-### 1. Self-Hosted LLM Inference
+## Architecture
 
-All model calls are routed through `vLLM` using the OpenAI-compatible `/v1/chat/completions` interface.
-
-- local endpoint configured by `VLLM_API_URL`
-- local model name configured by `VLLM_MODEL_NAME`
-- current backend implementation lives in [genai/llm_backend.py](./genai/llm_backend.py)
-
-The main positioning is local reasoning on local data. No production telemetry needs to leave the environment to generate investigations, explanations, or remediation advice.
-
-### 2. Code-Context Engine
-
-The code-context layer is a first-class part of the product story, not a side feature.
-
-It indexes local repositories into Django models such as:
-
-- `RepositoryIndex`
-- `ServiceRepositoryBinding`
-- `RouteBinding`
-- `SpanBinding`
-- `DeploymentBinding`
-- `CodeChangeRecord`
-- `SymbolRelation`
-
-That enables the platform to answer questions like:
-
-- Which repository owns `app-orders`?
-- Which handler likely serves `/health` or `/orders/create`?
-- Which symbol matches a failing trace span?
-- What changed recently on the suspected failure path?
-- Which source files or related symbols are in the blast radius?
-
-The implementation is in:
-
-- [genai/code_context_ingestion.py](./genai/code_context_ingestion.py)
-- [genai/code_context_services.py](./genai/code_context_services.py)
-- [genai/mcp_services.py](./genai/mcp_services.py)
-- [genai/mcp_orchestrator.py](./genai/mcp_orchestrator.py)
-
-### 3. Investigation Orchestration
-
-Investigation requests are routed through MCP-style internal tools that gather evidence from:
-
-- incidents
-- application topology
-- metrics
-- logs
-- traces
-- runbooks
-- traceback-linked source
-- code-context services
-
-This allows the assistant to reason over curated evidence rather than raw unrestricted access.
-
-### 4. Controlled Execution
-
-Execution is separated from reasoning.
-
-- the assistant proposes typed actions
-- the policy layer decides what is allowed or requires approval
-- `control-agent` and `db-agent` execute only allowlisted commands
-
-Relevant code:
-
-- [genai/policy_engine.py](./genai/policy_engine.py)
-- [genai/execution_safety.py](./genai/execution_safety.py)
-- [genai/typed_actions.py](./genai/typed_actions.py)
-- [agent/agent_server.py](./agent/agent_server.py)
-
-## Deployment
-
-### Deployment Model
-
-The current product shape is:
-
-- **Today**: self-host the control plane on a customer Linux server using Docker Compose.
-- **Today**: onboard customer Linux servers by installing collectors and an AIOps agent bundle over SSH.
-- **Implemented**: package the control plane for Kubernetes under [deploy/helm/opsmitra](./deploy/helm/opsmitra).
-- **Implemented**: first-class Kubernetes onboarding for monitored customer clusters through a generated cluster-agent manifest and chart in [deploy/helm/opsmitra-cluster-agent](./deploy/helm/opsmitra-cluster-agent).
-
-This means the product is already self-hosted and centralized, but the monitored estate can be much larger than the single host that runs the control plane.
-
-For a step-by-step Kubernetes operator guide, see [deploy/KUBERNETES_DEPLOYMENT.md](./deploy/KUBERNETES_DEPLOYMENT.md).
-
-### Prerequisites
-
-- Docker + Docker Compose
-- NVIDIA GPU for local `vLLM` serving
-- `nvidia-container-toolkit` on the host
-
-### 1. Start `vLLM`
-
-Run the local model server separately from Compose:
-
-```bash
-docker run -d \
-  --name vllm-qwen \
-  --gpus all \
-  --restart unless-stopped \
-  -p 8001:8000 \
-  -v ~/.cache/huggingface:/root/.cache/huggingface \
-  vllm/vllm-openai:latest \
-  --model Qwen/Qwen2.5-7B-Instruct-AWQ \
-  --quantization awq_marlin \
-  --max-model-len 16384 \
-  --gpu-memory-utilization 0.90 \
-  --served-model-name qwen32b \
-  --trust-remote-code
+```
+┌─────────────────────┐    ┌─────────────────────┐
+│  Signals            │ →  │  Runtime Context    │
+│  Logs · Metrics ·   │    │  Topology ·         │
+│  Traces · Alerts ·  │    │  Incidents ·        │
+│  OT                 │    │  Blast Radius       │
+└─────────────────────┘    └─────────────────────┘
+           ↓                          ↓
+┌─────────────────────┐    ┌─────────────────────┐
+│  Code Context (CCG) │ →  │  OpsMitra Reasoning │
+│  Repos · Routes ·   │    │  RCA · Risk ·       │
+│  Spans · Commits    │    │  Runbooks · Plans   │
+└─────────────────────┘    └─────────────────────┘
+           ↓                          ↓
+┌─────────────────────┐    ┌─────────────────────┐
+│  Governance (EGAP)  │ →  │  Outcome            │
+│  Policies ·         │    │  Safe Remediation · │
+│  Approvals · Audit  │    │  Verification ·     │
+│  · Rollback         │    │  Fleet              │
+└─────────────────────┘    └─────────────────────┘
 ```
 
-### 2. Configure Environment
+Every layer runs on your infrastructure. The control plane never phones home.
+
+---
+
+## Quick Start
+
+### Docker Compose (single-node trial)
 
 ```bash
+git clone <your-repo-url> opsmitra
+cd opsmitra
+
+# Configure environment
 cp .env.example .env
+# Edit .env — at minimum set:
+#   SECRET_KEY, AGENT_SECRET_TOKEN, AIOPS_INTENT_SIGNING_SECRET
+#   VLLM_BASE_URL (your local vLLM endpoint)
+
+# Start the stack
+docker compose up -d
+
+# Stack includes:
+#   - web (Django backend, port 8000)
+#   - frontend-app (React UI, port 5173)
+#   - predictor (prediction engine)
+#   - db (Postgres), redis, otel-collector
+#   - prometheus, vmalert, alertmanager
+#   - jaeger, elasticsearch, grafana
+#   - db-agent, control-agent (fleet agents)
 ```
 
-Minimum values to review:
+Open `http://localhost:5173`. Default tenant and admin are bootstrapped via the `db-init` service.
+
+### Kubernetes (Helm)
 
 ```bash
-POSTGRES_PASSWORD=change-me
-AGENT_SECRET_TOKEN=replace-with-a-long-random-secret
-VLLM_API_URL=http://172.17.0.1:8001/v1/chat/completions
-VLLM_MODEL_NAME=qwen32b
-AIOPS_CODE_CONTEXT_ENABLED=true
-AIOPS_CODE_CONTEXT_PROVIDER=internal
-AIOPS_CODE_CONTEXT_AUTO_ROOTS=/source
+cd deploy/helm
+
+# Review and edit values
+cp values.yaml my-values.yaml
+# Set: ingress host, secret references, vLLM endpoint,
+#      Postgres/Redis connection details, resource requests
+
+helm install opsmitra . -f my-values.yaml --namespace opsmitra --create-namespace
 ```
 
-### 3. Start The Stack
+See `deploy/KUBERNETES_DEPLOYMENT.md` for production guidance.
 
-```bash
-docker compose up -d --build
-```
+---
 
-### 4. Optional: Sync Code Context
+## Operator Capabilities
 
-If you have active repository indexes or mounted source roots, sync the local code-context database:
-
-```bash
-docker compose exec web python manage.py sync_code_context
-```
-
-For a single named repository:
-
-```bash
-docker compose exec web python manage.py sync_code_context --repository customer-portal-demo
-```
-
-## Fleet Onboarding
-
-The implemented onboarding path is Linux-first.
-
-- the control plane generates an enrollment token and Linux bootstrap command
-- the bootstrap installs `OpenTelemetry Collector`, `node_exporter`, and the AIOps heartbeat/service bundle
-- the target enrolls back into the control plane and starts periodic heartbeat reporting
-- discovered target metadata is used to enrich fleet inventory and code-context registration
-
-Relevant backend endpoints and logic:
-
-- [genai/urls.py](./genai/urls.py)
-- [genai/views.py](./genai/views.py)
-- [genai/models.py](./genai/models.py)
-
-## Docker Workloads On Linux Hosts
-
-If the customer application runs as Docker containers on Linux servers, the onboarding model still starts at the Linux host.
-
-- **Primary target**: the Linux server
-- **Runtime on that target**: Docker
-- **Workloads to discover**: containers, images, ports, health, and logs
-
-The current implementation supports:
-
-1. inspect the local Docker runtime from the installed agent
-2. enumerate running containers, image names, ports, labels, and health state
-3. publish those containers as `discovered_services`
-4. map container and service metadata into topology and code-context registration
-
-That keeps the model simple:
-
-- Docker on Linux is treated as a Linux target with an additional runtime discovery layer
-- Kubernetes is treated separately as a cluster-level onboarding path, using a cluster agent instead of SSH
-
-## Main URLs
-
-| Surface | URL |
+| Surface | What it does |
 |---|---|
-| React product UI | `http://localhost:8089` |
-| Django backend | `http://localhost:8000` |
-| Assistant | `http://localhost:8089/genai` |
-| Code Context Graph | `http://localhost:8089/code-context` |
-| Alert dashboard | `http://localhost:8000/genai/alerts/dashboard/` |
-| Incident dashboard | `http://localhost:8000/genai/incidents/dashboard/` |
-| Demo app | `http://localhost:8088` |
-| Prometheus | `http://localhost:9090` |
-| Alertmanager | `http://localhost:9093` |
-| Grafana | `http://localhost:3000` |
-| Jaeger | `http://localhost:16686` |
+| **Alert Intelligence** | Suppression rules, maintenance windows, dedupe, correlation, noise stats |
+| **Incident Command** | Lifecycle tracking, timeline, generated runbooks, SLA acknowledgement, archive/restore |
+| **Streaming Investigations** | Multi-step RCA with live evidence collection and hypothesis scoring |
+| **Code Context Graph** | Repo · route · handler · span · symbol mapping; recent-commit correlation |
+| **Change Risk Analysis** | Pre-execution blast radius estimation maps downstream owners |
+| **Signal Analytics** | Service × time-bucket heatmaps, correlated timelines with brush zoom |
+| **Prediction Engine** | Forward-looking risk and saturation signals |
+| **Safe Remediation** | EGAP-gated execution with approval, break-glass, rollback, post-verification |
+| **Fleet Management** | Linux server, K8s cluster, and OT machine enrollment |
+| **Audit Lifecycle** | Tenant audit events, append-only incident timeline, data retention policies |
 
-## Chaos And Demo
+---
 
-The demo stack is designed to produce realistic failure propagation across shared dependencies.
+## Integrations
 
-Useful scripts in [demo/tools](./demo/tools):
+**Observability** — Prometheus, VictoriaMetrics, Grafana, Splunk, Elasticsearch, OpenSearch, Loki, Datadog, Dynatrace, New Relic, Jaeger, Tempo, InfluxDB, PagerDuty, OpsGenie, Alertmanager.
 
-- `run-demo-traffic.sh`
-- `cut-db-traffic.sh`
-- `set-db-latency.sh`
-- `stress-db-connections.sh`
-- `cut-gateway-traffic.sh`
-- `set-gateway-latency.sh`
-- `reset-db-proxy.sh`
-- `reset-gateway-proxy.sh`
+**ITSM, DevOps &amp; Notify** — ServiceNow, Jira, Slack, Microsoft Teams, GitHub, GitLab, Bitbucket, Jenkins, Argo CD, Flux CD, Kubernetes, Nagios.
 
-See [CHAOS_RUNBOOK.md](./CHAOS_RUNBOOK.md) for scenarios.
+**Industrial / OT** — OPC-UA, MTConnect, Modbus TCP, MQTT, OSIsoft PI, PROFINET, DNP3, EtherNet/IP.
 
-## Security Model
+**Cloud** — AWS CloudWatch, Azure Monitor, GCP Operations, AWS X-Ray, Azure Sentinel, GCP BigQuery, AWS OpenSearch, Azure Log Analytics.
 
-| Concern | Approach |
+Incident writeback is conditional — only configured integrations are called. If only ServiceNow is configured, it will not try to create PagerDuty or Jira tickets.
+
+---
+
+## Security &amp; Governance
+
+- **Multi-tenant RBAC** with six roles, tenant audit events at the Django model/signal layer
+- **EGAP policy packs** with environment-aware controls and per-action allowlists
+- **Approval tokens** with required approver identity and reason
+- **Break-glass** enforced server-side, reason-required, audit-logged
+- **Rollback snapshots** captured before SQL mutations and supported infrastructure changes
+- **Post-action verification** holds remediation in `verification_pending` until confirmed
+- **Append-only audit trail** for tenant, integration, execution, fleet, and operator actions
+
+See `ARCHITECTURE.md` for design details.
+
+---
+
+## Stack
+
+| Layer | Technology |
 |---|---|
-| **AI data egress** | Model inference is served locally through `vLLM`. |
-| **Tool access** | The assistant works through explicit internal MCP-style services rather than unrestricted external access. |
-| **Command execution** | Agents run allowlisted commands only. |
-| **Execution approval** | Higher-risk actions pass through policy and approval tokens. |
-| **Repository context** | Source code stays local; the code-context engine reads from indexed local paths. |
+| Backend | Django 5, Django REST Framework, Channels (ASGI) |
+| Database | PostgreSQL 16 |
+| Cache &amp; queues | Redis / Valkey |
+| AI inference | vLLM (BYOL — any vLLM-compatible model) |
+| Operator UI | React 19, Vite, TanStack Query, D3 |
+| Marketing site | Next.js 15, React 19, TypeScript |
+| Telemetry | OpenTelemetry Collector, Prometheus, VictoriaMetrics, Jaeger, Elasticsearch, Filebeat |
+| Deployment | Docker Compose, Helm chart |
 
-## Related Docs
+---
 
-- [ARCHITECTURE.md](./ARCHITECTURE.md)
-- [CHAOS_RUNBOOK.md](./CHAOS_RUNBOOK.md)
-- [MCP_PHASE_PLAN.md](./MCP_PHASE_PLAN.md)
-- [CODE_CONTEXT_ENGINE_PLAN.md](./CODE_CONTEXT_ENGINE_PLAN.md)
-- [CODE_INTELLIGENCE_FOR_INCIDENTS.md](./CODE_INTELLIGENCE_FOR_INCIDENTS.md)
-Kubernetes deployment assets now live under:
+## Configuration Highlights
 
-- [deploy/helm/opsmitra](./deploy/helm/opsmitra) for the control plane
-- [deploy/helm/opsmitra-cluster-agent](./deploy/helm/opsmitra-cluster-agent) for monitored customer clusters
-- [deploy/README.md](./deploy/README.md) for image build/push and capability notes
-
-To build and push the monitored-cluster agent image:
+Production-critical environment variables:
 
 ```bash
-./scripts/build_k8s_agent_image.sh your-registry/opsmitra-k8s-agent v0.1.0
-./scripts/push_k8s_agent_image.sh your-registry/opsmitra-k8s-agent v0.1.0
+SECRET_KEY=...                       # Django secret
+AGENT_SECRET_TOKEN=...               # Fleet agent enrollment
+MCP_INTERNAL_TOKEN=...               # MCP server auth
+AIOPS_INTENT_SIGNING_SECRET=...      # EGAP intent signing
+
+DATABASE_URL=postgres://...          # Managed Postgres recommended in prod
+REDIS_URL=redis://...                # Managed Redis or in-cluster
+
+VLLM_BASE_URL=http://vllm:8000       # Your local vLLM endpoint
+VLLM_MODEL=...                       # Model id
+
+DJANGO_ALLOWED_HOSTS=opsmitra.example.com
+CSRF_TRUSTED_ORIGINS=https://opsmitra.example.com
 ```
 
-Then set `AIOPS_K8S_AGENT_IMAGE_REPOSITORY` and `AIOPS_K8S_AGENT_IMAGE_TAG` on the control plane so generated cluster manifests resolve to your registry image.
+See `deploy/README.md` and `deploy/KUBERNETES_DEPLOYMENT.md` for full reference.
 
-Current Kubernetes scope:
+---
 
-- control plane on Kubernetes: implemented
-- monitored cluster enrollment, heartbeat, and workload discovery: implemented
-- Kubernetes diagnostic command execution through the cluster agent: implemented
-- Kubernetes rollout restart remediation through the cluster agent: implemented
+## Documentation
+
+| Document | Purpose |
+|---|---|
+| `ARCHITECTURE.md` | System design and component boundaries |
+| `CODE_CONTEXT_ENGINE_PLAN.md` | Code Context Graph design |
+| `AGENT_POLICY_AND_RUNTIME_DESIGN.md` | EGAP and agent runtime |
+| `INTEGRATIONS_AND_TELEMETRY_ADAPTERS_DESIGN.md` | Integration framework |
+| `DATA_MEMORY_LIFECYCLE_DESIGN.md` | Retention and lifecycle |
+| `CHAOS_RUNBOOK.md` | Failure-mode validation |
+| `deploy/KUBERNETES_DEPLOYMENT.md` | Helm install and upgrade |
+
+---
+
+## Positioning
+
+> OpsMitra is a self-hosted AI incident control plane that works **beside** existing observability and ITSM tools, turns alerts into evidence-grounded investigations, maps failures back to runtime and code context, and executes remediations only through explicit policy, approval, audit, and rollback boundaries.
+
+It is not a replacement for enterprise observability suites on day one. The strongest initial wedge is regulated or privacy-sensitive teams that want local AI-assisted incident investigation and controlled remediation without sending telemetry, logs, traces, code context, or remediation decisions to an external SaaS copilot.
+
+---
+
+## License
+
+Proprietary. All rights reserved.
+
+---
+
+## Contact
+
+For demos, pilots, and partnership inquiries: **hello@opsmitra.ai**

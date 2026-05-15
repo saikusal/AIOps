@@ -29,6 +29,29 @@ export type InvestigationToolCall = {
   error_detail?: string;
 };
 
+export type InvestigationLiveStep = {
+  step_key: string;
+  title: string;
+  status: "queued" | "running" | "completed" | "skipped" | string;
+  summary: string;
+  findings: string[];
+  inference: string;
+  tool_names: string[];
+  tool_call_count: number;
+  latest_activity_at?: string;
+  technical_details?: Record<string, unknown>;
+};
+
+export type InvestigationLiveSummary = {
+  active_step_key?: string;
+  current_title?: string;
+  current_summary?: string;
+  current_inference?: string;
+  completed_steps?: number;
+  total_steps?: number;
+  stream_state?: "live" | "final" | string;
+};
+
 export type InvestigationRunSummary = {
   run_id: string;
   status: string;
@@ -54,6 +77,9 @@ export type InvestigationRunSummary = {
   updated_at: string;
   completed_at?: string | null;
   tool_calls: InvestigationToolCall[];
+  live_steps?: InvestigationLiveStep[];
+  live_summary?: InvestigationLiveSummary;
+  stream_url?: string;
 };
 
 export type InvestigationRunDetail = InvestigationRunSummary & {
@@ -141,6 +167,58 @@ export type AlertRecommendation = {
   blast_radius?: string[];
   depends_on?: string[];
   predicted_risk_score?: number | null;
+  latest_investigation?: InvestigationProjection | null;
+};
+
+export type InvestigationProjection = {
+  alert_id?: string;
+  run_id?: string;
+  status?: string;
+  route?: string;
+  question?: string;
+  application?: string;
+  service?: string;
+  target_host?: string;
+  summary?: string;
+  incident_key?: string;
+  incident_title?: string;
+  current_stage?: string;
+  confidence_score?: number;
+  workflow?: WorkflowStage[];
+  evidence_bundle?: Record<string, unknown>;
+  evidence_summary?: Record<string, unknown>;
+  missing_evidence?: string[];
+  contradicting_evidence?: string[];
+  confidence_assessment?: Record<string, unknown>;
+  contradiction_assessment?: Record<string, unknown>;
+  evidence_gap_assessment?: Record<string, unknown>;
+  evidence_assessment?: Record<string, unknown>;
+  updated_at?: string;
+  decision_policy?: string;
+  confidence_reason?: string;
+  hard_evidence?: string[];
+  initial_ai_diagnosis?: string;
+  initial_ai_reasoning?: string;
+  post_command_ai_analysis?: string;
+  final_answer?: string;
+  analysis_sections?: AlertRecommendation["analysis_sections"];
+  diagnostic_command?: string;
+  command_output?: string;
+  target_type?: string;
+  execution_status?: string;
+  last_execution_at?: string;
+  should_execute?: boolean;
+  remediation_command?: string;
+  remediation_target_host?: string;
+  remediation_why?: string;
+  remediation_requires_approval?: boolean;
+  diagnostic_typed_action?: TypedAction;
+  remediation_typed_action?: TypedAction;
+  remediation_execution_status?: string;
+  remediation_last_execution_at?: string;
+  remediation_output?: string;
+  post_remediation_ai_analysis?: string;
+  agent_success?: boolean;
 };
 
 export type GraphNode = {
@@ -259,6 +337,7 @@ export type IntegrationConfig = {
     details_json?: Record<string, unknown>;
     checked_at?: string;
   };
+  capabilities?: string[];
   created_at?: string;
   updated_at?: string;
   exists?: boolean;
@@ -450,6 +529,7 @@ export type PredictionRow = {
 
 export type IncidentSummary = {
   incident_key: string;
+  incident_number?: string;
   application: string;
   title: string;
   status: string;
@@ -463,12 +543,34 @@ export type IncidentSummary = {
   updated_at: string;
   opened_at: string;
   resolved_at?: string | null;
+  is_deleted?: boolean;
+  deleted_at?: string | null;
   alerts: Array<{
     alert_name: string;
     status: string;
     target_host: string;
     service_name: string;
     last_seen_at: string;
+  }>;
+  related_incidents?: Array<{
+    incident_key: string;
+    incident_number?: string;
+    title: string;
+    score: number;
+    reasons: string[];
+    direction?: string;
+  }>;
+  external_tickets?: Array<{
+    ticket_id: string;
+    integration_type: string;
+    integration_name: string;
+    external_id: string;
+    external_key: string;
+    external_url: string;
+    status: string;
+    message: string;
+    created_at: string;
+    updated_at: string;
   }>;
   timeline_count: number;
   prediction?: {
@@ -501,8 +603,72 @@ export type IncidentSummary = {
   } | null;
 };
 
+export type AlertNoiseStats = {
+  window_minutes: number;
+  raw_notifications: number;
+  unique_lifecycles: number;
+  duplicate_notifications: number;
+  suppressed_lifecycles: number;
+  incidents_created_or_linked: number;
+  noise_reduction_ratio: number;
+};
+
+export type AlertSuppressionRule = {
+  rule_type: "suppression";
+  id: string;
+  name: string;
+  enabled: boolean;
+  alert_name: string;
+  service_name: string;
+  target_host: string;
+  environment: string;
+  reason: string;
+  expires_at?: string | null;
+  created_by_username?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type MaintenanceWindowRule = {
+  rule_type: "maintenance";
+  id: string;
+  name: string;
+  enabled: boolean;
+  service_name: string;
+  target_host: string;
+  environment: string;
+  reason: string;
+  starts_at: string;
+  ends_at: string;
+  created_by_username?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AlertNoiseRulesPayload = {
+  stats: AlertNoiseStats;
+  suppressions: AlertSuppressionRule[];
+  maintenance_windows: MaintenanceWindowRule[];
+};
+
+export type AlertNoiseRuleInput = {
+  rule_type: "suppression" | "maintenance";
+  name: string;
+  enabled?: boolean;
+  alert_name?: string;
+  service_name?: string;
+  target_host?: string;
+  environment?: string;
+  reason?: string;
+  expires_at?: string;
+  starts_at?: string;
+  ends_at?: string;
+};
+
 export type IncidentTimeline = IncidentSummary & {
   linked_recommendation?: AlertRecommendation | null;
+  latest_investigation?: InvestigationProjection | null;
+  deep_dive?: AlertRecommendation | null;
   latest_runbook?: RunbookResult & { created_at: string } | null;
   latest_narrative?: { narrative: string; created_at: string | null } | null;
   timeline: Array<{
@@ -600,6 +766,28 @@ function getCsrfToken(): string {
   return cookie ? decodeURIComponent(cookie.split("=")[1]) : "";
 }
 
+export type TenantMembership = {
+  membership_id: string;
+  tenant_id: string;
+  name: string;
+  slug: string;
+  domain: string;
+  role: string;
+  permissions: string[];
+  user?: {
+    id: number;
+    username: string;
+    email: string;
+    is_active: boolean;
+  };
+  is_active?: boolean;
+};
+
+export type TenantContextPayload = {
+  current: TenantMembership;
+  tenants: TenantMembership[];
+};
+
 async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url, {
     credentials: "include",
@@ -629,9 +817,93 @@ async function fetchJson<T>(url: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+export async function fetchCurrentTenant(): Promise<TenantContextPayload> {
+  return fetchJson<TenantContextPayload>("/genai/tenants/current/");
+}
+
+export async function selectTenant(tenantId: string): Promise<{ current: TenantMembership }> {
+  const response = await fetch("/genai/tenants/select/", {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+    body: JSON.stringify({ tenant_id: tenantId }),
+  });
+  const body = (await response.json()) as { current: TenantMembership; error?: string };
+  if (!response.ok) throw new Error(body.error || `Tenant switch failed: ${response.status}`);
+  return body;
+}
+
+export async function fetchTenantMembers(): Promise<TenantMembership[]> {
+  const payload = await fetchJson<{ count: number; results: TenantMembership[] }>("/genai/tenants/members/");
+  return payload.results || [];
+}
+
+export async function createTenantMember(input: { username?: string; email?: string; role: string }): Promise<{ status: string; member: TenantMembership }> {
+  const response = await fetch("/genai/tenants/members/", {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+    body: JSON.stringify(input),
+  });
+  const body = (await response.json()) as { status: string; member: TenantMembership; error?: string };
+  if (!response.ok) throw new Error(body.error || `Member create failed: ${response.status}`);
+  return body;
+}
+
+export async function updateTenantMember(membershipId: string, input: { role?: string; is_active?: boolean }): Promise<{ status: string; member: TenantMembership }> {
+  const response = await fetch(`/genai/tenants/members/${encodeURIComponent(membershipId)}/`, {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+    body: JSON.stringify(input),
+  });
+  const body = (await response.json()) as { status: string; member: TenantMembership; error?: string };
+  if (!response.ok) throw new Error(body.error || `Member update failed: ${response.status}`);
+  return body;
+}
+
+export async function disableTenantMember(membershipId: string): Promise<{ status: string; member: TenantMembership }> {
+  const response = await fetch(`/genai/tenants/members/${encodeURIComponent(membershipId)}/`, {
+    method: "DELETE",
+    credentials: "include",
+    headers: { Accept: "application/json", "X-CSRFToken": getCsrfToken() },
+  });
+  const body = (await response.json()) as { status: string; member: TenantMembership; error?: string };
+  if (!response.ok) throw new Error(body.error || `Member disable failed: ${response.status}`);
+  return body;
+}
+
 export async function fetchRecentAlerts(): Promise<AlertRecommendation[]> {
   const payload = await fetchJson<RecentAlertsResponse>("/genai/alerts/recent/");
   return payload.results || [];
+}
+
+export async function fetchAlertNoiseRules(): Promise<AlertNoiseRulesPayload> {
+  return fetchJson<AlertNoiseRulesPayload>("/genai/alerts/noise/rules/");
+}
+
+export async function createAlertNoiseRule(input: AlertNoiseRuleInput): Promise<{ status: string; rule: AlertSuppressionRule | MaintenanceWindowRule }> {
+  const response = await fetch("/genai/alerts/noise/rules/", {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+    body: JSON.stringify(input),
+  });
+  const body = (await response.json()) as { status: string; rule: AlertSuppressionRule | MaintenanceWindowRule; error?: string };
+  if (!response.ok) throw new Error(body.error || `Noise rule creation failed: ${response.status}`);
+  return body;
+}
+
+export async function disableAlertNoiseRule(ruleType: "suppression" | "maintenance", ruleId: string): Promise<{ status: string; rule: AlertSuppressionRule | MaintenanceWindowRule }> {
+  const response = await fetch(`/genai/alerts/noise/rules/${encodeURIComponent(ruleType)}/${encodeURIComponent(ruleId)}/delete/`, {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+    body: JSON.stringify({}),
+  });
+  const body = (await response.json()) as { status: string; rule: AlertSuppressionRule | MaintenanceWindowRule; error?: string };
+  if (!response.ok) throw new Error(body.error || `Noise rule disable failed: ${response.status}`);
+  return body;
 }
 
 export async function fetchApplicationGraph(applicationKey: string): Promise<GraphPayload> {
@@ -670,6 +942,18 @@ export async function fetchRecentIncidents(): Promise<IncidentSummary[]> {
 
 export async function fetchIncidentTimeline(incidentKey: string): Promise<IncidentTimeline> {
   return fetchJson<IncidentTimeline>(`/genai/incidents/${incidentKey}/timeline/`);
+}
+
+export async function deleteIncident(incidentKey: string, reason = ""): Promise<{ status: string; incident_key: string; incident_number?: string }> {
+  const response = await fetch(`/genai/incidents/${encodeURIComponent(incidentKey)}/delete/`, {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+    body: JSON.stringify({ reason }),
+  });
+  const body = (await response.json()) as { status: string; incident_key: string; incident_number?: string; error?: string };
+  if (!response.ok) throw new Error(body.error || `Incident archive failed: ${response.status}`);
+  return body;
 }
 
 export async function fetchInvestigationRuns(params?: {
@@ -855,6 +1139,20 @@ export async function deleteDocument(deletePath: string): Promise<void> {
   }
 }
 
+export type BlastRadiusEstimate = {
+  affected_services: string[];
+  affected_count: number;
+  risk_score: number;
+  risk_label: "low" | "medium" | "high" | "critical";
+  environment: string;
+  is_protected_env: boolean;
+  is_critical_service: boolean;
+  reasons: string[];
+  requires_approval: boolean;
+  action_type: string;
+  service: string;
+};
+
 export async function executeDiagnosticCommand(payload: {
   alert_id?: string;
   command?: string;
@@ -864,8 +1162,12 @@ export async function executeDiagnosticCommand(payload: {
   typed_action?: TypedAction;
   dry_run?: boolean;
   approval_token?: string;
+  approval_reason?: string;
   idempotency_key?: string;
   rollback_metadata?: Record<string, unknown>;
+  break_glass?: boolean;
+  break_glass_reason?: string;
+  requires_verification?: boolean;
 }): Promise<CommandExecutionResult> {
   const send = async (requestPayload: typeof payload) =>
     fetch("/genai/execute_command/", {
@@ -885,17 +1187,89 @@ export async function executeDiagnosticCommand(payload: {
     detail?: string;
     approval_required?: boolean;
     approval_token?: string;
+    estimated_blast_radius?: BlastRadiusEstimate;
+    execution_intent_id?: string;
   };
 
-  if (response.status === 409 && body.approval_required && body.approval_token) {
-    response = await send({ ...payload, approval_token: body.approval_token });
-    body = (await response.json()) as CommandExecutionResult & { error?: string; detail?: string };
+  // Surface approval flow — do NOT auto-approve; return info for the UI to handle
+  if (response.status === 409 && body.approval_required) {
+    return body as unknown as CommandExecutionResult;
   }
 
   if (!response.ok) {
     throw new Error(body.detail || body.error || `Command execution failed: ${response.status}`);
   }
 
+  return body;
+}
+
+export async function approveExecutionIntent(
+  intentId: string,
+  payload: { approval_token: string; approval_reason: string }
+): Promise<{ approved: boolean; intent_id: string; status: string; approver_identity: string }> {
+  const response = await fetch(`/genai/executions/${intentId}/approve/`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "X-CSRFToken": getCsrfToken(),
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(body.error || `Approval failed: ${response.status}`);
+  }
+  return body;
+}
+
+export async function rollbackExecutionIntent(
+  intentId: string,
+  payload: { reason?: string }
+): Promise<{
+  rollback_initiated: boolean;
+  rollback_intent_id: string;
+  rollback_command: string;
+  rollback_action: TypedAction;
+  status: string;
+  requires_approval: boolean;
+}> {
+  const response = await fetch(`/genai/executions/${intentId}/rollback/`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "X-CSRFToken": getCsrfToken(),
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(body.error || `Rollback failed: ${response.status}`);
+  }
+  return body;
+}
+
+export async function verifyExecutionIntent(
+  intentId: string,
+  payload: { outcome: string; notes?: string }
+): Promise<{ verified: boolean; intent_id: string; status: string; verification_outcome: string }> {
+  const response = await fetch(`/genai/executions/${intentId}/verify/`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "X-CSRFToken": getCsrfToken(),
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(body.error || `Verification failed: ${response.status}`);
+  }
   return body;
 }
 
@@ -1664,4 +2038,115 @@ export function getRunbookDownloadUrl(incidentKey: string): string {
 
 export function getTimelineNarrativeDownloadUrl(incidentKey: string): string {
   return `/genai/incidents/${encodeURIComponent(incidentKey)}/timeline-narrative/download/`;
+}
+
+// ---------------------------------------------------------------------------
+// Analytics — Signal Heatmap
+// ---------------------------------------------------------------------------
+
+export type HeatmapSeverity = "critical" | "high" | "warning" | "info" | "unknown";
+
+export type HeatmapCell = {
+  service: string;
+  bucket: string;       // ISO timestamp string
+  count: number;
+  max_severity: HeatmapSeverity;
+  severities: Partial<Record<HeatmapSeverity, number>>;
+};
+
+export type HeatmapData = {
+  services: string[];
+  buckets: string[];
+  cells: HeatmapCell[];
+  meta: {
+    hours: number;
+    bucket_minutes: number;
+    total_alerts: number;
+    max_count: number;
+    service_count: number;
+    generated_at: string;
+  };
+};
+
+export async function fetchSignalHeatmap(params: {
+  hours?: number;
+  bucket_minutes?: number;
+  service?: string;
+  environment?: string;
+} = {}): Promise<HeatmapData> {
+  const qs = new URLSearchParams();
+  if (params.hours)          qs.set("hours",          String(params.hours));
+  if (params.bucket_minutes) qs.set("bucket_minutes", String(params.bucket_minutes));
+  if (params.service)        qs.set("service",        params.service);
+  if (params.environment)    qs.set("environment",    params.environment);
+  const url = `/genai/analytics/signal-heatmap/${qs.toString() ? "?" + qs : ""}`;
+  const response = await fetch(url, { credentials: "include", headers: { Accept: "application/json" } });
+  if (!response.ok) throw new Error(`Signal heatmap fetch failed: ${response.status}`);
+  return response.json() as Promise<HeatmapData>;
+}
+
+// ---------------------------------------------------------------------------
+// Analytics — Correlated Timeline
+// ---------------------------------------------------------------------------
+
+export type TimelineEventType =
+  | "alert"
+  | "incident_opened"
+  | "incident_resolved"
+  | "execution";
+
+export type TimelineLane = "alerts" | "incidents" | "executions";
+
+export type TimelineEvent = {
+  id: string;
+  type: TimelineEventType;
+  lane: TimelineLane;
+  timestamp: string;      // ISO
+  title: string;
+  service: string;
+  environment: string;
+  severity: HeatmapSeverity;
+  status: string;
+  incident_key: string | null;
+  meta: Record<string, unknown>;
+};
+
+export type TimelineLink = {
+  source: string;
+  target: string;
+  incident_key: string;
+};
+
+export type TimelineLaneConfig = {
+  id: TimelineLane;
+  label: string;
+  color: string;
+};
+
+export type CorrelatedTimelineData = {
+  events: TimelineEvent[];
+  links: TimelineLink[];
+  lanes: TimelineLaneConfig[];
+  meta: {
+    hours: number;
+    event_count: number;
+    service_filter: string | null;
+    incident_key_filter: string | null;
+    generated_at: string;
+  };
+};
+
+export async function fetchCorrelatedTimeline(params: {
+  hours?: number;
+  service?: string;
+  incident_key?: string;
+} = {}): Promise<CorrelatedTimelineData> {
+  const qs = new URLSearchParams();
+  if (params.hours)        qs.set("hours",        String(params.hours));
+  if (params.service)      qs.set("service",      params.service);
+  if (params.incident_key) qs.set("incident_key", params.incident_key);
+  const url = `/genai/analytics/correlated-timeline/${qs.toString() ? "?" + qs : ""}`;
+  const response = await fetch(url, { credentials: "include", headers: { Accept: "application/json" } });
+  if (!response.ok) throw new Error(`Correlated timeline fetch failed: ${response.status}`);
+  return response.json() as Promise<CorrelatedTimelineData>;
 }

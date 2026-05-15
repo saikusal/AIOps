@@ -4,6 +4,8 @@ from django.contrib import messages
 from .code_context_ingestion import sync_repository_index
 from .models import (
     AgentBehaviorVersion,
+    AlertEvent,
+    AlertSuppression,
     ArchiveManifest,
     CodeChangeRecord,
     DataRetentionPolicy,
@@ -12,13 +14,16 @@ from .models import (
     EvidenceBundle,
     EvidenceSnapshot,
     ExecutionIntent,
+    IncidentCorrelationLink,
     Integration,
     IntegrationBinding,
     IntegrationCredential,
     IntegrationHealthCheck,
+    IncidentExternalTicket,
     InvestigationRun,
     InvestigationTranscript,
     LifecycleJobRun,
+    MaintenanceWindow,
     RepositoryIndex,
     RemediationOutcome,
     ReplayEvaluation,
@@ -54,6 +59,38 @@ class ToolInvocationAdmin(admin.ModelAdmin):
     search_fields = ("invocation_id", "server_name", "tool_name")
     list_filter = ("server_name", "status", "created_at")
     readonly_fields = ("invocation_id", "created_at")
+
+
+@admin.register(AlertEvent)
+class AlertEventAdmin(admin.ModelAdmin):
+    list_display = ("alert_name", "source", "status", "service_name", "target_host", "repeat_count", "suppressed", "last_seen_at")
+    search_fields = ("event_id", "alert_name", "service_name", "target_host", "fingerprint", "lifecycle_key")
+    list_filter = ("source", "status", "severity", "suppressed", "environment", "last_seen_at")
+    readonly_fields = ("event_id", "lifecycle_key", "first_seen_at", "last_seen_at")
+
+
+@admin.register(AlertSuppression)
+class AlertSuppressionAdmin(admin.ModelAdmin):
+    list_display = ("name", "enabled", "alert_name", "service_name", "target_host", "environment", "expires_at")
+    search_fields = ("suppression_id", "name", "alert_name", "service_name", "target_host", "reason")
+    list_filter = ("enabled", "environment", "created_at", "expires_at")
+    readonly_fields = ("suppression_id", "created_at", "updated_at")
+
+
+@admin.register(MaintenanceWindow)
+class MaintenanceWindowAdmin(admin.ModelAdmin):
+    list_display = ("name", "enabled", "service_name", "target_host", "environment", "starts_at", "ends_at")
+    search_fields = ("window_id", "name", "service_name", "target_host", "reason")
+    list_filter = ("enabled", "environment", "starts_at", "ends_at")
+    readonly_fields = ("window_id", "created_at", "updated_at")
+
+
+@admin.register(IncidentCorrelationLink)
+class IncidentCorrelationLinkAdmin(admin.ModelAdmin):
+    list_display = ("source_incident", "related_incident", "score", "created_at")
+    search_fields = ("source_incident__incident_key", "related_incident__incident_key")
+    list_filter = ("created_at",)
+    readonly_fields = ("created_at",)
 
 
 @admin.register(DataRetentionPolicy)
@@ -315,9 +352,15 @@ class IntegrationAdmin(admin.ModelAdmin):
 
 @admin.register(IntegrationCredential)
 class IntegrationCredentialAdmin(admin.ModelAdmin):
-    list_display = ("integration", "secret_ref", "rotation_status", "updated_at")
+    list_display = ("integration", "masked_secret_ref", "rotation_status", "updated_at")
     search_fields = ("integration__name", "secret_ref")
     readonly_fields = ("credential_id", "created_at", "updated_at")
+
+    def masked_secret_ref(self, obj):
+        value = obj.secret_ref or ""
+        if not value:
+            return ""
+        return "********" + value[-4:]
 
 
 @admin.register(IntegrationBinding)
@@ -334,6 +377,14 @@ class IntegrationHealthCheckAdmin(admin.ModelAdmin):
     search_fields = ("integration__name", "message")
     list_filter = ("status", "checked_at")
     readonly_fields = ("check_id", "checked_at")
+
+
+@admin.register(IncidentExternalTicket)
+class IncidentExternalTicketAdmin(admin.ModelAdmin):
+    list_display = ("incident", "integration", "external_key", "status", "created_at")
+    search_fields = ("incident__incident_key", "incident__incident_number", "integration__name", "external_id", "external_key", "external_url")
+    list_filter = ("status", "integration__integration_type", "created_at")
+    readonly_fields = ("ticket_id", "created_at", "updated_at")
 
 
 @admin.register(CloudAccountBinding)

@@ -14,3 +14,5 @@ CACHES = {
         "LOCATION": "aiops-test-cache",
     }
 }
+
+AIOPS_INVESTIGATION_STREAMS_ENABLED = False

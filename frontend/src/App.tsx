@@ -3,6 +3,7 @@ import { AppShell } from "./components/AppShell";
 import { ApplicationsPage } from "./pages/ApplicationsPage";
 import { AssistantPage } from "./pages/AssistantPage";
 import { AlertsPage } from "./pages/AlertsPage";
+import { AnalyticsDashboard } from "./pages/AnalyticsDashboard";
 import { CacheDashboardPage } from "./pages/CacheDashboardPage";
 import { ChangeRiskPage } from "./pages/ChangeRiskPage";
 import { CodeContextPage } from "./pages/CodeContextPage";
@@ -17,6 +18,7 @@ import { InvestigationsPage } from "./pages/InvestigationsPage";
 import { IntegrationsPage } from "./pages/IntegrationsPage";
 import { IntegrationConfigPage } from "./pages/IntegrationConfigPage";
 import { PredictionsPage } from "./pages/PredictionsPage";
+import { TenantManagementPage } from "./pages/TenantManagementPage";
 
 function LegacyAssistantRedirect() {
   const location = useLocation();
@@ -38,12 +40,14 @@ export function App() {
         <Route path="/investigations/:runId" element={<InvestigationDetailPage />} />
         <Route path="/integrations" element={<IntegrationsPage />} />
         <Route path="/integrations/:vendor" element={<IntegrationConfigPage />} />
+        <Route path="/settings/members" element={<TenantManagementPage />} />
         <Route path="/topology" element={<ApplicationsPage />} />
         <Route path="/code-context" element={<CodeContextPage />} />
         <Route path="/genai" element={<AssistantPage />} />
         <Route path="/change-risk" element={<ChangeRiskPage />} />
         <Route path="/automation" element={<DocumentsPage />} />
-        <Route path="/analytics" element={<CacheDashboardPage />} />
+        <Route path="/analytics" element={<AnalyticsDashboard />} />
+        <Route path="/analytics/cache" element={<CacheDashboardPage />} />
         {/* legacy redirects so bookmarks don't break */}
         <Route path="/enroll" element={<Navigate to="/domain-onboarding" replace />} />
         <Route path="/fleet" element={<Navigate to="/ingestion" replace />} />

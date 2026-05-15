@@ -81,6 +81,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'allauth.account.middleware.AccountMiddleware',
     'genai.middleware.HeaderSSOAuthMiddleware',
+    'genai.middleware.TenantMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -104,6 +105,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'aiops_platform.wsgi.application'
+ASGI_APPLICATION = 'aiops_platform.asgi.application'
 
 
 # Database
@@ -132,6 +134,10 @@ CACHES = {
         "KEY_PREFIX": "aiops"
     }
 }
+
+AIOPS_INVESTIGATION_STREAMS_ENABLED = os.getenv("AIOPS_INVESTIGATION_STREAMS_ENABLED", "true").lower() == "true"
+AIOPS_INVESTIGATION_STREAM_REDIS_DB = int(os.getenv("AIOPS_INVESTIGATION_STREAM_REDIS_DB", "2"))
+AIOPS_INVESTIGATION_STREAM_SNAPSHOT_TTL = int(os.getenv("AIOPS_INVESTIGATION_STREAM_SNAPSHOT_TTL", "900"))
 
 
 # Password validation

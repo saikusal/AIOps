@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 import { App } from "./App";
 import { RefreshProvider } from "./lib/refresh";
+import { TenantProvider } from "./lib/tenant";
 import "./styles.css";
 import "./premium-theme.css";
 
@@ -12,11 +13,13 @@ const queryClient = new QueryClient();
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <RefreshProvider>
-        <BrowserRouter>
-          <App />
-        </BrowserRouter>
-      </RefreshProvider>
+      <TenantProvider>
+        <RefreshProvider>
+          <BrowserRouter>
+            <App />
+          </BrowserRouter>
+        </RefreshProvider>
+      </TenantProvider>
     </QueryClientProvider>
   </React.StrictMode>,
 );

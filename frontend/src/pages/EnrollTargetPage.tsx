@@ -13,6 +13,7 @@ import {
   type FleetPolicyProfile,
   type OnboardingRequest,
 } from "../lib/api";
+import { useTenant } from "../lib/tenant";
 
 const targetTypes = [
   { value: "linux", label: "Linux Server", detail: "EC2, VM, or bare-metal Linux onboarding" },
@@ -159,6 +160,8 @@ function onboardingConfig(config: Record<string, unknown> | undefined | null) {
 }
 
 export function EnrollTargetPage() {
+  const { hasPermission } = useTenant();
+  const canManageFleet = hasPermission("fleet.manage");
   const queryClient = useQueryClient();
   const [targetType, setTargetType] = useState("linux");
   const [profileName, setProfileName] = useState("infra-observability");
@@ -650,6 +653,7 @@ export function EnrollTargetPage() {
                 || (targetType === "linux" && !isEditing && !pemFile)
                 || !form.name
                 || !form.hostname
+                || !canManageFleet
               }
             >
               {isEditing ? (updateMutation.isPending ? "Updating..." : "Update Onboarding Request") : (createMutation.isPending ? "Saving..." : "Save Onboarding Request")}
@@ -820,7 +824,7 @@ export function EnrollTargetPage() {
                       type="button"
                       className="action-button action-button--danger"
                       onClick={() => deleteMutation.mutate(activeOnboarding.onboarding_id)}
-                      disabled={deleteMutation.isPending}
+                      disabled={deleteMutation.isPending || !canManageFleet}
                     >
                       {deleteMutation.isPending ? "Deleting..." : "Delete Request"}
                     </button>
@@ -828,7 +832,7 @@ export function EnrollTargetPage() {
                       type="button"
                       className="action-button"
                       onClick={() => testMutation.mutate(activeOnboarding.onboarding_id)}
-                      disabled={testMutation.isPending}
+                      disabled={testMutation.isPending || !canManageFleet}
                     >
                       {testMutation.isPending ? "Testing..." : (activeOnboarding.target_type === "kubernetes" ? "Validate Prerequisites" : "Test Connectivity")}
                     </button>
@@ -836,7 +840,7 @@ export function EnrollTargetPage() {
                       type="button"
                       className="action-button action-button--secondary"
                       onClick={() => installMutation.mutate(activeOnboarding.onboarding_id)}
-                      disabled={installMutation.isPending || activeOnboarding.connectivity_status !== "reachable" || !controlPlaneReady}
+                      disabled={installMutation.isPending || activeOnboarding.connectivity_status !== "reachable" || !controlPlaneReady || !canManageFleet}
                     >
                       {installMutation.isPending ? "Installing..." : (activeOnboarding.target_type === "kubernetes" ? "Generate Cluster Install" : "Run Remote Install")}
                     </button>

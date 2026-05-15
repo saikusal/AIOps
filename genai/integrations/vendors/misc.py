@@ -1,5 +1,5 @@
 import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -18,6 +18,7 @@ from ..registry import IntegrationRegistry
 from .prometheus import PrometheusAdapter
 from .opensearch import OpenSearchAdapter
 from ...trace_backend import JaegerBackend
+from .common import credential_metadata, credential_secret, parse_timestamp
 
 
 class VictoriaMetricsAdapter(PrometheusAdapter):
@@ -104,22 +105,89 @@ class LokiAdapter(BaseLogsAdapter):
 
 
 class NewRelicAdapter(BaseMetricsAdapter, BaseLogsAdapter, BaseTracesAdapter):
+    def _headers(self) -> Dict[str, str]:
+        secret = credential_secret(self.integration)
+        return {"Api-Key": secret, "Content-Type": "application/json"} if secret else {"Content-Type": "application/json"}
+
+    def _account_id(self) -> str:
+        return str((self.integration.metadata_json or {}).get("account_id") or (credential_metadata(self.integration).get("account_id")) or "")
+
     def test_connection(self) -> bool:
         try:
-            headers = {"Api-Key": str(getattr(self.integration.credential, "secret_ref", "") or "")}
-            response = requests.get(f"{self.integration.endpoint_url.rstrip('/')}/v1/accounts", headers=headers, timeout=5)
-            return response.status_code in {200, 401, 403}
+            response = requests.post(
+                self.integration.endpoint_url.rstrip("/") or "https://api.newrelic.com/graphql",
+                headers=self._headers(),
+                json={"query": "{ actor { user { name } } }"},
+                timeout=8,
+            )
+            return response.status_code == 200 and not response.json().get("errors")
         except Exception:
             return False
 
+    def _nrql(self, nrql: str) -> List[Dict[str, Any]]:
+        account_id = self._account_id()
+        if not account_id:
+            return []
+        query = """
+        query($accountId: Int!, $nrql: Nrql!) {
+          actor { account(id: $accountId) { nrql(query: $nrql) { results } } }
+        }
+        """
+        response = requests.post(
+            self.integration.endpoint_url.rstrip("/") or "https://api.newrelic.com/graphql",
+            headers=self._headers(),
+            json={"query": query, "variables": {"accountId": int(account_id), "nrql": nrql}},
+            timeout=20,
+        )
+        response.raise_for_status()
+        return (((response.json().get("data") or {}).get("actor") or {}).get("account") or {}).get("nrql", {}).get("results") or []
+
     def fetch_metrics(self, query: str, time_range: tuple) -> List[NormalizedMetricResult]:
-        return []
+        rows: List[NormalizedMetricResult] = []
+        for item in self._nrql(query):
+            for key, value in item.items():
+                if isinstance(value, (int, float)):
+                    rows.append(
+                        NormalizedMetricResult(
+                            metric_name=str(key),
+                            value=float(value),
+                            timestamp=parse_timestamp(item.get("timestamp")),
+                            labels={k: str(v) for k, v in item.items() if not isinstance(v, (dict, list))},
+                        )
+                    )
+        return rows
 
     def fetch_logs(self, query: str, time_range: tuple, limit: int = 100) -> List[NormalizedLogResult]:
-        return []
+        nrql = query if str(query or "").lower().startswith("select ") else f"SELECT timestamp, message, level, service.name FROM Log WHERE message LIKE '%{str(query or '')[:80]}%' LIMIT {max(1, min(int(limit or 100), 500))}"
+        rows: List[NormalizedLogResult] = []
+        for item in self._nrql(nrql):
+            rows.append(
+                NormalizedLogResult(
+                    timestamp=parse_timestamp(item.get("timestamp")),
+                    message=str(item.get("message") or ""),
+                    level=str(item.get("level") or "info"),
+                    source=str(item.get("service.name") or item.get("serviceName") or self.integration.name),
+                    attributes=item,
+                )
+            )
+        return rows
 
     def fetch_traces(self, service_name: str, time_range: tuple, tags: Optional[Dict[str, str]] = None) -> List[NormalizedTraceResult]:
-        return []
+        nrql = f"SELECT trace.id, span.id, name, duration.ms, timestamp FROM Span WHERE service.name = '{service_name}' LIMIT 100"
+        rows: List[NormalizedTraceResult] = []
+        for item in self._nrql(nrql):
+            rows.append(
+                NormalizedTraceResult(
+                    trace_id=str(item.get("trace.id") or ""),
+                    span_id=str(item.get("span.id") or ""),
+                    service_name=service_name,
+                    operation_name=str(item.get("name") or ""),
+                    duration_ms=float(item.get("duration.ms") or item.get("duration") or 0),
+                    start_time=parse_timestamp(item.get("timestamp")),
+                    tags=item,
+                )
+            )
+        return rows
 
 
 class NagiosAdapter(BaseAlertsAdapter):
@@ -131,17 +199,42 @@ class NagiosAdapter(BaseAlertsAdapter):
             return False
 
     def fetch_alert_state(self) -> List[NormalizedAlertResult]:
-        return []
+        if not self.integration.endpoint_url:
+            return []
+        response = requests.get(self.integration.endpoint_url.rstrip("/"), timeout=15)
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        alerts = payload.get("alerts") or payload.get("services") or []
+        results: List[NormalizedAlertResult] = []
+        for item in alerts if isinstance(alerts, list) else []:
+            labels = {str(k): str(v) for k, v in (item.get("labels") or item).items() if not isinstance(v, (dict, list))}
+            status = str(item.get("status") or item.get("state") or "unknown").lower()
+            results.append(
+                NormalizedAlertResult(
+                    alert_name=str(item.get("alert_name") or item.get("host_name") or item.get("service_description") or "NagiosAlert"),
+                    status="firing" if status not in {"ok", "up", "0"} else "resolved",
+                    severity=str(item.get("severity") or item.get("state") or "warning"),
+                    description=str(item.get("plugin_output") or item.get("description") or ""),
+                    starts_at=parse_timestamp(item.get("last_state_change") or item.get("last_check")),
+                    labels=labels,
+                )
+            )
+        return results
 
 
 class AzureAdapter(BaseAdapter):
     def test_connection(self) -> bool:
-        return True
+        metadata = credential_metadata(self.integration)
+        return bool(metadata.get("tenant_id") and metadata.get("client_id") and credential_secret(self.integration))
 
 
 class GCPAdapter(BaseAdapter):
     def test_connection(self) -> bool:
-        return True
+        metadata = credential_metadata(self.integration)
+        return bool(metadata.get("project_id") and (credential_secret(self.integration) or metadata.get("service_account_json")))
 
 
 class CustomAdapter(BaseAdapter):

@@ -20,6 +20,15 @@ services:
       AGENT_SECRET_TOKEN: ${AGENT_SECRET_TOKEN:-}
       AGENT_PORT: ${AGENT_PORT:-9999}
       APP_LOG_DIR: /var/log/aiops
+      AIOPS_WEB_CONCURRENCY: ${AIOPS_WEB_CONCURRENCY:-2}
+      AIOPS_GUNICORN_TIMEOUT: ${AIOPS_GUNICORN_TIMEOUT:-120}
+      AIOPS_GUNICORN_KEEPALIVE: ${AIOPS_GUNICORN_KEEPALIVE:-15}
+      AIOPS_GUNICORN_GRACEFUL_TIMEOUT: ${AIOPS_GUNICORN_GRACEFUL_TIMEOUT:-30}
+      AIOPS_GUNICORN_MAX_REQUESTS: ${AIOPS_GUNICORN_MAX_REQUESTS:-1000}
+      AIOPS_GUNICORN_MAX_REQUESTS_JITTER: ${AIOPS_GUNICORN_MAX_REQUESTS_JITTER:-100}
+      AIOPS_INVESTIGATION_STREAMS_ENABLED: ${AIOPS_INVESTIGATION_STREAMS_ENABLED:-true}
+      AIOPS_INVESTIGATION_STREAM_REDIS_DB: ${AIOPS_INVESTIGATION_STREAM_REDIS_DB:-2}
+      AIOPS_INVESTIGATION_STREAM_SNAPSHOT_TTL: ${AIOPS_INVESTIGATION_STREAM_SNAPSHOT_TTL:-900}
       OTEL_ENABLED: ${OTEL_ENABLED:-true}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-aiops-web}
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
@@ -124,7 +133,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: /bin/sh -c "python3 manage.py run_prediction_loop --interval ${PREDICTION_INTERVAL_SECONDS:-300}"
+    command:
+      - sh
+      - /code/entrypoint.sh
+      - python3
+      - manage.py
+      - run_prediction_loop
+      - --interval
+      - ${PREDICTION_INTERVAL_SECONDS:-300}
     environment:
       DJANGO_SETTINGS_MODULE: aiops_platform.settings
       POSTGRES_HOST: db
@@ -134,6 +150,9 @@ services:
       ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-http://elasticsearch:9200}
       JAEGER_URL: ${JAEGER_URL:-http://jaeger:16686}
       APP_LOG_DIR: /var/log/aiops
+      AIOPS_INVESTIGATION_STREAMS_ENABLED: ${AIOPS_INVESTIGATION_STREAMS_ENABLED:-true}
+      AIOPS_INVESTIGATION_STREAM_REDIS_DB: ${AIOPS_INVESTIGATION_STREAM_REDIS_DB:-2}
+      AIOPS_INVESTIGATION_STREAM_SNAPSHOT_TTL: ${AIOPS_INVESTIGATION_STREAM_SNAPSHOT_TTL:-900}
       METRICS_API_URL: ${METRICS_API_URL:-http://prometheus:9090}
       PROMETHEUS_URL: ${PROMETHEUS_URL:-http://prometheus:9090}
       MCP_TRANSPORT: ${MCP_TRANSPORT:-inprocess}
@@ -188,6 +207,29 @@ services:
         condition: service_healthy
       prometheus:
         condition: service_started
+    restart: unless-stopped
+
+  integration-health:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - sh
+      - /code/entrypoint.sh
+      - sh
+      - -c
+      - while true; do python3 manage.py check_integrations --fail-after ${AIOPS_INTEGRATION_FAIL_AFTER:-3}; sleep ${AIOPS_INTEGRATION_CHECK_INTERVAL_SECONDS:-300}; done
+    environment:
+      DJANGO_SETTINGS_MODULE: aiops_platform.settings
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   redis:

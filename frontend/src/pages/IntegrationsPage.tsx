@@ -8,15 +8,33 @@ const catalog = [
   { name: "Prometheus", type: "metrics", tier: "Core", vendorId: "prometheus", logo: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/prometheus/prometheus-original.svg" },
   { name: "VictoriaMetrics", type: "metrics", tier: "Core", vendorId: "victoriametrics", logo: "https://cdn.simpleicons.org/victoriametrics/009688" },
   { name: "Tempo", type: "traces", tier: "Core", vendorId: "tempo", logo: "https://upload.wikimedia.org/wikipedia/commons/3/3b/Grafana_icon.svg" },
+  { name: "Jaeger", type: "traces", tier: "Core", vendorId: "jaeger", logo: "https://www.vectorlogo.zone/logos/jaegertracing/jaegertracing-icon.svg" },
   { name: "OpenSearch", type: "logs", tier: "Core", vendorId: "opensearch", logo: "https://cdn.simpleicons.org/opensearch/005EB8" },
+  { name: "Elasticsearch", type: "logs", tier: "Core", vendorId: "elasticsearch", logo: "https://cdn.simpleicons.org/elasticsearch/005571" },
+  { name: "Loki", type: "logs", tier: "Core", vendorId: "loki", logo: "https://upload.wikimedia.org/wikipedia/commons/3/3b/Grafana_icon.svg" },
   { name: "Splunk", type: "logs", tier: "Tier 1", vendorId: "splunk", logo: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/splunk/splunk-original-wordmark.svg" },
   { name: "Dynatrace", type: "traces / topology", tier: "Tier 1", vendorId: "dynatrace", logo: "https://www.vectorlogo.zone/logos/dynatrace/dynatrace-icon.svg" },
   { name: "Datadog", type: "mixed", tier: "Tier 1", vendorId: "datadog", logo: "https://cdn.worldvectorlogo.com/logos/datadog.svg" },
   { name: "New Relic", type: "mixed", tier: "Tier 2", vendorId: "newrelic", logo: "https://cdn.worldvectorlogo.com/logos/new-relic.svg" },
   { name: "Nagios", type: "alerts", tier: "Tier 2", vendorId: "nagios", logo: "https://www.vectorlogo.zone/logos/nagios/nagios-icon.svg" },
+  { name: "Alertmanager", type: "alerts", tier: "Core", vendorId: "alertmanager", logo: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/prometheus/prometheus-original.svg" },
+  { name: "PagerDuty", type: "incident writeback", tier: "ITSM", vendorId: "pagerduty", logo: "https://cdn.simpleicons.org/pagerduty/06AC38" },
+  { name: "ServiceNow", type: "incident writeback", tier: "ITSM", vendorId: "servicenow", logo: "https://cdn.simpleicons.org/servicenow/81B5A1" },
+  { name: "Jira", type: "issues", tier: "ITSM", vendorId: "jira", logo: "https://cdn.simpleicons.org/jira/0052CC" },
+  { name: "Opsgenie", type: "alerts", tier: "ITSM", vendorId: "opsgenie", logo: "https://cdn.simpleicons.org/opsgenie/172B4D" },
+  { name: "Slack", type: "notifications", tier: "Notify", vendorId: "slack", logo: "https://cdn.simpleicons.org/slack/4A154B" },
+  { name: "Microsoft Teams", type: "notifications", tier: "Notify", vendorId: "teams", logo: "https://cdn.simpleicons.org/microsoftteams/6264A7" },
   { name: "AWS", type: "cloud", tier: "Cloud", vendorId: "aws", logo: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/amazonwebservices/amazonwebservices-original-wordmark.svg" },
   { name: "Azure", type: "cloud", tier: "Cloud", vendorId: "azure", logo: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/azure/azure-original.svg" },
   { name: "GCP", type: "cloud", tier: "Cloud", vendorId: "gcp", logo: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/googlecloud/googlecloud-original.svg" },
+  { name: "GitHub", type: "code changes", tier: "DevOps", vendorId: "github", logo: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/github/github-original.svg" },
+  { name: "GitLab", type: "code changes", tier: "DevOps", vendorId: "gitlab", logo: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/gitlab/gitlab-original.svg" },
+  { name: "Bitbucket", type: "code changes", tier: "DevOps", vendorId: "bitbucket", logo: "https://cdn.simpleicons.org/bitbucket/0052CC" },
+  { name: "Jenkins", type: "deployments", tier: "DevOps", vendorId: "jenkins", logo: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/jenkins/jenkins-original.svg" },
+  { name: "Argo CD", type: "deployments", tier: "DevOps", vendorId: "argocd", logo: "https://cdn.simpleicons.org/argo/EF7B4D" },
+  { name: "Flux CD", type: "deployments", tier: "DevOps", vendorId: "fluxcd", logo: "https://cdn.simpleicons.org/flux/5468FF" },
+  { name: "Kubernetes", type: "topology / events", tier: "DevOps", vendorId: "kubernetes", logo: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/kubernetes/kubernetes-plain.svg" },
+  { name: "Custom", type: "mixed", tier: "Custom", vendorId: "custom", logo: "https://cdn.simpleicons.org/openapiinitiative/6BA539" },
 ];
 
 export function IntegrationsPage() {
@@ -105,6 +123,7 @@ export function IntegrationsPage() {
                   </h3>
                   <span className="integration-type">{integration.type}</span>
                   {configured?.health_status && <span className="integration-type">{configured.health_status}</span>}
+                  {(configured?.capabilities || []).length ? <span className="integration-type">{configured?.capabilities?.join(" · ")}</span> : null}
                 </div>
                 <span className="integration-tier">{integration.tier}</span>
               </div>

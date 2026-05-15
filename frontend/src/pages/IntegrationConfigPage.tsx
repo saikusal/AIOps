@@ -7,20 +7,39 @@ import {
   saveIntegrationConfig,
   type IntegrationConfig,
 } from "../lib/api";
+import { useTenant } from "../lib/tenant";
 
 const vendorLogos: Record<string, string> = {
   prometheus: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/prometheus/prometheus-original.svg",
   victoriametrics: "https://cdn.simpleicons.org/victoriametrics/009688",
   tempo: "https://upload.wikimedia.org/wikipedia/commons/3/3b/Grafana_icon.svg",
+  jaeger: "https://www.vectorlogo.zone/logos/jaegertracing/jaegertracing-icon.svg",
   opensearch: "https://cdn.simpleicons.org/opensearch/005EB8",
+  elasticsearch: "https://cdn.simpleicons.org/elasticsearch/005571",
+  loki: "https://upload.wikimedia.org/wikipedia/commons/3/3b/Grafana_icon.svg",
   splunk: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/splunk/splunk-original-wordmark.svg",
   dynatrace: "https://www.vectorlogo.zone/logos/dynatrace/dynatrace-icon.svg",
   datadog: "https://cdn.worldvectorlogo.com/logos/datadog.svg",
   newrelic: "https://cdn.worldvectorlogo.com/logos/new-relic.svg",
   nagios: "https://www.vectorlogo.zone/logos/nagios/nagios-icon.svg",
+  alertmanager: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/prometheus/prometheus-original.svg",
+  pagerduty: "https://cdn.simpleicons.org/pagerduty/06AC38",
+  servicenow: "https://cdn.simpleicons.org/servicenow/81B5A1",
+  jira: "https://cdn.simpleicons.org/jira/0052CC",
+  opsgenie: "https://cdn.simpleicons.org/opsgenie/172B4D",
+  slack: "https://cdn.simpleicons.org/slack/4A154B",
+  teams: "https://cdn.simpleicons.org/microsoftteams/6264A7",
   aws: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/amazonwebservices/amazonwebservices-original-wordmark.svg",
   azure: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/azure/azure-original.svg",
   gcp: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/googlecloud/googlecloud-original.svg",
+  github: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/github/github-original.svg",
+  gitlab: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/gitlab/gitlab-original.svg",
+  bitbucket: "https://cdn.simpleicons.org/bitbucket/0052CC",
+  jenkins: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/jenkins/jenkins-original.svg",
+  argocd: "https://cdn.simpleicons.org/argo/EF7B4D",
+  fluxcd: "https://cdn.simpleicons.org/flux/5468FF",
+  kubernetes: "https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/kubernetes/kubernetes-plain.svg",
+  custom: "https://cdn.simpleicons.org/openapiinitiative/6BA539",
 };
 
 const emptyConfig = (vendor: string): IntegrationConfig => ({
@@ -45,6 +64,8 @@ export function IntegrationConfigPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
   const [form, setForm] = useState<IntegrationConfig>(emptyConfig(vendor));
+  const { hasPermission } = useTenant();
+  const canManageIntegrations = hasPermission("integrations.manage");
 
   useEffect(() => {
     let active = true;
@@ -104,6 +125,10 @@ export function IntegrationConfigPage() {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canManageIntegrations) {
+      setError("You do not have permission to manage integrations in this workspace.");
+      return;
+    }
     setIsSaving(true);
     setError("");
     try {
@@ -170,6 +195,99 @@ export function IntegrationConfigPage() {
             <div className="form-field-group">
               <label>HEC Token</label>
               <input type="password" value={form.credential.secret_ref} onChange={(event) => setForm((current) => ({ ...current, credential: { ...current.credential, secret_ref: event.target.value } }))} required />
+            </div>
+          </>
+        );
+      case "newrelic":
+        return (
+          <>
+            <div className="form-field-group">
+              <label>GraphQL Endpoint</label>
+              <input type="url" value={form.endpoint_url} onChange={(event) => setForm((current) => ({ ...current, endpoint_url: event.target.value }))} placeholder="https://api.newrelic.com/graphql" />
+            </div>
+            <div className="form-field-group">
+              <label>User API Key</label>
+              <input type="password" value={form.credential.secret_ref} onChange={(event) => setForm((current) => ({ ...current, credential: { ...current.credential, secret_ref: event.target.value } }))} />
+            </div>
+            <div className="form-field-group">
+              <label>Account ID</label>
+              <input type="text" value={String(form.metadata_json?.account_id || "")} onChange={(event) => updateMetadata("account_id", event.target.value)} />
+            </div>
+          </>
+        );
+      case "servicenow":
+      case "jira":
+      case "jenkins":
+      case "bitbucket":
+        return (
+          <>
+            <div className="form-field-group">
+              <label>Endpoint URL</label>
+              <input type="url" value={form.endpoint_url} onChange={(event) => setForm((current) => ({ ...current, endpoint_url: event.target.value }))} required />
+            </div>
+            <div className="form-field-group">
+              <label>Username / Email</label>
+              <input type="text" value={String(form.credential.credential_metadata?.username || form.credential.credential_metadata?.email || "")} onChange={(event) => updateCredentialMetadata(vendor === "jira" ? "email" : "username", event.target.value)} />
+            </div>
+            <div className="form-field-group">
+              <label>Token / Password</label>
+              <input type="password" value={form.credential.secret_ref} onChange={(event) => setForm((current) => ({ ...current, credential: { ...current.credential, secret_ref: event.target.value } }))} />
+            </div>
+          </>
+        );
+      case "pagerduty":
+      case "opsgenie":
+      case "slack":
+      case "github":
+      case "gitlab":
+      case "argocd":
+      case "kubernetes":
+        return (
+          <>
+            <div className="form-field-group">
+              <label>Endpoint URL</label>
+              <input type="url" value={form.endpoint_url} onChange={(event) => setForm((current) => ({ ...current, endpoint_url: event.target.value }))} placeholder={vendor === "github" ? "https://api.github.com" : "https://api.vendor.com"} />
+            </div>
+            <div className="form-field-group">
+              <label>Token</label>
+              <input type="password" value={form.credential.secret_ref} onChange={(event) => setForm((current) => ({ ...current, credential: { ...current.credential, secret_ref: event.target.value } }))} />
+            </div>
+          </>
+        );
+      case "teams":
+        return (
+          <div className="form-field-group">
+            <label>Incoming Webhook URL</label>
+            <input type="url" value={form.endpoint_url} onChange={(event) => setForm((current) => ({ ...current, endpoint_url: event.target.value }))} required />
+          </div>
+        );
+      case "azure":
+        return (
+          <>
+            <div className="form-field-group">
+              <label>Tenant ID</label>
+              <input type="text" value={String(form.credential.credential_metadata?.tenant_id || "")} onChange={(event) => updateCredentialMetadata("tenant_id", event.target.value)} />
+            </div>
+            <div className="form-field-group">
+              <label>Client ID</label>
+              <input type="text" value={String(form.credential.credential_metadata?.client_id || "")} onChange={(event) => updateCredentialMetadata("client_id", event.target.value)} />
+            </div>
+            <div className="form-field-group">
+              <label>Client Secret</label>
+              <input type="password" value={form.credential.secret_ref} onChange={(event) => setForm((current) => ({ ...current, credential: { ...current.credential, secret_ref: event.target.value } }))} />
+            </div>
+          </>
+        );
+      case "gcp":
+        return (
+          <>
+            <div className="form-field-group">
+              <label>Project ID</label>
+              <input type="text" value={String(form.credential.credential_metadata?.project_id || "")} onChange={(event) => updateCredentialMetadata("project_id", event.target.value)} />
+            </div>
+            <div className="form-field-group">
+              <label>Service Account JSON / Secret Ref</label>
+              <input type="password" value={form.credential.secret_ref} onChange={(event) => setForm((current) => ({ ...current, credential: { ...current.credential, secret_ref: event.target.value } }))} />
             </div>
           </>
         );
@@ -253,7 +371,7 @@ export function IntegrationConfigPage() {
           <button type="button" className="action-button" style={{ background: "rgba(255,255,255,0.05)" }} onClick={() => navigate("/integrations")} disabled={isSaving}>
             Cancel
           </button>
-          <button type="submit" className="action-button action-button--primary" style={{ minWidth: "160px" }} disabled={isSaving || isLoading}>
+          <button type="submit" className="action-button action-button--primary" style={{ minWidth: "160px" }} disabled={isSaving || isLoading || !canManageIntegrations}>
             {isSaving ? "Saving..." : "Save Integration"}
           </button>
         </div>

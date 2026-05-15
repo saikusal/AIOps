@@ -1,0 +1,51 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "opsmitra.fullname" . }}-migrate
+  labels:
+    {{- include "opsmitra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "opsmitra.name" . }}
+        app.kubernetes.io/component: migrate
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: "{{ .Values.images.web.repository }}:{{ .Values.images.web.tag }}"
+          imagePullPolicy: {{ .Values.images.web.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for database..."
+              until nc -z "${POSTGRES_HOST}" "${POSTGRES_PORT:-5432}"; do
+                sleep 2
+              done
+              echo "Applying database migrations..."
+              python3 manage.py migrate --noinput
+          envFrom:
+            - configMapRef:
+                name: {{ include "opsmitra.fullname" . }}-env
+            - secretRef:
+                name: {{ include "opsmitra.fullname" . }}-secret
+          volumeMounts:
+            - name: media
+              mountPath: /code/mediafiles
+            - name: applogs
+              mountPath: /var/log/aiops
+      volumes:
+        - name: media
+          persistentVolumeClaim:
+            claimName: {{ include "opsmitra.fullname" . }}-media
+        - name: applogs
+          emptyDir: {}

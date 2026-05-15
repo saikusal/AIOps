@@ -7,6 +7,125 @@ from django.utils import timezone
 
 User = get_user_model()
 
+TENANT_ROLE_OWNER = "owner"
+TENANT_ROLE_ADMIN = "admin"
+TENANT_ROLE_OPERATOR = "operator"
+TENANT_ROLE_RESPONDER = "responder"
+TENANT_ROLE_VIEWER = "viewer"
+TENANT_ROLE_AUDITOR = "auditor"
+
+TENANT_ROLE_CHOICES = (
+    (TENANT_ROLE_OWNER, "Owner"),
+    (TENANT_ROLE_ADMIN, "Admin"),
+    (TENANT_ROLE_OPERATOR, "Operator"),
+    (TENANT_ROLE_RESPONDER, "Responder"),
+    (TENANT_ROLE_VIEWER, "Viewer"),
+    (TENANT_ROLE_AUDITOR, "Auditor"),
+)
+
+
+class Tenant(models.Model):
+    """Logical customer/workspace boundary for all operational data."""
+
+    tenant_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    name = models.CharField(max_length=160)
+    slug = models.SlugField(max_length=80, unique=True)
+    domain = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    is_active = models.BooleanField(default=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+def default_tenant_pk():
+    tenant, _ = Tenant.objects.get_or_create(
+        slug="default-workspace",
+        defaults={"name": "Default Workspace", "metadata_json": {"created_by": "model_default"}},
+    )
+    return tenant.pk
+
+
+class TenantMembership(models.Model):
+    membership_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="memberships")
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="aiops_tenant_memberships")
+    role = models.CharField(max_length=32, choices=TENANT_ROLE_CHOICES, default=TENANT_ROLE_VIEWER)
+    is_active = models.BooleanField(default=True)
+    invited_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="aiops_tenant_memberships_invited",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["tenant__name", "user__username"]
+        unique_together = ("tenant", "user")
+
+    def __str__(self):
+        return f"{self.tenant}:{self.user}:{self.role}"
+
+
+class TenantInvitation(models.Model):
+    STATUS_CHOICES = (
+        ("pending", "Pending"),
+        ("accepted", "Accepted"),
+        ("revoked", "Revoked"),
+        ("expired", "Expired"),
+    )
+
+    invitation_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="invitations")
+    email = models.EmailField(db_index=True)
+    role = models.CharField(max_length=32, choices=TENANT_ROLE_CHOICES, default=TENANT_ROLE_VIEWER)
+    token = models.CharField(max_length=96, unique=True, default=uuid.uuid4, db_index=True)
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default="pending")
+    invited_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="aiops_tenant_invitations")
+    accepted_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="aiops_tenant_invitations_accepted")
+    expires_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.email}:{self.tenant}:{self.status}"
+
+
+class TenantAuditEvent(models.Model):
+    event_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, null=True, blank=True, on_delete=models.SET_NULL, related_name="audit_events")
+    actor = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="aiops_tenant_audit_events")
+    action = models.CharField(max_length=120, db_index=True)
+    object_type = models.CharField(max_length=120, blank=True, default="")
+    object_id = models.CharField(max_length=120, blank=True, default="")
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def save(self, *args, **kwargs):
+        if self.pk and TenantAuditEvent.objects.filter(pk=self.pk).exists():
+            raise ValueError("Tenant audit events are append-only and cannot be modified.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError("Tenant audit events are append-only and cannot be deleted.")
+
+    def __str__(self):
+        return f"{self.tenant_id}:{self.action}:{self.object_type}:{self.object_id}"
+
 
 DATA_CLASS_CHOICES = (
     ("hot_telemetry", "Hot Telemetry"),
@@ -62,6 +181,7 @@ class GenAIChatHistory(models.Model):
 
 class ChatSession(models.Model):
     session_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="chat_sessions")
     user = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="aiops_chat_sessions")
     title = models.CharField(max_length=255, blank=True, default="")
     context_json = models.JSONField(default=dict, blank=True)
@@ -114,6 +234,7 @@ class InvestigationRun(models.Model):
     )
 
     run_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="investigation_runs")
     session = models.ForeignKey("ChatSession", null=True, blank=True, on_delete=models.SET_NULL, related_name="investigation_runs")
     user = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="aiops_investigation_runs")
     incident = models.ForeignKey("Incident", null=True, blank=True, on_delete=models.SET_NULL, related_name="investigation_runs")
@@ -151,6 +272,7 @@ class ToolInvocation(models.Model):
     )
 
     invocation_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="tool_invocations")
     investigation_run = models.ForeignKey("InvestigationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="tool_invocations")
     session = models.ForeignKey("ChatSession", null=True, blank=True, on_delete=models.SET_NULL, related_name="tool_invocations")
     user = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="aiops_tool_invocations")
@@ -209,6 +331,7 @@ class EvidenceBundle(models.Model):
     )
 
     bundle_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="evidence_bundles")
     investigation_run = models.OneToOneField("InvestigationRun", on_delete=models.CASCADE, related_name="evidence_bundle_record")
     incident = models.ForeignKey("Incident", null=True, blank=True, on_delete=models.SET_NULL, related_name="evidence_bundles")
     retention_policy = models.ForeignKey("DataRetentionPolicy", null=True, blank=True, on_delete=models.SET_NULL, related_name="evidence_bundles")
@@ -547,6 +670,115 @@ class SLAPolicy(models.Model):
         return f"SLA-{self.priority} resp={self.response_minutes}m res={self.resolution_minutes}m"
 
 
+class AlertEvent(models.Model):
+    """Normalized alert lifecycle used for dedupe, suppression, and correlation."""
+
+    EVENT_STATUS_CHOICES = (
+        ("firing", "Firing"),
+        ("resolved", "Resolved"),
+        ("unknown", "Unknown"),
+    )
+
+    event_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="alert_events")
+    source = models.CharField(max_length=64, default="unknown", db_index=True)
+    lifecycle_key = models.CharField(max_length=255, db_index=True)
+    alert_name = models.CharField(max_length=255, db_index=True)
+    fingerprint = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    starts_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    ends_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=32, choices=EVENT_STATUS_CHOICES, default="firing", db_index=True)
+    severity = models.CharField(max_length=32, blank=True, default="warning", db_index=True)
+    service_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    target_host = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    environment = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    namespace = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    cluster = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    labels = models.JSONField(default=dict, blank=True)
+    annotations = models.JSONField(default=dict, blank=True)
+    raw_payload = models.JSONField(default=dict, blank=True)
+    incident = models.ForeignKey("Incident", null=True, blank=True, on_delete=models.SET_NULL, related_name="alert_events")
+    repeat_count = models.PositiveIntegerField(default=1)
+    suppressed = models.BooleanField(default=False, db_index=True)
+    suppression_reason = models.CharField(max_length=255, blank=True, default="")
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-last_seen_at"]
+        unique_together = ("tenant", "source", "lifecycle_key")
+
+    def __str__(self):
+        return f"{self.source}:{self.alert_name}:{self.lifecycle_key}"
+
+
+class AlertSuppression(models.Model):
+    """Operator-managed rule for suppressing known noisy alert lifecycles."""
+
+    suppression_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="alert_suppressions")
+    name = models.CharField(max_length=255)
+    enabled = models.BooleanField(default=True)
+    alert_name = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    service_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    target_host = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    environment = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    reason = models.CharField(max_length=255, blank=True, default="suppression_rule")
+    expires_at = models.DateTimeField(null=True, blank=True)
+    created_by_username = models.CharField(max_length=150, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return self.name
+
+
+class MaintenanceWindow(models.Model):
+    """Time-bounded suppression window for maintenance and planned work."""
+
+    window_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="maintenance_windows")
+    name = models.CharField(max_length=255)
+    enabled = models.BooleanField(default=True)
+    service_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    target_host = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    environment = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    starts_at = models.DateTimeField(db_index=True)
+    ends_at = models.DateTimeField(db_index=True)
+    reason = models.CharField(max_length=255, blank=True, default="maintenance_window")
+    created_by_username = models.CharField(max_length=150, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-starts_at"]
+
+    def __str__(self):
+        return self.name
+
+
+class IncidentCorrelationLink(models.Model):
+    """Relationship between separately tracked incidents."""
+
+    link_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="incident_correlation_links")
+    source_incident = models.ForeignKey("Incident", on_delete=models.CASCADE, related_name="outgoing_correlation_links")
+    related_incident = models.ForeignKey("Incident", on_delete=models.CASCADE, related_name="incoming_correlation_links")
+    score = models.PositiveIntegerField(default=0)
+    reasons = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-score", "-created_at"]
+        unique_together = ("source_incident", "related_incident")
+
+    def __str__(self):
+        return f"{self.source_incident_id}->{self.related_incident_id}:{self.score}"
+
+
 class Incident(models.Model):
     STATUS_CHOICES = (
         ("open", "Open"),
@@ -555,6 +787,8 @@ class Incident(models.Model):
     )
 
     incident_key = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="incidents")
+    incident_number = models.CharField(max_length=32, unique=True, null=True, blank=True, db_index=True)
     application = models.CharField(max_length=120, blank=True, default="")
     title = models.CharField(max_length=255)
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default="open")
@@ -574,6 +808,10 @@ class Incident(models.Model):
     sla_response_due_at = models.DateTimeField(null=True, blank=True)
     sla_resolution_due_at = models.DateTimeField(null=True, blank=True)
     sla_response_acknowledged_at = models.DateTimeField(null=True, blank=True)
+    is_deleted = models.BooleanField(default=False, db_index=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by_username = models.CharField(max_length=150, blank=True, default="")
+    delete_reason = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -581,7 +819,14 @@ class Incident(models.Model):
         ordering = ["-updated_at"]
 
     def __str__(self):
-        return f"{self.application or 'unknown'}:{self.title}"
+        return f"{self.incident_number or self.incident_key}:{self.application or 'unknown'}:{self.title}"
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if not self.incident_number:
+            incident_number = f"INC-{self.pk:06d}"
+            type(self).objects.filter(pk=self.pk).update(incident_number=incident_number)
+            self.incident_number = incident_number
 
 
 class IncidentAlert(models.Model):
@@ -683,6 +928,7 @@ class Target(models.Model):
     )
 
     target_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="targets")
     name = models.CharField(max_length=160)
     target_type = models.CharField(max_length=32, default="linux")
     environment = models.CharField(max_length=64, blank=True, default="production")
@@ -925,6 +1171,7 @@ class TargetLogIngestionProfile(models.Model):
 
 class EnrollmentToken(models.Model):
     token = models.CharField(max_length=96, unique=True, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="enrollment_tokens")
     target_type = models.CharField(max_length=32, default="linux")
     target_name = models.CharField(max_length=160, blank=True, default="")
     profile = models.ForeignKey(TelemetryProfile, null=True, blank=True, on_delete=models.SET_NULL, related_name="enrollment_tokens")
@@ -1003,6 +1250,7 @@ class TargetOnboardingRequest(models.Model):
     )
 
     onboarding_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="onboarding_requests")
     target_type = models.CharField(max_length=32, default="linux")
     name = models.CharField(max_length=160)
     hostname = models.CharField(max_length=255)
@@ -1042,6 +1290,7 @@ class TargetOnboardingRequest(models.Model):
 
 class Runbook(models.Model):
     """AI-generated runbook produced from incident RCA and remediation steps."""
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="runbooks")
     incident = models.ForeignKey(
         Incident, on_delete=models.CASCADE, related_name="runbooks", null=True, blank=True
     )
@@ -1077,6 +1326,54 @@ class AgentBehaviorVersion(models.Model):
         return f"{self.name}:{self.behavior_id}"
 
 
+class PolicyPack(models.Model):
+    """Environment-aware policy pack that controls which actions are allowed, and under what conditions."""
+
+    pack_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    slug = models.SlugField(max_length=64, unique=True)
+    name = models.CharField(max_length=120)
+    description = models.TextField(blank=True, default="")
+    environment_pattern = models.CharField(
+        max_length=120,
+        blank=True,
+        default="",
+        help_text="Comma-separated environment names this pack applies to (e.g. 'production,prod').",
+    )
+    # Allowed action categories
+    allow_diagnostic = models.BooleanField(default=True)
+    allow_restart_service = models.BooleanField(default=False)
+    allow_database_change = models.BooleanField(default=False)
+    allow_rollback = models.BooleanField(default=True)
+    allow_break_glass = models.BooleanField(default=False)
+    # Approval gates
+    require_approval_for_restart = models.BooleanField(default=True)
+    require_approval_for_db_change = models.BooleanField(default=True)
+    require_approval_for_rollback = models.BooleanField(default=False)
+    # Blast radius thresholds
+    max_blast_radius_without_approval = models.PositiveIntegerField(
+        default=1,
+        help_text="Blast radius count above which approval is always required.",
+    )
+    # Rate limiting
+    max_executions_per_service_per_hour = models.PositiveIntegerField(default=10)
+    # Break-glass
+    break_glass_requires_reason = models.BooleanField(default=True)
+    break_glass_notifies_admins = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return f"{self.name} ({self.slug})"
+
+    def environments(self):
+        return [e.strip().lower() for e in (self.environment_pattern or "").split(",") if e.strip()]
+
+
 class ExecutionIntent(models.Model):
     STATUS_CHOICES = (
         ("planned", "Planned"),
@@ -1084,17 +1381,38 @@ class ExecutionIntent(models.Model):
         ("approved", "Approved"),
         ("dry_run", "Dry Run"),
         ("blocked", "Blocked"),
+        ("break_glass", "Break Glass"),
         ("executing", "Executing"),
         ("completed", "Completed"),
         ("failed", "Failed"),
         ("expired", "Expired"),
+        ("rollback_pending", "Rollback Pending"),
+        ("rolled_back", "Rolled Back"),
+        ("verification_pending", "Verification Pending"),
+        ("verified", "Verified"),
     )
 
     intent_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="execution_intents")
     session = models.ForeignKey(ChatSession, null=True, blank=True, on_delete=models.SET_NULL, related_name="execution_intents")
     user = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="aiops_execution_intents")
     incident = models.ForeignKey(Incident, null=True, blank=True, on_delete=models.SET_NULL, related_name="execution_intents")
     behavior_version = models.ForeignKey(AgentBehaviorVersion, null=True, blank=True, on_delete=models.SET_NULL, related_name="execution_intents")
+    # Original intent this record is rolling back (null for non-rollback intents)
+    original_intent = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="rollback_intents",
+    )
+    policy_pack = models.ForeignKey(
+        PolicyPack,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="execution_intents",
+    )
     execution_type = models.CharField(max_length=32, default="diagnostic")
     action_type = models.CharField(max_length=64, blank=True, default="")
     service = models.CharField(max_length=120, blank=True, default="")
@@ -1110,11 +1428,24 @@ class ExecutionIntent(models.Model):
     approval_expires_at = models.DateTimeField(null=True, blank=True)
     approved_at = models.DateTimeField(null=True, blank=True)
     approved_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="approved_execution_intents")
+    # Enriched approval metadata (B1)
+    approver_identity = models.CharField(max_length=255, blank=True, default="")
+    approval_reason = models.TextField(blank=True, default="")
+    # Break-glass (A3)
+    break_glass = models.BooleanField(default=False, db_index=True)
+    break_glass_reason = models.TextField(blank=True, default="")
     dry_run = models.BooleanField(default=False)
     rollback_json = models.JSONField(default=dict, blank=True)
+    # Pre-execution DB state snapshot for data-safe rollback (B2-DB)
+    rollback_snapshot_json = models.JSONField(default=dict, blank=True,
+        help_text="Pre-execution DB state snapshot for data-safe rollback generation.")
+    # Pre-execution blast radius estimate (B2)
+    estimated_blast_radius_json = models.JSONField(default=dict, blank=True)
     policy_decision_json = models.JSONField(default=dict, blank=True)
     ranking_json = models.JSONField(default=dict, blank=True)
     verification_json = models.JSONField(default=dict, blank=True)
+    # Whether verification must pass before the linked incident can be resolved (B3)
+    requires_verification = models.BooleanField(default=False)
     response_json = models.JSONField(default=dict, blank=True)
     context_fingerprint = models.CharField(max_length=128, blank=True, default="", db_index=True)
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default="planned")
@@ -1132,6 +1463,7 @@ class ExecutionIntent(models.Model):
 
 class RemediationOutcome(models.Model):
     outcome_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="remediation_outcomes")
     execution_intent = models.ForeignKey(ExecutionIntent, on_delete=models.CASCADE, related_name="outcomes")
     incident = models.ForeignKey(Incident, null=True, blank=True, on_delete=models.SET_NULL, related_name="remediation_outcomes")
     action_type = models.CharField(max_length=64, blank=True, default="")
@@ -1157,6 +1489,7 @@ class RemediationOutcome(models.Model):
 
 class ReplayScenario(models.Model):
     scenario_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="replay_scenarios")
     incident = models.ForeignKey(Incident, null=True, blank=True, on_delete=models.SET_NULL, related_name="replay_scenarios")
     session = models.ForeignKey(ChatSession, null=True, blank=True, on_delete=models.SET_NULL, related_name="replay_scenarios")
     source = models.CharField(max_length=32, default="execution")
@@ -1217,6 +1550,7 @@ class OperatorFeedback(models.Model):
     )
 
     feedback_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="operator_feedback")
     execution_intent = models.ForeignKey(ExecutionIntent, null=True, blank=True, on_delete=models.SET_NULL, related_name="operator_feedback")
     incident = models.ForeignKey(Incident, null=True, blank=True, on_delete=models.SET_NULL, related_name="operator_feedback")
     user = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="aiops_operator_feedback")
@@ -1247,6 +1581,7 @@ class RepositoryIndex(models.Model):
     )
 
     repository_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="repository_indexes")
     name = models.CharField(max_length=255)
     local_path = models.CharField(max_length=1024, unique=True)
     default_branch = models.CharField(max_length=255, blank=True, default="main")
@@ -1419,6 +1754,20 @@ class Integration(models.Model):
         ("aws", "AWS"),
         ("azure", "Azure"),
         ("gcp", "GCP"),
+        ("alertmanager", "Alertmanager"),
+        ("pagerduty", "PagerDuty"),
+        ("servicenow", "ServiceNow"),
+        ("jira", "Jira"),
+        ("opsgenie", "Opsgenie"),
+        ("slack", "Slack"),
+        ("teams", "Microsoft Teams"),
+        ("github", "GitHub"),
+        ("gitlab", "GitLab"),
+        ("bitbucket", "Bitbucket"),
+        ("jenkins", "Jenkins"),
+        ("argocd", "Argo CD"),
+        ("fluxcd", "Flux CD"),
+        ("kubernetes", "Kubernetes"),
         ("custom", "Custom"),
     )
 
@@ -1429,6 +1778,10 @@ class Integration(models.Model):
         ("alerts", "Alerts"),
         ("topology", "Topology/Inventory"),
         ("cloud", "Cloud Control Plane"),
+        ("itsm", "ITSM/Incident Management"),
+        ("notifications", "Notifications"),
+        ("deployments", "Deployments"),
+        ("code", "Source Control"),
         ("mixed", "Mixed/Hybrid"),
     )
 
@@ -1439,6 +1792,7 @@ class Integration(models.Model):
         ("api_key", "API Key"),
         ("oauth2", "OAuth2"),
         ("iam_role", "IAM Role"),
+        ("webhook", "Webhook URL"),
     )
 
     STATUS_CHOICES = (
@@ -1449,6 +1803,7 @@ class Integration(models.Model):
     )
 
     integration_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="integrations")
     name = models.CharField(max_length=255)
     integration_type = models.CharField(max_length=64, choices=INTEGRATION_TYPE_CHOICES)
     category = models.CharField(max_length=64, choices=CATEGORY_CHOICES)
@@ -1523,6 +1878,34 @@ class IntegrationHealthCheck(models.Model):
 
     def __str__(self):
         return f"{self.integration.name} check at {self.checked_at.isoformat()} - {self.status}"
+
+
+class IncidentExternalTicket(models.Model):
+    STATUS_CHOICES = (
+        ("created", "Created"),
+        ("failed", "Failed"),
+        ("skipped", "Skipped"),
+    )
+
+    ticket_id = models.CharField(max_length=64, unique=True, default=uuid.uuid4, db_index=True)
+    tenant = models.ForeignKey(Tenant, default=default_tenant_pk, on_delete=models.CASCADE, related_name="incident_external_tickets")
+    incident = models.ForeignKey("Incident", on_delete=models.CASCADE, related_name="external_tickets")
+    integration = models.ForeignKey(Integration, on_delete=models.CASCADE, related_name="incident_tickets")
+    external_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    external_key = models.CharField(max_length=255, blank=True, default="")
+    external_url = models.CharField(max_length=1024, blank=True, default="")
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default="created")
+    message = models.TextField(blank=True, default="")
+    payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        unique_together = ("incident", "integration")
+
+    def __str__(self):
+        return f"{self.incident_id}:{self.integration.integration_type}:{self.external_key or self.external_id or self.status}"
 
 
 class CloudAccountBinding(models.Model):

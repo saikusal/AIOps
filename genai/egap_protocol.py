@@ -198,6 +198,7 @@ _RESTART_PREFIXES = (
 _READ_ONLY_PREFIXES = (
     "tail ", "cat ", "grep ", "journalctl ", "ss ", "netstat ",
     "curl ", "ps ", "top ", "uptime", "df ", "free ",
+    "docker inspect ", "docker ps ", "docker logs ",
 )
 
 
@@ -461,6 +462,32 @@ def detect_anomaly(
 # EGAP Dispatch — the unified protocol entry point
 # ===========================================================================
 
+def _emit_break_glass_alert(actor: str, command: str, service: str, environment: str, reason: str) -> None:
+    """
+    §5 ALERTS — Emit break-glass notifications across all configured channels.
+    Delegates to break_glass_notifications module (Slack, PagerDuty, Teams,
+    generic webhook) and always writes a CRITICAL log as the final fallback.
+    Non-fatal: import or dispatch failure must never prevent break-glass execution.
+    """
+    try:
+        from genai.break_glass_notifications import dispatch_break_glass_notifications
+        dispatch_break_glass_notifications(
+            actor=actor,
+            command=command,
+            service=service,
+            environment=environment,
+            reason=reason,
+        )
+    except Exception as _exc:
+        import logging as _logging
+        _log = _logging.getLogger("egap.break_glass")
+        _log.critical(
+            "[BREAK-GLASS ACTIVATED] actor=%s service=%s environment=%s command=%s reason=%s",
+            actor, service, environment, command[:120], reason or "(no reason provided)",
+        )
+        _log.warning("[BREAK-GLASS] Notification dispatch failed (non-fatal): %s", _exc)
+
+
 def egap_dispatch(
     *,
     command: str,
@@ -470,6 +497,9 @@ def egap_dispatch(
     approval_present: bool = False,
     actor: str = "",
     agent_id: str = "",
+    break_glass: bool = False,
+    break_glass_reason: str = "",
+    policy_pack: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     EGAP Dispatch — the single wire contract for Engine-to-Agent action dispatch.
@@ -498,9 +528,23 @@ def egap_dispatch(
 
     # §1 AUTHENTICATION
     identity = build_identity(actor=actor, agent_id=agent_id)
+    if break_glass:
+        identity["break_glass"] = True
 
     # §2 AUTHORIZATION
     config      = _authorization_config()
+
+    # Overlay policy pack settings when provided
+    if isinstance(policy_pack, dict):
+        if not policy_pack.get("allow_restart_service", True):
+            config["allow_protected_env_restarts"] = False
+        if not policy_pack.get("allow_database_change", True):
+            config["allow_db_changes"] = False
+        if policy_pack.get("require_approval_for_restart", False):
+            config["require_restart_approval"] = True
+        if policy_pack.get("require_approval_for_db_change", False):
+            config["require_db_change_approval"] = True
+
     clf         = classify_action(command, execution_type)
     action_type = clf["action_type"]
     service     = _derive_service(target_host, context)
@@ -511,6 +555,24 @@ def egap_dispatch(
     blocked_reasons, approval_reasons = _evaluate_authorization(
         action_type, config, environment, service, approval_present
     )
+
+    # Break-glass: bypass blocked/requires_approval — but ONLY if policy pack permits it
+    # and a non-empty reason is provided. Forces an admin-level audit trail.
+    if break_glass:
+        pack_allows_break_glass = True
+        reason_required = True
+        if isinstance(policy_pack, dict) and not policy_pack.get("allow_break_glass", True):
+            pack_allows_break_glass = False
+        if isinstance(policy_pack, dict):
+            reason_required = bool(policy_pack.get("break_glass_requires_reason", True))
+        if not pack_allows_break_glass:
+            blocked_reasons.append("Break-glass execution is blocked by policy.")
+        elif reason_required and not str(break_glass_reason or "").strip():
+            blocked_reasons.append("Break-glass execution requires a reason.")
+        else:
+            _emit_break_glass_alert(actor, command, service, environment, break_glass_reason)
+            blocked_reasons = []
+            approval_reasons = []
 
     # §3 AUDIT
     audit_key = _audit_key(command, target_host, service, action_type)
@@ -627,4 +689,7 @@ def egap_dispatch(
         "retry_limit":               config["retry_limit"],
         "action_key":                audit_key,
         "actor":                     actor or "system",
+        # Break-glass metadata
+        "break_glass":               break_glass,
+        "break_glass_reason":        break_glass_reason if break_glass else "",
     }

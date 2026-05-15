@@ -1,4 +1,5 @@
 # genai/views.py
+import asyncio
 import os
 import re
 import json
@@ -21,9 +22,10 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from io import BytesIO, StringIO
-from django.contrib.auth import authenticate, login as auth_login, logout as auth_logout
+from django.contrib.auth import authenticate, get_user_model, login as auth_login, logout as auth_logout
 from django.contrib.auth.decorators import login_required
-from django.http import JsonResponse, HttpResponse, HttpRequest
+from django.contrib.auth.views import redirect_to_login
+from django.http import JsonResponse, HttpResponse, HttpRequest, StreamingHttpResponse
 from django.conf import settings
 from django.shortcuts import redirect, render
 from django.views.decorators.csrf import csrf_exempt
@@ -32,11 +34,14 @@ from django.views.decorators.http import require_GET
 from django.db import connection, models
 from django.core.cache import cache
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime as django_parse_datetime
+from asgiref.sync import sync_to_async
 
 import pandas as pd
 
 from .models import (
     AgentBehaviorVersion,
+    AlertSuppression,
     ChatMessage,
     ChatSession,
     CodeChangeRecord,
@@ -54,7 +59,10 @@ from .models import (
     IntegrationBinding,
     IntegrationCredential,
     IntegrationHealthCheck,
+    IncidentExternalTicket,
     InvestigationRun,
+    MaintenanceWindow,
+    ToolInvocation,
     OperatorFeedback,
     RemediationOutcome,
     ReplayEvaluation,
@@ -76,8 +84,11 @@ from .models import (
     TargetPolicyAssignment,
     TargetPolicyProfile,
     TargetRuntimeProfile,
+    PolicyPack,
     TargetServiceBinding,
     TelemetryProfile,
+    TenantInvitation,
+    TenantMembership,
 )
 from .predictions import score_components
 from .sso import ensure_sso_user, get_sso_identity
@@ -124,6 +135,14 @@ from .mcp_services import (
 from .policy_engine import evaluate_execution_policy, record_execution_attempt
 from .behavior_versions import current_behavior_version_payload
 from .code_context_ingestion import auto_register_target_code_context, ensure_builtin_repository_indexes
+from .alert_pipeline import (
+    attach_incident,
+    correlate_incident,
+    evaluate_suppression,
+    mark_suppression,
+    noise_reduction_stats,
+    persist_alert_event,
+)
 from .integrations.registry import IntegrationRegistry
 from .trace_backend import get_trace_backend
 from .execution_safety import (
@@ -142,13 +161,27 @@ from .typed_actions import (
     action_summary,
     command_from_typed_action,
     infer_typed_action,
+    infer_rollback_action,
     serialize_action_signature,
+)
+from .blast_radius_estimation import estimate_blast_radius as estimate_pre_execution_blast_radius
+from .rollback_snapshots import capture_pre_execution_snapshot, build_rollback_command_from_snapshot
+from .egap_protocol import egap_dispatch as _egap_dispatch_direct
+from .tenancy import (
+    audit_event,
+    has_permission,
+    permissions_for_role,
+    require_permission,
+    resolve_request_tenant,
+    tenant_object_or_404,
+    tenant_queryset,
 )
 from better_profanity import profanity
 import os
 
 # ---------------- logging ----------------
 logger = logging.getLogger("genai")
+User = get_user_model()
 
 
 def _avg_boolean(field_name: str) -> models.Case:
@@ -202,10 +235,16 @@ from .telemetry_cache import (
     get_http_session,
     purge_cache,
 )
+from .investigation_streams import (
+    investigation_streaming_enabled,
+    load_cached_stream_snapshot,
+    open_investigation_stream_subscription,
+)
 
 # ---------------- config ----------------
 TARGET_TABLE = os.getenv("GENAI_TABLE", "")
 METRICS_API_URL = os.getenv("METRICS_API_URL") or os.getenv("PROMETHEUS_URL")
+DEFAULT_ELASTICSEARCH_URL = "http://elasticsearch:9200"
 ELASTICSEARCH_URL = os.getenv("ELASTICSEARCH_URL")
 OPENSEARCH_URL = os.getenv("OPENSEARCH_URL") or ELASTICSEARCH_URL
 ELASTICSEARCH_VERIFY_SSL = str(os.getenv("ELASTICSEARCH_VERIFY_SSL", "false")).strip().lower() not in {"false", "0", "no"}
@@ -260,7 +299,54 @@ INTEGRATION_VENDOR_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "aws": {"category": "cloud", "auth_mode": "iam_role", "default_name": "AWS"},
     "azure": {"category": "cloud", "auth_mode": "oauth2", "default_name": "Azure"},
     "gcp": {"category": "cloud", "auth_mode": "oauth2", "default_name": "GCP"},
+    "alertmanager": {"category": "alerts", "auth_mode": "none", "default_name": "Alertmanager"},
+    "pagerduty": {"category": "itsm", "auth_mode": "api_key", "default_name": "PagerDuty"},
+    "servicenow": {"category": "itsm", "auth_mode": "basic", "default_name": "ServiceNow"},
+    "jira": {"category": "itsm", "auth_mode": "basic", "default_name": "Jira"},
+    "opsgenie": {"category": "itsm", "auth_mode": "api_key", "default_name": "Opsgenie"},
+    "slack": {"category": "notifications", "auth_mode": "bearer", "default_name": "Slack"},
+    "teams": {"category": "notifications", "auth_mode": "webhook", "default_name": "Microsoft Teams"},
+    "github": {"category": "code", "auth_mode": "bearer", "default_name": "GitHub"},
+    "gitlab": {"category": "code", "auth_mode": "api_key", "default_name": "GitLab"},
+    "bitbucket": {"category": "code", "auth_mode": "basic", "default_name": "Bitbucket"},
+    "jenkins": {"category": "deployments", "auth_mode": "basic", "default_name": "Jenkins"},
+    "argocd": {"category": "deployments", "auth_mode": "bearer", "default_name": "Argo CD"},
+    "fluxcd": {"category": "deployments", "auth_mode": "none", "default_name": "Flux CD"},
+    "kubernetes": {"category": "topology", "auth_mode": "bearer", "default_name": "Kubernetes"},
     "custom": {"category": "mixed", "auth_mode": "none", "default_name": "Custom"},
+}
+
+INTEGRATION_CAPABILITIES: Dict[str, List[str]] = {
+    "prometheus": ["metrics"],
+    "victoriametrics": ["metrics"],
+    "tempo": ["traces"],
+    "jaeger": ["traces"],
+    "opensearch": ["logs"],
+    "elasticsearch": ["logs"],
+    "loki": ["logs"],
+    "splunk": ["logs"],
+    "dynatrace": ["traces", "topology"],
+    "datadog": ["metrics", "logs"],
+    "newrelic": ["metrics", "logs", "traces"],
+    "nagios": ["alerts"],
+    "aws": ["cloud_inventory"],
+    "azure": ["cloud_inventory"],
+    "gcp": ["cloud_inventory"],
+    "alertmanager": ["alerts"],
+    "pagerduty": ["incident_writeback", "notifications"],
+    "servicenow": ["incident_writeback"],
+    "jira": ["incident_writeback"],
+    "opsgenie": ["alerts", "notifications"],
+    "slack": ["notifications"],
+    "teams": ["notifications"],
+    "github": ["code_changes"],
+    "gitlab": ["code_changes"],
+    "bitbucket": ["code_changes"],
+    "jenkins": ["deployments"],
+    "argocd": ["deployments"],
+    "fluxcd": ["deployments"],
+    "kubernetes": ["topology", "deployments"],
+    "custom": ["metrics", "logs", "traces", "alerts"],
 }
 
 # ---------------------------------------------------------------------------
@@ -506,11 +592,24 @@ def _serialize_chat_session(session: ChatSession) -> Dict[str, Any]:
 
 def _get_or_create_chat_session(request: HttpRequest, session_id: Optional[str] = None) -> ChatSession:
     candidate = (session_id or request.session.get("genai_chat_session_id") or "").strip()
+    tenant = getattr(request, "tenant", None)
     if candidate:
-        session, created = ChatSession.objects.get_or_create(session_id=candidate)
+        queryset = ChatSession.objects.all()
+        if tenant:
+            queryset = queryset.filter(models.Q(tenant=tenant) | models.Q(tenant__isnull=True))
+        session = queryset.filter(session_id=candidate).first()
+        if session:
+            created = False
+        else:
+            session = ChatSession.objects.create(session_id=candidate, tenant=tenant)
+            created = True
     else:
-        session = ChatSession.objects.create()
+        session = ChatSession.objects.create(tenant=tenant)
         created = True
+
+    if tenant and session.tenant_id != tenant.id:
+        session.tenant = tenant
+        session.save(update_fields=["tenant", "updated_at", "last_activity_at"])
 
     if request.user.is_authenticated and session.user_id != request.user.id:
         session.user = request.user
@@ -558,6 +657,8 @@ def _record_chat_reply(session: Optional[ChatSession], payload: Dict[str, Any]) 
 
 def _recent_chat_sessions_for_request(request: HttpRequest, requested_ids: Optional[List[str]] = None) -> List[ChatSession]:
     queryset = ChatSession.objects.filter(is_active=True)
+    if getattr(request, "tenant", None):
+        queryset = queryset.filter(models.Q(tenant=request.tenant) | models.Q(tenant__isnull=True))
     if request.user.is_authenticated:
         queryset = queryset.filter(user=request.user)
     elif requested_ids:
@@ -578,14 +679,247 @@ def _build_incident_title(application_title: str, alert_name: str, service_name:
 
 def _incident_fingerprint(alert_payload: Dict[str, Any], target_host: str, service_name: str) -> str:
     labels = alert_payload.get("labels") if isinstance(alert_payload.get("labels"), dict) else {}
-    fingerprint = labels.get("fingerprint") or alert_payload.get("group_key")
+    fingerprint = (
+        alert_payload.get("fingerprint")
+        or labels.get("fingerprint")
+        or alert_payload.get("group_key")
+    )
     if fingerprint:
+        starts_at = str(alert_payload.get("starts_at") or "").strip()
+        if starts_at:
+            return f"{fingerprint}:{starts_at}"
         return str(fingerprint)
     alert_name = alert_payload.get("alert_name") or labels.get("alertname") or "unknown_alert"
     return f"{alert_name}:{service_name or target_host}"
 
 
-def _correlate_alert_to_incident(alert_payload: Dict[str, Any], context: Dict[str, Any], summary: str, why: str) -> Incident:
+def _find_active_incident_alert_for_payload(
+    alert_payload: Dict[str, Any],
+    context: Optional[Dict[str, Any]] = None,
+    tenant=None,
+) -> Optional[IncidentAlert]:
+    context = context or {}
+    labels = alert_payload.get("labels") if isinstance(alert_payload.get("labels"), dict) else {}
+    alert_name = alert_payload.get("alert_name") or labels.get("alertname") or "unknown_alert"
+    target_host = context.get("target_host") or _extract_target_host_from_payload(alert_payload) or ""
+    service_name = context.get("service_name") or labels.get("service") or target_host
+    application_info = _get_application_info(service_name or target_host)
+    application = application_info.get("application", "")
+    fingerprint = _incident_fingerprint(alert_payload, target_host, service_name)
+
+    query = (
+        IncidentAlert.objects.select_related("incident")
+        .filter(
+            incident__status__in=["open", "investigating"],
+            incident__application=application,
+            incident__is_deleted=False,
+            alert_name=alert_name,
+            alert_fingerprint=fingerprint,
+        )
+        .exclude(status="resolved")
+        .order_by("-last_seen_at")
+    )
+    if tenant is not None:
+        query = query.filter(incident__tenant=tenant)
+    if not alert_payload.get("starts_at") and not alert_payload.get("fingerprint"):
+        query = query.filter(target_host=target_host or "", service_name=service_name or "")
+    return query.first()
+
+
+def _record_duplicate_alert_update(incident_alert: IncidentAlert, alert_payload: Dict[str, Any]) -> Incident:
+    incident = incident_alert.incident
+    labels = alert_payload.get("labels") if isinstance(alert_payload.get("labels"), dict) else {}
+    annotations = alert_payload.get("annotations") if isinstance(alert_payload.get("annotations"), dict) else {}
+    status = str(alert_payload.get("status") or "firing").lower()
+    incident_alert.status = status
+    incident_alert.labels = labels
+    incident_alert.annotations = annotations
+    incident_alert.raw_payload = alert_payload
+    incident_alert.save(update_fields=["status", "labels", "annotations", "raw_payload", "last_seen_at"])
+
+    if incident.status == "open":
+        incident.status = "investigating"
+    incident.summary = incident.summary or str(annotations.get("summary") or "")
+    incident.save(update_fields=["status", "summary", "updated_at"])
+    IncidentTimelineEvent.objects.create(
+        incident=incident,
+        event_type="alert_updated",
+        title=f"{incident_alert.alert_name} {status}",
+        detail="Duplicate Alertmanager notification for the active alert lifecycle.",
+        payload={
+            "alert_name": incident_alert.alert_name,
+            "status": status,
+            "target_host": incident_alert.target_host,
+            "service_name": incident_alert.service_name,
+            "deduplicated": True,
+        },
+    )
+    return incident
+
+
+def _same_alert_lifecycle(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    left_labels = left.get("labels") if isinstance(left.get("labels"), dict) else {}
+    right_labels = right.get("labels") if isinstance(right.get("labels"), dict) else {}
+    return (
+        str(left.get("alert_name") or left_labels.get("alertname") or "") == str(right.get("alert_name") or right_labels.get("alertname") or "")
+        and str(left.get("fingerprint") or left_labels.get("fingerprint") or "") == str(right.get("fingerprint") or right_labels.get("fingerprint") or "")
+        and str(left.get("starts_at") or "") == str(right.get("starts_at") or "")
+    )
+
+
+def _alert_source_name(from_alertmanager: bool, alert_payload: Optional[Dict[str, Any]] = None) -> str:
+    if from_alertmanager:
+        return "alertmanager"
+    payload = alert_payload or {}
+    return str(payload.get("source") or "manual")
+
+
+def _serialize_correlation_links(links: List[Any]) -> List[Dict[str, Any]]:
+    payload = []
+    for link in links:
+        related = link.related_incident
+        payload.append(
+            {
+                "incident_key": str(related.incident_key),
+                "incident_number": related.incident_number or "",
+                "title": related.title,
+                "score": link.score,
+                "reasons": link.reasons or [],
+            }
+        )
+    return payload
+
+
+def _serialize_related_incidents(incident: Incident) -> List[Dict[str, Any]]:
+    related: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+    outgoing = incident.outgoing_correlation_links.select_related("related_incident").order_by("-score", "-created_at")[:10]
+    incoming = incident.incoming_correlation_links.select_related("source_incident").order_by("-score", "-created_at")[:10]
+    for link in outgoing:
+        related_incident = link.related_incident
+        if related_incident.id in seen:
+            continue
+        seen.add(related_incident.id)
+        related.append(
+            {
+                "incident_key": str(related_incident.incident_key),
+                "incident_number": related_incident.incident_number or "",
+                "title": related_incident.title,
+                "score": link.score,
+                "reasons": link.reasons or [],
+                "direction": "outgoing",
+            }
+        )
+    for link in incoming:
+        related_incident = link.source_incident
+        if related_incident.id in seen:
+            continue
+        seen.add(related_incident.id)
+        related.append(
+            {
+                "incident_key": str(related_incident.incident_key),
+                "incident_number": related_incident.incident_number or "",
+                "title": related_incident.title,
+                "score": link.score,
+                "reasons": link.reasons or [],
+                "direction": "incoming",
+            }
+        )
+    return sorted(related, key=lambda item: int(item.get("score") or 0), reverse=True)[:10]
+
+
+def _serialize_external_tickets(incident: Incident) -> List[Dict[str, Any]]:
+    tickets = (
+        incident.external_tickets.select_related("integration")
+        .order_by("-created_at")[:20]
+    )
+    return [
+        {
+            "ticket_id": str(ticket.ticket_id),
+            "integration_type": ticket.integration.integration_type,
+            "integration_name": ticket.integration.name,
+            "external_id": ticket.external_id,
+            "external_key": ticket.external_key,
+            "external_url": ticket.external_url,
+            "status": ticket.status,
+            "message": ticket.message,
+            "created_at": ticket.created_at.isoformat(),
+            "updated_at": ticket.updated_at.isoformat(),
+        }
+        for ticket in tickets
+    ]
+
+
+def _materialize_grouped_alert_incidents(primary_alert: Dict[str, Any], *, source: str = "alertmanager", tenant=None) -> List[Dict[str, Any]]:
+    grouped_alerts = primary_alert.get("grouped_alerts") if isinstance(primary_alert.get("grouped_alerts"), list) else []
+    materialized: List[Dict[str, Any]] = []
+    for grouped_alert in grouped_alerts:
+        if not isinstance(grouped_alert, dict) or _same_alert_lifecycle(primary_alert, grouped_alert):
+            continue
+        alert_name = str(grouped_alert.get("alert_name") or ((grouped_alert.get("labels") or {}).get("alertname")) or "AlertmanagerAlert")
+        status = str(grouped_alert.get("status") or "firing").lower()
+        alert_event, event_duplicate = persist_alert_event(grouped_alert, source=source, tenant=tenant)
+        suppressed, suppression_reason = evaluate_suppression(alert_event)
+        if suppressed:
+            mark_suppression(alert_event, True, suppression_reason)
+            materialized.append(
+                {
+                    "alert_name": alert_name,
+                    "action": "suppressed",
+                    "alert_event_id": str(alert_event.event_id),
+                    "repeat_count": alert_event.repeat_count,
+                    "suppression_reason": suppression_reason,
+                }
+            )
+            continue
+        mark_suppression(alert_event, False, "")
+        context = {
+            "target_host": grouped_alert.get("target_host") or _extract_target_host_from_payload(grouped_alert) or "",
+            "service_name": grouped_alert.get("service_name") or ((grouped_alert.get("labels") or {}).get("service")) or "",
+            "dependency_graph": {},
+        }
+        existing_alert = _find_active_incident_alert_for_payload(grouped_alert, context, tenant=tenant)
+        if existing_alert and status == "firing":
+            incident = _record_duplicate_alert_update(existing_alert, grouped_alert)
+            attach_incident(alert_event, incident)
+            action = "updated"
+        else:
+            annotations = grouped_alert.get("annotations") if isinstance(grouped_alert.get("annotations"), dict) else {}
+            summary = str(annotations.get("summary") or annotations.get("description") or f"{alert_name} {status}")
+            incident = _correlate_alert_to_incident(
+                grouped_alert,
+                context,
+                summary,
+                "Individual alert from grouped Alertmanager payload. Created separately for per-alert incident tracking.",
+                auto_investigate=True,
+                tenant=tenant,
+            )
+            attach_incident(alert_event, incident)
+            correlate_incident(alert_event, incident)
+            action = "created"
+        materialized.append(
+            {
+                "alert_name": alert_name,
+                "incident_key": str(incident.incident_key),
+                "incident_number": incident.incident_number or "",
+                "action": action,
+                "alert_event_id": str(alert_event.event_id),
+                "alert_event_duplicate": event_duplicate,
+                "repeat_count": alert_event.repeat_count,
+            }
+        )
+    return materialized
+
+
+def _correlate_alert_to_incident(
+    alert_payload: Dict[str, Any],
+    context: Dict[str, Any],
+    summary: str,
+    why: str,
+    *,
+    auto_investigate: bool = True,
+    tenant=None,
+) -> Incident:
     labels = alert_payload.get("labels") if isinstance(alert_payload.get("labels"), dict) else {}
     annotations = alert_payload.get("annotations") if isinstance(alert_payload.get("annotations"), dict) else {}
     alert_name = alert_payload.get("alert_name") or labels.get("alertname") or "unknown_alert"
@@ -599,14 +933,11 @@ def _correlate_alert_to_incident(alert_payload: Dict[str, Any], context: Dict[st
     fingerprint = _incident_fingerprint(alert_payload, target_host, service_name)
     alert_status = str(alert_payload.get("status") or "firing").lower()
 
-    incident = (
-        Incident.objects.filter(status__in=["open", "investigating"], application=application)
-        .filter(models.Q(primary_service=service_name) | models.Q(target_host=target_host) | models.Q(title__icontains=alert_name))
-        .order_by("-updated_at")
-        .first()
-    )
+    matching_alert = _find_active_incident_alert_for_payload(alert_payload, context, tenant=tenant)
+    incident = matching_alert.incident if matching_alert else None
     if incident is None:
         incident = Incident.objects.create(
+            tenant=tenant,
             application=application,
             title=_build_incident_title(application_title, alert_name, service_name),
             status="resolved" if alert_status == "resolved" else "open",
@@ -677,7 +1008,7 @@ def _correlate_alert_to_incident(alert_payload: Dict[str, Any], context: Dict[st
             incident.resolved_at = None
             incident.save(update_fields=["status", "resolved_at", "updated_at"])
 
-    if incident.status in {"open", "investigating"}:
+    if auto_investigate and incident.status in {"open", "investigating"}:
         _ensure_investigation_run_for_incident(incident)
 
     return incident
@@ -911,6 +1242,7 @@ def _incident_summary_payload(incident: Incident) -> Dict[str, Any]:
     ).order_by("-created_at").first()
     return {
         "incident_key": str(incident.incident_key),
+        "incident_number": incident.incident_number or "",
         "application": incident.application,
         "title": incident.title,
         "status": incident.status,
@@ -923,6 +1255,8 @@ def _incident_summary_payload(incident: Incident) -> Dict[str, Any]:
         "updated_at": incident.updated_at.isoformat(),
         "opened_at": incident.opened_at.isoformat(),
         "resolved_at": incident.resolved_at.isoformat() if incident.resolved_at else None,
+        "is_deleted": incident.is_deleted,
+        "deleted_at": incident.deleted_at.isoformat() if incident.deleted_at else None,
         "alerts": [
             {
                 "alert_name": alert.alert_name,
@@ -933,6 +1267,8 @@ def _incident_summary_payload(incident: Incident) -> Dict[str, Any]:
             }
             for alert in alerts
         ],
+        "related_incidents": _serialize_related_incidents(incident),
+        "external_tickets": _serialize_external_tickets(incident),
         "timeline_count": incident.timeline.count(),
         "prediction": (
             {
@@ -970,9 +1306,18 @@ def _incident_timeline_payload(incident: Incident) -> Dict[str, Any]:
         )
         latest_narrative_created_at = latest_narrative_event.created_at.isoformat()
 
+    latest_investigation = _latest_investigation_ui_projection(incident)
+    deep_dive = _incident_deep_dive_projection(
+        incident=incident,
+        linked_recommendation=linked_recommendation,
+        latest_investigation=latest_investigation,
+    )
+
     return {
         **_incident_summary_payload(incident),
         "linked_recommendation": linked_recommendation,
+        "latest_investigation": latest_investigation,
+        "deep_dive": deep_dive,
         "latest_runbook": (
             {
                 "runbook_id": latest_runbook.id,
@@ -1237,6 +1582,61 @@ RESTARTABLE_CONTAINER_NAMES = {
     "app-inventory": "aiops-app-inventory",
     "app-billing": "aiops-app-billing",
     "toxiproxy": "aiops-toxiproxy",
+}
+
+ALERT_FAMILY_PROFILES: Dict[str, Dict[str, Any]] = {
+    "availability": {
+        "active_states": {"firing", "pending"},
+        "log_absence_is_contradiction": False,
+        "trace_absence_is_contradiction": False,
+        "requires_custom_metric": False,
+        "default_action": "diagnose",
+    },
+    "error_rate": {
+        "active_states": {"firing", "pending"},
+        "log_absence_is_contradiction": True,
+        "trace_absence_is_contradiction": True,
+        "requires_custom_metric": False,
+        "default_action": "diagnose",
+    },
+    "latency": {
+        "active_states": {"firing", "pending"},
+        "log_absence_is_contradiction": False,
+        "trace_absence_is_contradiction": False,
+        "requires_custom_metric": False,
+        "default_action": "diagnose",
+    },
+    "saturation": {
+        "active_states": {"firing", "pending"},
+        "log_absence_is_contradiction": False,
+        "trace_absence_is_contradiction": False,
+        "requires_custom_metric": False,
+        "default_action": "diagnose",
+    },
+    "dependency": {
+        "active_states": {"firing", "pending"},
+        "log_absence_is_contradiction": True,
+        "trace_absence_is_contradiction": False,
+        "requires_custom_metric": False,
+        "default_action": "diagnose",
+    },
+    "generic": {
+        "active_states": {"firing", "pending"},
+        "log_absence_is_contradiction": True,
+        "trace_absence_is_contradiction": True,
+        "requires_custom_metric": False,
+        "default_action": "observe",
+    },
+}
+
+DEMO_ALERT_FAMILY_MAP: Dict[str, str] = {
+    "DemoAppLatencyHigh": "latency",
+    "DemoDatabaseConnectionsHigh": "saturation",
+    "DemoAppErrorsHigh": "error_rate",
+    "DemoServiceDown": "availability",
+    "DemoDatabaseDown": "availability",
+    "DemoGatewayUnavailable": "availability",
+    "DemoFrontendUnavailable": "availability",
 }
 
 K8S_AGENT_QUEUE_TTL_SECONDS = 60 * 15
@@ -1666,6 +2066,10 @@ def _merge_command_output_into_investigation_run(
     logs_section["hit_count"] = max(int(logs_section.get("hit_count") or 0), hit_count)
     logs_section["post_command_hit_count"] = hit_count
     evidence_bundle_json["logs"] = logs_section
+    existing_centralized_logs = dict(evidence_bundle_json.get("elasticsearch") or {})
+    existing_total = _extract_log_hit_count(existing_centralized_logs)
+    if hit_count >= existing_total:
+        evidence_bundle_json["elasticsearch"] = log_payload
     evidence_bundle_json["post_command_log_excerpt"] = [line for line in str(command_output).splitlines() if line.strip()][:20]
 
     evidence_assessment = dict((evidence_bundle_json.get("evidence_assessment") or {}))
@@ -1693,10 +2097,26 @@ def _merge_command_output_into_investigation_run(
         if item and item not in hard:
             hard.append(item)
 
+    remediation_command = ""
+    remediation_steps: List[str] = []
+    resolution_summary = ""
+    if isinstance(analysis_sections, dict):
+        remediation_command = str(analysis_sections.get("remediation_command") or "").strip()
+        remediation_steps = [str(item) for item in (analysis_sections.get("remediation_steps") or []) if item]
+        resolution_summary = str(analysis_sections.get("resolution") or "").strip()
+    runtime_evidence_confirmed = bool(hard and not missing)
+    actionable_resolution = bool(remediation_command or remediation_steps or resolution_summary)
+
     evidence_assessment["hard_evidence"] = hard
     evidence_assessment["missing_evidence"] = missing
     evidence_assessment["contradicting_evidence"] = contradicting
-    if hard:
+    if runtime_evidence_confirmed and actionable_resolution:
+        evidence_assessment["safe_action"] = "remediate"
+        evidence_assessment["confidence_reason"] = "Direct runtime evidence now confirms the likely root cause, so the next step is remediation."
+    elif runtime_evidence_confirmed:
+        evidence_assessment["safe_action"] = "diagnose"
+        evidence_assessment["confidence_reason"] = "Direct runtime evidence now confirms the likely root cause, so no further evidence collection is required."
+    elif hard:
         evidence_assessment["confidence_reason"] = "Recent command-output logs provide direct failure evidence."
     if confidence_assessment:
         confidence_assessment["supporting_evidence_count"] = max(int(confidence_assessment.get("supporting_evidence_count") or 0), len(hard))
@@ -1704,6 +2124,10 @@ def _merge_command_output_into_investigation_run(
         confidence_assessment["missing_evidence_count"] = len(missing)
         confidence_assessment["contradicting_evidence_count"] = len(contradicting)
         confidence_assessment["summary"] = evidence_assessment.get("confidence_reason") or confidence_assessment.get("summary") or ""
+        if runtime_evidence_confirmed:
+            confidence_assessment["score"] = max(float(confidence_assessment.get("score") or 0.0), 0.85)
+            confidence_assessment["level"] = "high"
+            confidence_assessment["posture"] = "actionable" if actionable_resolution else "confirmed"
         evidence_assessment["confidence_assessment"] = confidence_assessment
     if contradiction_assessment:
         contradiction_assessment["count"] = len(contradicting)
@@ -1729,6 +2153,13 @@ def _merge_command_output_into_investigation_run(
     iterations = [dict(item) for item in (iteration_plan.get("iterations") or []) if isinstance(item, dict)]
     candidate_steps = [item for item in candidate_steps if str(item.get("tool_name") or "") != "logs.search"]
     iterations = [item for item in iterations if str(item.get("selected_tool") or "") != "logs.search"]
+    if runtime_evidence_confirmed:
+        candidate_steps = []
+        for item in iterations:
+            if str(item.get("status") or "").strip().lower() == "planned":
+                item["status"] = "unused"
+        iteration_plan["should_continue"] = False
+        iteration_plan["stop_reason"] = "direct_runtime_evidence_confirmed"
     iteration_plan["candidate_steps"] = candidate_steps
     iteration_plan["iterations"] = iterations
     planner_json["iteration_plan"] = iteration_plan
@@ -1749,6 +2180,14 @@ def _merge_command_output_into_investigation_run(
         elif stage == "planning_next_step":
             details["iteration_plan"] = iteration_plan
             details["selected_next_tool"] = (candidate_steps[0] or {}).get("tool_name") if candidate_steps else "none"
+            details["decision_policy"] = evidence_assessment.get("safe_action") or details.get("decision_policy") or "diagnose"
+            if runtime_evidence_confirmed:
+                details["next_verification_step"] = ""
+            item["details"] = details
+        elif stage == "post_check_validator" and runtime_evidence_confirmed:
+            details["confidence"] = "high"
+            details["confidence_score"] = max(float(details.get("confidence_score") or 0.0), 0.85)
+            details["next_verification_step"] = ""
             item["details"] = details
 
     run.evidence_bundle_json = evidence_bundle_json
@@ -1757,6 +2196,8 @@ def _merge_command_output_into_investigation_run(
     run.missing_evidence_json = missing
     run.contradicting_evidence_json = contradicting
     run.current_stage = "verifying"
+    if runtime_evidence_confirmed:
+        run.confidence_score = max(float(run.confidence_score or 0.0), 0.85)
     run.save(
         update_fields=[
             "evidence_bundle_json",
@@ -1765,6 +2206,7 @@ def _merge_command_output_into_investigation_run(
             "missing_evidence_json",
             "contradicting_evidence_json",
             "current_stage",
+            "confidence_score",
             "updated_at",
         ]
     )
@@ -1812,13 +2254,16 @@ def _structured_evidence_from_context(
     custom_query = (metrics or {}).get("custom_query") if isinstance(metrics, dict) else {}
     custom_query_value = _extract_first_sample_value(custom_query or {})
     custom_query_result_count = _extract_metric_result_count(custom_query or {})
+    alert_family = _classify_alert_family(alert_payload, context)
+    family_profile = _alert_family_profile(alert_family)
     alert_states = _extract_alert_states(alert_state or {})
+    active_states = {str(item).strip().lower() for item in family_profile.get("active_states") or {"firing"}}
+    payload_status = str(alert_payload.get("status") or "").strip().lower()
+    alert_phase = alert_states[0] if alert_states else payload_status
     if alert_states:
-        alert_firing: Optional[bool] = any(state == "firing" for state in alert_states)
+        alert_firing: Optional[bool] = any(state in active_states for state in alert_states)
     else:
-        # ALERTS metric returned no samples — fall back to the inbound payload's status field
-        payload_status = str(alert_payload.get("status") or "").strip().lower()
-        if payload_status == "firing":
+        if payload_status in active_states:
             alert_firing = True
         elif payload_status in ("resolved", "ok"):
             alert_firing = False
@@ -1861,6 +2306,15 @@ def _structured_evidence_from_context(
     else:
         missing_signals.append("Alert state was not available from the metrics backend.")
 
+    is_availability_alert = alert_family == "availability"
+    is_latency_alert = alert_family == "latency"
+    is_saturation_alert = alert_family == "saturation"
+
+    if is_availability_alert and alert_firing is True:
+        confirming_signals.append(f"Availability alert is active for {target_component or 'the target service'}.")
+        if target_component:
+            confirming_signals.append(f"Prometheus indicates the scrape target for {target_component} is unavailable or unreachable.")
+
     if custom_query_value is not None:
         if custom_query_value > 0.1:
             confirming_signals.append(f"Alert metric remains elevated at {custom_query_value:.2f}.")
@@ -1868,7 +2322,7 @@ def _structured_evidence_from_context(
             contradicting_signals.append(f"Alert metric is low at {custom_query_value:.2f}.")
     elif custom_query_result_count:
         confirming_signals.append("Custom metric query returned active samples.")
-    elif alert_firing is True:
+    elif alert_firing is True and not family_profile.get("requires_custom_metric"):
         # Alert state already confirmed firing — no separate custom query is required
         logger.debug("[EVIDENCE] Skipping custom metric missing signal — alert_firing already confirmed")
     else:
@@ -1878,12 +2332,12 @@ def _structured_evidence_from_context(
 
     if normalized_error_messages:
         confirming_signals.append("Recent logs contain active error messages.")
-    else:
+    elif family_profile.get("log_absence_is_contradiction"):
         contradicting_signals.append("Recent logs do not contain clear active error messages.")
 
     if trace_service_error:
         confirming_signals.append("Recent traces contain service failures.")
-    else:
+    elif family_profile.get("trace_absence_is_contradiction"):
         contradicting_signals.append("Recent traces do not show service failures.")
 
     tokens = _error_tokens()
@@ -1926,40 +2380,53 @@ def _structured_evidence_from_context(
             dependency_hard_evidence[str(dependency)] = dependency_evidence
             confirming_signals.extend(dependency_evidence)
             logger.debug(f"[EVIDENCE] Dependency {dependency} evidence: {dependency_evidence}")
-        elif blast_radius:
+        elif blast_radius and not is_availability_alert:
             missing_signals.append(f"Dependency {dependency} is in the topology path, but no direct or indirect evidence found.")
 
     best_dependency_target = next(iter(dependency_hard_evidence), "")
     signal_score = 0.0
-    # alert_firing=True from ALERTS metric OR from payload status both earn full weight
-    signal_score += 0.25 if alert_firing is True else 0.0
-    # custom query is a bonus — only subtract if alert is NOT confirmed
-    if custom_query_value is not None and custom_query_value > 0.1:
-        signal_score += 0.20
-    elif custom_query_value is not None and custom_query_value <= 0.1:
-        # metric present but low — mild negative
-        if alert_firing is not True:
+    if is_availability_alert:
+        signal_score += 0.55 if alert_firing is True else 0.0
+        signal_score += 0.10 if target_component else 0.0
+        signal_score += 0.05 if payload_status in active_states else 0.0
+        signal_score -= 0.10 if alert_firing is False else 0.0
+    else:
+        signal_score += 0.25 if alert_firing is True else 0.0
+        if custom_query_value is not None and custom_query_value > 0.1:
+            signal_score += 0.20
+        elif custom_query_value is not None and custom_query_value <= 0.1:
+            if alert_firing is not True:
+                signal_score -= 0.05
+        elif is_latency_alert or is_saturation_alert:
+            signal_score += 0.10 if alert_firing is True else 0.0
+        signal_score += 0.20 if normalized_error_messages else 0.0
+        signal_score += 0.20 if trace_service_error else 0.0
+        signal_score += min(0.15, 0.05 * len(dependency_hard_evidence))
+        signal_score -= 0.10 if alert_firing is False else 0.0
+        if family_profile.get("log_absence_is_contradiction") and not normalized_error_messages and alert_firing is not True:
             signal_score -= 0.05
-    # No penalty for missing custom query when alert_firing is already confirmed
-    signal_score += 0.20 if normalized_error_messages else 0.0
-    signal_score += 0.20 if trace_service_error else 0.0
-    signal_score += min(0.15, 0.05 * len(dependency_hard_evidence))
-    signal_score -= 0.10 if alert_firing is False else 0.0
-    signal_score -= 0.05 if not normalized_error_messages and alert_firing is not True else 0.0
     confidence_score = max(0.0, min(1.0, round(signal_score, 2)))
     
     logger.info(f"[EVIDENCE] Confidence score: {confidence_score:.2f} | Best dependency target: {best_dependency_target} | Signals: {len(confirming_signals)} confirming, {len(contradicting_signals)} contradicting, {len(missing_signals)} missing")
 
-    recommended_action_mode = "observe"
+    recommended_action_mode = str(family_profile.get("default_action") or "observe")
     confidence_reason = "No strong failure evidence is present yet."
-    if confidence_score >= 0.35:
+    if is_availability_alert and alert_firing is True:
+        confidence_reason = "The target appears unavailable from the observability control plane, which is direct availability evidence."
+        recommended_action_mode = "diagnose"
+    elif confidence_score >= 0.35:
         recommended_action_mode = "diagnose"
         confidence_reason = "There is enough live evidence to continue diagnostic investigation."
     if best_dependency_target:
         confidence_reason = f"Direct evidence points to downstream component {best_dependency_target}."
+    if is_latency_alert and alert_firing is True and confidence_score >= 0.35:
+        confidence_reason = "Latency telemetry is actively degraded, so the next step should focus on slow-path diagnosis."
+    if is_saturation_alert and alert_firing is True and confidence_score >= 0.35:
+        confidence_reason = "Resource or connection saturation is active, so the next step should focus on capacity diagnosis."
 
     return {
         "schema_version": "structured-evidence-v1",
+        "alert_family": alert_family,
         "primary_symptom": primary_symptom,
         "target_component": target_component,
         "service_name": context.get("service_name") or alert_payload.get("service_name") or "",
@@ -1973,6 +2440,7 @@ def _structured_evidence_from_context(
         },
         "observations": {
             "alert_states": alert_states,
+            "alert_phase": alert_phase,
             "alert_firing": alert_firing,
             "custom_query_value": custom_query_value,
             "custom_query_result_count": custom_query_result_count,
@@ -2032,6 +2500,7 @@ def _assess_recommendation_evidence(context: Dict[str, Any]) -> Dict[str, Any]:
         "confidence_reason": evidence.get("confidence_reason") or "",
         "confidence_score": evidence.get("confidence_score") or 0.0,
         "target_component": evidence.get("target_component") or "",
+        "alert_family": evidence.get("alert_family") or "generic",
         "service_hard_evidence": service_hard_evidence,
         "dependency_hard_evidence": dependency_hard_evidence,
         "best_dependency_target": best_dependency_target,
@@ -2047,6 +2516,63 @@ def _shared_dependency_suspected(context: Dict[str, Any]) -> bool:
     dependency_graph = context.get("dependency_graph") if isinstance(context, dict) else {}
     blast_radius = (dependency_graph or {}).get("blast_radius") or []
     return any(token in haystack for token in ("toxiproxy", "psycopg2", "connection timed out", "timeout expired", "postgres", "database")) or len(blast_radius) > 1
+
+
+def _classify_alert_family(
+    alert_payload: Optional[Dict[str, Any]],
+    context: Optional[Dict[str, Any]] = None,
+) -> str:
+    alert_payload = alert_payload or {}
+    context = context or {}
+    labels = alert_payload.get("labels") if isinstance(alert_payload.get("labels"), dict) else {}
+    annotations = alert_payload.get("annotations") if isinstance(alert_payload.get("annotations"), dict) else {}
+    alert_name = str(
+        alert_payload.get("alert_name")
+        or labels.get("alertname")
+        or context.get("alert_name")
+        or ""
+    ).strip().lower()
+    text = " ".join(
+        part
+        for part in [
+            alert_name,
+            str(annotations.get("summary") or "").lower(),
+            str(annotations.get("description") or "").lower(),
+            str(alert_payload.get("prometheus_query") or alert_payload.get("metrics_query") or "").lower(),
+        ]
+        if part
+    )
+
+    normalized_name = re.sub(r"[^a-z0-9]+", "", alert_name)
+    explicit_map = {
+        re.sub(r"[^a-z0-9]+", "", name.lower()): family
+        for name, family in DEMO_ALERT_FAMILY_MAP.items()
+    }
+    if normalized_name in explicit_map:
+        return explicit_map[normalized_name]
+    if any(token in text for token in (" down", "unavailable", "unreachable", "cannot scrape", "scrape target is down")):
+        return "availability"
+    if any(token in text for token in ("latency", "slow", "p95", "p99")):
+        return "latency"
+    if any(token in text for token in ("error", "5xx", "exception", "failed")):
+        return "error_rate"
+    if any(token in text for token in ("connection", "connections", "queue", "saturation", "cpu", "memory")):
+        return "saturation"
+    if _shared_dependency_suspected(context):
+        return "dependency"
+    return "generic"
+
+
+def _alert_family_profile(alert_family: str) -> Dict[str, Any]:
+    return dict(ALERT_FAMILY_PROFILES.get(alert_family) or ALERT_FAMILY_PROFILES["generic"])
+
+
+def _default_diagnostic_plan_for_target(target_host: str, *, alert_family: str = "generic") -> Tuple[str, str]:
+    if alert_family == "availability":
+        container_name = RESTARTABLE_CONTAINER_NAMES.get(target_host)
+        if container_name:
+            return CONTROL_AGENT_HOST, f"docker inspect {container_name}"
+    return target_host, _default_diagnostic_for_target(target_host)
 
 
 def _default_diagnostic_for_target(target_host: str) -> str:
@@ -2081,6 +2607,7 @@ def _coerce_diagnostic_plan(
     dependency_graph = context.get("dependency_graph") or {}
     suspected_dependency = _shared_dependency_suspected(context)
     evidence_assessment = _assess_recommendation_evidence(context)
+    alert_family = str(evidence_assessment.get("alert_family") or "generic")
     fallback_target = fallback_target_host or service_name or target_host
     best_dependency_target = evidence_assessment.get("best_dependency_target") or ""
 
@@ -2088,33 +2615,46 @@ def _coerce_diagnostic_plan(
         target_host = str(best_dependency_target)
         why = why or f"Direct evidence points to downstream component {best_dependency_target}, so the next diagnostic should pivot there."
         if not diagnostic_command or diagnostic_command.startswith("tail ") or "/var/log/demo/" in diagnostic_command:
-            diagnostic_command = _default_diagnostic_for_target(target_host)
+            target_host, diagnostic_command = _default_diagnostic_plan_for_target(target_host, alert_family=alert_family)
     elif suspected_dependency and (dependency_graph.get("depends_on") or []):
         target_host = fallback_target
         target_type = "application_container" if str(target_host).startswith("app-") else "service"
         why = why or "A downstream dependency may be involved, but there is no direct evidence yet. Verify the impacted component first before pivoting."
-        diagnostic_command = _default_diagnostic_for_target(target_host)
+        target_host, diagnostic_command = _default_diagnostic_plan_for_target(target_host, alert_family=alert_family)
 
     if target_host == "db":
         target_type = "database"
         if not diagnostic_command:
-            diagnostic_command = _default_diagnostic_for_target(target_host)
+            target_host, diagnostic_command = _default_diagnostic_plan_for_target(target_host, alert_family=alert_family)
     elif target_host.startswith("app-"):
         target_type = "application_container"
         if not diagnostic_command:
-            diagnostic_command = _default_diagnostic_for_target(target_host)
+            target_host, diagnostic_command = _default_diagnostic_plan_for_target(target_host, alert_family=alert_family)
     elif target_host in ("gateway", "frontend"):
         target_type = "edge_proxy" if target_host == "gateway" else "edge_frontend"
         if not diagnostic_command:
-            diagnostic_command = _default_diagnostic_for_target(target_host)
+            target_host, diagnostic_command = _default_diagnostic_plan_for_target(target_host, alert_family=alert_family)
     else:
         if not diagnostic_command and target_host:
-            diagnostic_command = _default_diagnostic_for_target(target_host)
+            target_host, diagnostic_command = _default_diagnostic_plan_for_target(target_host, alert_family=alert_family)
+
+    if target_host == CONTROL_AGENT_HOST:
+        target_type = "control_plane"
 
     should_execute = _to_bool(
         ai_plan.get("should_execute"),
         default=bool(diagnostic_command and target_host and evidence_assessment.get("safe_action") != "observe"),
     )
+
+    if alert_family == "availability":
+        affected = service_name or fallback_target or target_host or "the target service"
+        summary = (
+            f"{affected} appears unavailable from Prometheus scrape health, so this should be treated as an availability incident."
+        )
+        why = (
+            "The control plane has direct availability evidence for the target. "
+            "Missing application logs or traces do not weaken this scenario because an unreachable service may stop emitting runtime telemetry."
+        )
 
     return {
         "summary": summary,
@@ -2186,29 +2726,85 @@ def _get_or_create_behavior_version() -> Optional[AgentBehaviorVersion]:
     return behavior
 
 
-def _check_service_execution_frequency(service: str) -> Dict[str, Any]:
+def _resolve_policy_pack_for_execution(
+    *,
+    target_host: str,
+    execution_context: Dict[str, Any],
+) -> Optional["PolicyPack"]:
+    """Return the most specific active PolicyPack for this execution environment."""
+    environment = (execution_context.get("environment") or "").strip().lower()
+    if not environment:
+        from genai.egap_protocol import _infer_environment
+        environment = _infer_environment(target_host, execution_context)
+    if not environment or environment == "unknown":
+        return None
+    for pack in PolicyPack.objects.filter(is_active=True).order_by("slug"):
+        if environment in pack.environments():
+            return pack
+    return None
+
+
+def _policy_pack_to_dict(pack: "PolicyPack") -> Dict[str, Any]:
+    return {
+        "slug": pack.slug,
+        "name": pack.name,
+        "allow_diagnostic": pack.allow_diagnostic,
+        "allow_restart_service": pack.allow_restart_service,
+        "allow_database_change": pack.allow_database_change,
+        "allow_rollback": pack.allow_rollback,
+        "allow_break_glass": pack.allow_break_glass,
+        "require_approval_for_restart": pack.require_approval_for_restart,
+        "require_approval_for_db_change": pack.require_approval_for_db_change,
+        "require_approval_for_rollback": pack.require_approval_for_rollback,
+        "max_blast_radius_without_approval": pack.max_blast_radius_without_approval,
+        "max_executions_per_service_per_hour": pack.max_executions_per_service_per_hour,
+        "break_glass_requires_reason": pack.break_glass_requires_reason,
+        "break_glass_notifies_admins": pack.break_glass_notifies_admins,
+    }
+
+
+def _check_service_execution_frequency(
+    service: str,
+    policy_pack: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     service_name = (service or "").strip()
     if not service_name:
         return {"allowed": True, "count": 0, "max_frequency": None, "window_seconds": None}
-    config = frequency_limit_config()
-    cutoff = timezone.now() - timedelta(seconds=config["window_seconds"])
+
+    # Policy pack rate limit takes precedence over env-var config
+    if isinstance(policy_pack, dict) and "max_executions_per_service_per_hour" in policy_pack:
+        max_frequency = int(policy_pack["max_executions_per_service_per_hour"])
+        window_seconds = 3600
+    else:
+        config = frequency_limit_config()
+        max_frequency = config["max_frequency"]
+        window_seconds = config["window_seconds"]
+
+    cutoff = timezone.now() - timedelta(seconds=window_seconds)
     count = ExecutionIntent.objects.filter(
         service=service_name,
         created_at__gte=cutoff,
     ).exclude(status__in=["blocked", "expired"]).count()
-    allowed = count < config["max_frequency"]
-    reason = "" if allowed else f"Execution frequency limit reached for service '{service_name}'."
+    allowed = count < max_frequency
+    reason = "" if allowed else (
+        f"Execution frequency limit reached for service '{service_name}' "
+        f"({count}/{max_frequency} per {window_seconds // 60} min"
+        + (f" per policy pack '{policy_pack.get('slug', '')}'" if policy_pack else "")
+        + ")."
+    )
     return {
         "allowed": allowed,
         "count": count,
-        "max_frequency": config["max_frequency"],
-        "window_seconds": config["window_seconds"],
+        "max_frequency": max_frequency,
+        "window_seconds": window_seconds,
         "reason": reason,
+        "policy_pack_enforced": bool(policy_pack),
     }
 
 
 def _prepare_execution_intent(
     *,
+    tenant: Any = None,
     session: Optional[ChatSession],
     user: Any,
     incident: Optional[Incident],
@@ -2224,15 +2820,27 @@ def _prepare_execution_intent(
     dry_run: bool,
     rollback_metadata: Dict[str, Any],
     idempotency_key: str,
-) -> Tuple[ExecutionIntent, bool]:
+    break_glass: bool = False,
+    break_glass_reason: str = "",
+    estimated_blast_radius: Optional[Dict[str, Any]] = None,
+    rollback_snapshot: Optional[Dict[str, Any]] = None,
+    requires_verification: bool = False,
+    original_intent: Optional["ExecutionIntent"] = None,
+    policy_pack: Optional["PolicyPack"] = None,
+) -> Tuple["ExecutionIntent", bool]:
     behavior_version = _get_or_create_behavior_version()
+    action_type = str((typed_action or {}).get("action") or "")
+    status = "dry_run" if dry_run else ("break_glass" if break_glass else "planned")
+    resolved_tenant = tenant or getattr(incident, "tenant", None) or getattr(session, "tenant", None)
     defaults = {
         "session": session,
         "user": user if getattr(user, "is_authenticated", False) else None,
         "incident": incident,
         "behavior_version": behavior_version,
+        "original_intent": original_intent,
+        "policy_pack": policy_pack,
         "execution_type": execution_type,
-        "action_type": str((typed_action or {}).get("action") or ""),
+        "action_type": action_type,
         "service": service,
         "environment": environment,
         "target_host": target_host,
@@ -2250,11 +2858,18 @@ def _prepare_execution_intent(
         "requires_approval": bool(policy_decision.get("requires_approval")),
         "dry_run": dry_run,
         "rollback_json": rollback_metadata or {},
+        "rollback_snapshot_json": rollback_snapshot or {},
+        "estimated_blast_radius_json": estimated_blast_radius or {},
         "policy_decision_json": policy_decision or {},
         "ranking_json": ranking or {},
         "context_fingerprint": context_fingerprint,
-        "status": "dry_run" if dry_run else "planned",
+        "requires_verification": requires_verification,
+        "break_glass": break_glass,
+        "break_glass_reason": break_glass_reason,
+        "status": status,
     }
+    if resolved_tenant is not None:
+        defaults["tenant"] = resolved_tenant
     intent, created = ExecutionIntent.objects.get_or_create(idempotency_key=idempotency_key, defaults=defaults)
     if not created:
         return intent, True
@@ -2381,6 +2996,27 @@ def _normalize_alertmanager_payload(body: Dict[str, Any]) -> Tuple[Dict[str, Any
     annotations.update(body.get("commonAnnotations") or {})
     annotations.update(firing_alert.get("annotations") or {})
 
+    grouped_alerts = []
+    for candidate in alerts:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_labels = {}
+        candidate_labels.update(body.get("commonLabels") or {})
+        candidate_labels.update(candidate.get("labels") or {})
+        grouped_alerts.append(
+            {
+                "alert_name": candidate_labels.get("alertname") or candidate.get("alertname") or body.get("groupKey") or "AlertmanagerAlert",
+                "status": candidate.get("status") or body.get("status") or "firing",
+                "target_host": _extract_target_host_from_instance(candidate_labels.get("instance") or ""),
+                "service_name": candidate_labels.get("service") or "",
+                "fingerprint": candidate.get("fingerprint"),
+                "starts_at": candidate.get("startsAt"),
+                "ends_at": candidate.get("endsAt"),
+                "labels": candidate_labels,
+                "annotations": candidate.get("annotations") or {},
+            }
+        )
+
     alert_payload = {
         "alert_name": labels.get("alertname") or firing_alert.get("alertname") or body.get("groupKey") or "AlertmanagerAlert",
         "status": firing_alert.get("status") or body.get("status") or "firing",
@@ -2389,6 +3025,8 @@ def _normalize_alertmanager_payload(body: Dict[str, Any]) -> Tuple[Dict[str, Any
         "annotations": annotations,
         "starts_at": firing_alert.get("startsAt"),
         "ends_at": firing_alert.get("endsAt"),
+        "fingerprint": firing_alert.get("fingerprint"),
+        "grouped_alerts": grouped_alerts,
         "generator_url": firing_alert.get("generatorURL") or body.get("externalURL"),
         "receiver": body.get("receiver"),
         "group_key": body.get("groupKey"),
@@ -2854,8 +3492,6 @@ def _elasticsearch_identity_clauses(
         for alias in _target_aliases(target):
             for field in ("host.name", "host.hostname", "agent.hostname", "hostname", "target_name"):
                 _append_exact_match_clause(clauses, field, alias)
-        if target.environment:
-            _append_exact_match_clause(clauses, "environment", target.environment)
 
         bindings = list(target.service_bindings.all().order_by("-is_primary", "service_name"))
         for binding in bindings:
@@ -2894,6 +3530,55 @@ def _elasticsearch_identity_clauses(
     return deduped
 
 
+def _elasticsearch_scope_filters(
+    *,
+    target_host: Optional[str],
+    environment: str = "",
+) -> List[Dict[str, Any]]:
+    exact_match_clauses: List[Dict[str, Any]] = []
+    normalized_environment = str(environment or "").strip()
+    normalized_target_host = str(target_host or "").strip()
+
+    target = _find_target_by_host_alias(normalized_target_host) if normalized_target_host else None
+    resolved_environment = normalized_environment or str(getattr(target, "environment", "") or "").strip()
+    if resolved_environment:
+        _append_exact_match_clause(exact_match_clauses, "environment", resolved_environment)
+
+    deduped: List[Dict[str, Any]] = []
+    seen = set()
+    for clause in exact_match_clauses:
+        fingerprint = json.dumps(clause, sort_keys=True)
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        deduped.append(clause)
+    if not deduped:
+        return []
+    return [{"bool": {"should": deduped, "minimum_should_match": 1}}]
+
+
+def _resolve_elasticsearch_url(
+    *,
+    target_host: Optional[str] = None,
+    service_name: Optional[str] = None,
+    application: str = "",
+    environment: str = "",
+) -> str:
+    configured = str(os.getenv("ELASTICSEARCH_URL") or ELASTICSEARCH_URL or "").strip()
+    if configured:
+        return configured
+
+    normalized_candidates = {
+        str(target_host or "").strip().lower(),
+        str(service_name or "").strip().lower(),
+        str(application or "").strip().lower(),
+        str(environment or "").strip().lower(),
+    }
+    if "demo" in normalized_candidates or normalized_candidates.intersection({"app-orders", "app-inventory", "app-billing", "gateway", "frontend"}):
+        return DEFAULT_ELASTICSEARCH_URL
+    return ""
+
+
 def _fetch_elasticsearch_logs(
     target_host: Optional[str],
     query_text: str,
@@ -2903,11 +3588,13 @@ def _fetch_elasticsearch_logs(
     environment: str = "",
 ) -> Dict[str, Any]:
     identity_clauses = _elasticsearch_identity_clauses(target_host=target_host, service_name=service_name)
+    scope_filters = _elasticsearch_scope_filters(target_host=target_host, environment=environment)
     must_clauses: List[Dict[str, Any]] = []
     filter_clauses: List[Dict[str, Any]] = []
 
     if identity_clauses:
         filter_clauses.append({"bool": {"should": identity_clauses, "minimum_should_match": 1}})
+    filter_clauses.extend(scope_filters)
     if query_text:
         must_clauses.append({"match": {"message": query_text}})
     if not identity_clauses and not must_clauses:
@@ -2929,7 +3616,13 @@ def _fetch_elasticsearch_logs(
                 return _normalized_logs_to_search_payload(rows)
             except Exception:
                 logger.exception("Integration-backed logs query failed for %s", integration.integration_type)
-        if not ELASTICSEARCH_URL:
+        elasticsearch_url = _resolve_elasticsearch_url(
+            target_host=target_host,
+            service_name=service_name,
+            application=application,
+            environment=environment,
+        )
+        if not elasticsearch_url:
             return {}
         session = get_http_session("elasticsearch")
         body = {
@@ -2959,7 +3652,7 @@ def _fetch_elasticsearch_logs(
             ],
         }
         response = session.post(
-            f"{ELASTICSEARCH_URL.rstrip('/')}/_search",
+            f"{elasticsearch_url.rstrip('/')}/_search",
             json=body,
             timeout=(3, 10),
             verify=ELASTICSEARCH_VERIFY_SSL,
@@ -2990,9 +3683,11 @@ def _ensure_investigation_run_for_incident(incident: Incident, *, question: str 
         if existing.status in active_statuses and not existing.completed_at:
             return existing
         completion_marker = existing.completed_at or existing.updated_at or existing.created_at
+        incident_refresh_marker = incident.updated_at or incident.opened_at or timezone.now()
         if (
             existing.status in terminal_statuses
             and completion_marker
+            and incident_refresh_marker <= completion_marker
             and (timezone.now() - completion_marker).total_seconds() < AUTO_INCIDENT_INVESTIGATION_COOLDOWN_SECONDS
         ):
             return existing
@@ -3046,6 +3741,7 @@ def _ensure_investigation_run_for_incident(incident: Incident, *, question: str 
         return latest
 
     return InvestigationRun.objects.create(
+        tenant=incident.tenant,
         incident=incident,
         route="incident_auto",
         question=run_question,
@@ -3209,6 +3905,744 @@ def collect_alert_context(alert_payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _latest_investigation_run_for_incident(incident: Optional[Incident]) -> Optional[InvestigationRun]:
+    if not incident:
+        return None
+    return (
+        InvestigationRun.objects.select_related("incident", "session", "evidence_bundle_record")
+        .filter(incident=incident)
+        .order_by("-updated_at")
+        .first()
+    )
+
+
+def _latest_execution_event_for_incident(incident: Optional[Incident]) -> Optional[IncidentTimelineEvent]:
+    if not incident:
+        return None
+    return (
+        incident.timeline.filter(event_type__in=["diagnostic_command_executed", "remediation_command_executed"])
+        .order_by("-created_at")
+        .first()
+    )
+
+
+def _latest_execution_event_for_incident_type(incident: Optional[Incident], event_type: str) -> Optional[IncidentTimelineEvent]:
+    if not incident:
+        return None
+    return incident.timeline.filter(event_type=event_type).order_by("-created_at").first()
+
+
+def _serialize_investigation_run_summary(run: InvestigationRun) -> Dict[str, Any]:
+    evidence = ((run.evidence_bundle_json or {}).get("evidence_assessment") or {})
+    return {
+        "run_id": str(run.run_id),
+        "status": run.status,
+        "route": run.route,
+        "question": run.question,
+        "application": run.application,
+        "service": run.service,
+        "target_host": run.target_host,
+        "incident_key": str(run.incident.incident_key) if run.incident else "",
+        "incident_title": run.incident.title if run.incident else "",
+        "current_stage": run.current_stage,
+        "confidence_score": run.confidence_score,
+        "workflow": run.workflow_json or [],
+        "evidence_bundle": run.evidence_bundle_json or {},
+        "evidence_summary": run.evidence_summary or {},
+        "missing_evidence": run.missing_evidence_json or [],
+        "contradicting_evidence": run.contradicting_evidence_json or [],
+        "confidence_assessment": evidence.get("confidence_assessment") or {},
+        "contradiction_assessment": evidence.get("contradiction_assessment") or {},
+        "evidence_gap_assessment": evidence.get("evidence_gap_assessment") or {},
+        "evidence_assessment": evidence,
+        "updated_at": run.updated_at.isoformat(),
+    }
+
+
+def _tool_calls_for_run(run: InvestigationRun) -> List[ToolInvocation]:
+    prefetched = getattr(run, "_prefetched_objects_cache", {}).get("tool_invocations")
+    if prefetched is not None:
+        return sorted(list(prefetched), key=lambda item: item.created_at)
+    return list(run.tool_invocations.all().order_by("created_at"))
+
+
+def _tool_activity_summary(tool_calls: List[ToolInvocation]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "server_name": item.server_name,
+            "tool_name": item.tool_name,
+            "status": item.status,
+            "latency_ms": item.latency_ms,
+            "created_at": item.created_at.isoformat(),
+        }
+        for item in tool_calls
+    ]
+
+
+def _latest_tool_call(tool_calls: List[ToolInvocation], tool_names: List[str]) -> Optional[ToolInvocation]:
+    normalized = {str(name or "").strip() for name in tool_names if name}
+    for item in reversed(tool_calls):
+        if str(item.tool_name or "").strip() in normalized:
+            return item
+    return None
+
+
+def _count_tool_calls(tool_calls: List[ToolInvocation], tool_names: List[str]) -> int:
+    normalized = {str(name or "").strip() for name in tool_names if name}
+    return sum(1 for item in tool_calls if str(item.tool_name or "").strip() in normalized)
+
+
+def _live_step_status(*, completed: bool, active: bool, terminal: bool) -> str:
+    if completed:
+        return "completed"
+    if terminal:
+        return "skipped"
+    if active:
+        return "running"
+    return "queued"
+
+
+def _safe_json_excerpt(value: Any, limit: int = 1200) -> str:
+    try:
+        text = json.dumps(value, indent=2, default=str)
+    except Exception:
+        text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n..."
+
+
+def _infer_current_live_step_key(run: InvestigationRun, tool_calls: List[ToolInvocation]) -> str:
+    stage = str(run.current_stage or run.status or "").strip().lower()
+    if stage in {"queued", "scoping", "running"}:
+        return "scope"
+    if stage == "collecting_evidence":
+        latest = tool_calls[-1] if tool_calls else None
+        latest_name = str(latest.tool_name or "").strip() if latest else ""
+        mapping = {
+            "incidents.get_timeline": "topology",
+            "applications.get_graph": "topology",
+            "applications.get_component_snapshot": "topology",
+            "metrics.query_service_overview": "metrics",
+            "logs.search": "logs",
+            "traces.search": "traces",
+            "runbooks.search": "context",
+            "source.read_traceback": "context",
+            "code.find_service_owner": "context",
+            "code.route_to_handler": "context",
+            "code.search_context": "context",
+            "code.span_to_symbol": "context",
+            "code.recent_changes": "context",
+            "code.recent_changes_for_component": "context",
+        }
+        return mapping.get(latest_name, "metrics")
+    if stage == "assessing_evidence":
+        return "assessment"
+    if stage in {"planning_next_step", "awaiting_approval", "executing", "remediation_selector"}:
+        return "decision"
+    if stage in {"verifying", "resolved", "completed", "failed"}:
+        return "verification"
+    return "scope"
+
+
+def _build_investigation_live_steps(run: InvestigationRun) -> List[Dict[str, Any]]:
+    tool_calls = _tool_calls_for_run(run)
+    evidence_bundle = dict(run.evidence_bundle_json or {})
+    evidence = dict((evidence_bundle.get("evidence_assessment") or {}))
+    workflow = [dict(item) for item in (run.workflow_json or []) if isinstance(item, dict)]
+    workflow_by_stage = {str(item.get("stage") or ""): item for item in workflow}
+    metrics_payload = dict(evidence_bundle.get("metrics") or {})
+    logs_payload = dict((evidence_bundle.get("elasticsearch") or evidence_bundle.get("logs") or {}))
+    logs_section = dict(evidence_bundle.get("logs") or {})
+    traces_payload = dict((evidence_bundle.get("jaeger") or evidence_bundle.get("traces") or {}))
+    dependency_graph = dict(evidence_bundle.get("dependency_graph") or {})
+    code_context = dict(evidence_bundle.get("code_context") or {})
+    runbooks_payload = dict(evidence_bundle.get("runbooks") or {})
+    terminal = str(run.status or "").strip().lower() in {"resolved", "completed", "failed"}
+    active_key = _infer_current_live_step_key(run, tool_calls)
+    latest_execution = _latest_execution_event_for_incident(run.incident) if getattr(run, "incident", None) else None
+    latest_execution_payload = latest_execution.payload if latest_execution and isinstance(latest_execution.payload, dict) else {}
+
+    alert_state = dict(metrics_payload.get("alert_state") or {})
+    custom_query = dict(metrics_payload.get("custom_query") or {})
+    alert_states = _extract_alert_states(alert_state)
+    custom_value = _extract_first_sample_value(custom_query or {})
+    log_hits = _extract_log_hit_count(logs_payload)
+    log_examples = _collect_log_error_messages(logs_payload, limit=2)
+    post_command_log_hits = int(logs_section.get("post_command_hit_count") or 0)
+    post_command_log_excerpt = [str(item) for item in (evidence_bundle.get("post_command_log_excerpt") or []) if item][:5]
+    trace_count = len((traces_payload.get("data") or [])) if isinstance(traces_payload, dict) else 0
+    trace_failures = _trace_contains_error(traces_payload or {}, db_related=False) if traces_payload else False
+    blast_radius = [str(item) for item in (dependency_graph.get("blast_radius") or []) if item]
+    depends_on = [str(item) for item in (dependency_graph.get("depends_on") or []) if item]
+    code_quality = str(code_context.get("quality") or "").strip()
+    code_safe = bool(code_context.get("safe_to_claim_code_root_cause"))
+    runbook_count = 0
+    if isinstance(runbooks_payload.get("results"), list):
+        runbook_count = len(runbooks_payload.get("results") or [])
+    elif isinstance(runbooks_payload.get("matches"), list):
+        runbook_count = len(runbooks_payload.get("matches") or [])
+
+    planner = dict(run.planner_json or {})
+    iteration_plan = dict(planner.get("iteration_plan") or {})
+    candidate_steps = [dict(item) for item in (iteration_plan.get("candidate_steps") or []) if isinstance(item, dict)]
+    next_tool = str((candidate_steps[0] if candidate_steps else {}).get("tool_name") or "").strip()
+
+    hard_evidence = [str(item) for item in (evidence.get("hard_evidence") or []) if item]
+    missing_evidence = [str(item) for item in (run.missing_evidence_json or evidence.get("missing_evidence") or []) if item]
+    contradicting = [str(item) for item in (run.contradicting_evidence_json or evidence.get("contradicting_evidence") or []) if item]
+    confidence_reason = str(evidence.get("confidence_reason") or "").strip()
+    contradiction_summary = str(((evidence.get("contradiction_assessment") or {}).get("summary")) or "").strip()
+    gap_summary = str(((evidence.get("evidence_gap_assessment") or {}).get("summary")) or "").strip()
+
+    def step(
+        key: str,
+        title: str,
+        *,
+        completed: bool,
+        summary: str,
+        findings: List[str],
+        inference: str,
+        tool_names: List[str],
+        technical_details: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        latest_call = _latest_tool_call(tool_calls, tool_names)
+        return {
+            "step_key": key,
+            "title": title,
+            "status": _live_step_status(completed=completed, active=active_key == key and not completed, terminal=terminal),
+            "summary": summary,
+            "findings": [item for item in findings if item],
+            "inference": inference,
+            "tool_names": tool_names,
+            "tool_call_count": _count_tool_calls(tool_calls, tool_names),
+            "latest_activity_at": latest_call.created_at.isoformat() if latest_call else "",
+            "technical_details": technical_details,
+        }
+
+    steps: List[Dict[str, Any]] = []
+
+    steps.append(
+        step(
+            "scope",
+            "Scope The Investigation",
+            completed=True,
+            summary="Identifying the incident, impacted service, and operator question that should drive the RCA.",
+            findings=[
+                f"Incident: {str(run.incident.incident_key) if run.incident else 'standalone investigation'}",
+                f"Application: {run.application or 'unknown'}",
+                f"Primary service: {run.service or run.target_host or 'unscoped'}",
+            ],
+            inference=f"The investigation is focused on {run.service or run.target_host or 'the affected component'} before deeper evidence is collected.",
+            tool_names=["incidents.get_timeline"],
+            technical_details={"question": run.question, "scope": run.scope_json or {}, "planner": planner},
+        )
+    )
+
+    topology_complete = bool(blast_radius or depends_on or _count_tool_calls(tool_calls, ["applications.get_graph", "applications.get_component_snapshot", "incidents.get_timeline"]))
+    topology_findings: List[str] = []
+    if blast_radius:
+        topology_findings.append(f"Blast radius includes {len(blast_radius)} service(s): {', '.join(blast_radius[:4])}.")
+    if depends_on:
+        topology_findings.append(f"Direct dependencies examined: {', '.join(depends_on[:4])}.")
+    if not topology_findings:
+        topology_findings.append("The control plane mapped service relationships to understand what else could be affected.")
+    steps.append(
+        step(
+            "topology",
+            "Map Affected Services",
+            completed=topology_complete,
+            summary="Checking topology and service relationships to understand impact and likely downstream causes.",
+            findings=topology_findings,
+            inference="This narrows whether the issue is isolated to one component or likely propagating through dependencies.",
+            tool_names=["applications.get_graph", "applications.get_component_snapshot", "incidents.get_timeline"],
+            technical_details={"dependency_graph": dependency_graph, "blast_radius": blast_radius, "depends_on": depends_on},
+        )
+    )
+
+    metrics_complete = bool(workflow_by_stage.get("collecting_evidence", {}).get("details", {}).get("metrics_present") or metrics_payload or _count_tool_calls(tool_calls, ["metrics.query_service_overview"]))
+    metrics_findings: List[str] = []
+    if alert_states:
+        metrics_findings.append(f"Alert state samples were observed: {', '.join(alert_states[:3])}.")
+    if custom_value is not None:
+        metrics_findings.append(f"Live metric sample was available with value {custom_value:.2f}.")
+    elif metrics_complete:
+        metrics_findings.append("Service metrics were collected successfully.")
+    if not metrics_findings:
+        metrics_findings.append("No useful metric sample has been captured yet.")
+    metrics_inference = "The incident signal is still being checked against live service behavior."
+    if any(state == "firing" for state in alert_states):
+        metrics_inference = "The alert condition was still active when the investigation sampled live metrics."
+    elif custom_value is not None and custom_value > 0.1:
+        metrics_inference = "The observed metric remained elevated, which supports the alert being real rather than noisy."
+    steps.append(
+        step(
+            "metrics",
+            "Check Service Metrics",
+            completed=metrics_complete,
+            summary="Reviewing the alert state and service metrics to confirm whether the symptom is still live.",
+            findings=metrics_findings,
+            inference=metrics_inference,
+            tool_names=["metrics.query_service_overview"],
+            technical_details={"metrics": metrics_payload},
+        )
+    )
+
+    logs_complete = bool(log_hits > 0 or _count_tool_calls(tool_calls, ["logs.search"]) or workflow_by_stage.get("collecting_evidence", {}).get("details", {}).get("logs_present"))
+    logs_findings: List[str] = []
+    if log_hits > 0:
+        logs_findings.append(f"{log_hits} recent log hit(s) matched the investigation query.")
+    if post_command_log_hits > 0:
+        logs_findings.append(f"Deep dive collected {post_command_log_hits} host-side log line(s) directly from the target runtime.")
+    logs_findings.extend(log_examples[:2])
+    if not logs_findings:
+        logs_findings.append("No matching log entries were captured for the current query.")
+    logs_inference = "Logs are being checked for direct failure evidence."
+    if post_command_log_hits > 0 and hard_evidence:
+        logs_inference = "Deep-dive runtime logs added direct failure evidence beyond the centralized log search."
+    elif log_examples:
+        logs_inference = "Recent log messages contain concrete runtime evidence that the operator can act on."
+    elif log_hits > 0:
+        logs_inference = "Relevant logs were found, but they do not yet contain a strong failure signature."
+    steps.append(
+        step(
+            "logs",
+            "Scan Recent Logs",
+            completed=logs_complete,
+            summary="Searching centralized logs for active errors, repeated failures, and direct symptom evidence.",
+            findings=logs_findings,
+            inference=logs_inference,
+            tool_names=["logs.search"],
+            technical_details={
+                "log_hits": log_hits,
+                "post_command_log_hits": post_command_log_hits,
+                "logs": logs_payload,
+                "post_command_log_excerpt": post_command_log_excerpt,
+            },
+        )
+    )
+
+    traces_complete = bool(trace_count > 0 or _count_tool_calls(tool_calls, ["traces.search"]))
+    trace_findings: List[str] = []
+    if trace_count > 0:
+        trace_findings.append(f"{trace_count} trace sample(s) were inspected.")
+    if trace_failures:
+        trace_findings.append("At least one recent trace showed service failure behavior.")
+    if not trace_findings:
+        trace_findings.append("No useful failing trace was captured yet.")
+    trace_inference = "Traces are being used to check whether failures are visible in the runtime call path."
+    if trace_failures:
+        trace_inference = "The failure is visible in traces, which strengthens the runtime RCA."
+    elif trace_count > 0:
+        trace_inference = "Traces were available, but they do not yet show an obvious failing span."
+    steps.append(
+        step(
+            "traces",
+            "Inspect Request Traces",
+            completed=traces_complete,
+            summary="Checking recent traces for failing spans, latency spikes, and downstream call problems.",
+            findings=trace_findings,
+            inference=trace_inference,
+            tool_names=["traces.search"],
+            technical_details={"traces": traces_payload},
+        )
+    )
+
+    context_complete = bool(runbooks_payload or code_context or _count_tool_calls(tool_calls, ["runbooks.search", "source.read_traceback", "code.find_service_owner", "code.route_to_handler", "code.search_context", "code.span_to_symbol", "code.recent_changes", "code.recent_changes_for_component"]))
+    context_findings: List[str] = []
+    if runbook_count > 0:
+        context_findings.append(f"{runbook_count} runbook match(es) were available.")
+    if code_quality:
+        context_findings.append(f"Code context quality is marked as {code_quality}.")
+    if code_safe:
+        context_findings.append("Code context is strong enough to support a code-level RCA claim.")
+    if not context_findings:
+        context_findings.append("Runbooks, traceback source, and code context were checked for supporting context.")
+    steps.append(
+        step(
+            "context",
+            "Review Runbooks And Code Context",
+            completed=context_complete,
+            summary="Looking for traceback source, prior runbooks, and code ownership clues that explain why the service is failing.",
+            findings=context_findings,
+            inference="Operational and code context are being used to explain the failure path in plain terms.",
+            tool_names=["runbooks.search", "source.read_traceback", "code.find_service_owner", "code.route_to_handler", "code.search_context", "code.span_to_symbol", "code.recent_changes", "code.recent_changes_for_component"],
+            technical_details={"runbooks": runbooks_payload, "code_context": code_context},
+        )
+    )
+
+    assessment_complete = bool(workflow_by_stage.get("assessing_evidence") or hard_evidence or missing_evidence or contradicting)
+    assessment_findings: List[str] = []
+    if hard_evidence:
+        assessment_findings.append(f"{len(hard_evidence)} hard evidence item(s) support the current hypothesis.")
+    if contradicting:
+        assessment_findings.append(f"{len(contradicting)} contradiction(s) still weaken the hypothesis.")
+    if missing_evidence:
+        assessment_findings.append(f"{len(missing_evidence)} evidence gap(s) remain unresolved.")
+    if not assessment_findings:
+        assessment_findings.append("The control plane is still assessing whether the collected signals support a stable hypothesis.")
+    steps.append(
+        step(
+            "assessment",
+            "Assess The Evidence",
+            completed=assessment_complete,
+            summary="Comparing supporting evidence, contradictions, and evidence gaps to decide how trustworthy the RCA is.",
+            findings=assessment_findings,
+            inference=confidence_reason or "The system is weighing supporting, missing, and contradicting evidence before making a stronger claim.",
+            tool_names=[],
+            technical_details={
+                "hard_evidence": hard_evidence,
+                "missing_evidence": missing_evidence,
+                "contradicting_evidence": contradicting,
+                "contradiction_summary": contradiction_summary,
+                "gap_summary": gap_summary,
+            },
+        )
+    )
+
+    decision_complete = bool(workflow_by_stage.get("planning_next_step") or next_tool or evidence.get("safe_action"))
+    decision_findings: List[str] = []
+    safe_action = str(evidence.get("safe_action") or "").strip()
+    best_dependency_target = str(evidence.get("best_dependency_target") or "").strip()
+    if next_tool:
+        decision_findings.append(f"Next planned evidence tool: {next_tool}.")
+    if safe_action:
+        decision_findings.append(f"Decision posture: {safe_action}.")
+    if best_dependency_target:
+        decision_findings.append(f"Preferred pivot target: {best_dependency_target}.")
+    if not decision_findings:
+        decision_findings.append("The control plane has not selected the next operator-facing action yet.")
+    decision_inference = "The system is deciding whether to keep gathering evidence, pivot to a dependency, or verify a fix."
+    if safe_action:
+        decision_inference = f"The current recommendation is to {safe_action} based on the evidence gathered so far."
+    steps.append(
+        step(
+            "decision",
+            "Choose The Next Step",
+            completed=decision_complete,
+            summary="Selecting the safest next action for the operator based on the evidence collected so far.",
+            findings=decision_findings,
+            inference=decision_inference,
+            tool_names=[],
+            technical_details={"iteration_plan": iteration_plan, "candidate_steps": candidate_steps, "safe_action": safe_action},
+        )
+    )
+
+    verification_complete = bool(latest_execution_payload or workflow_by_stage.get("verifying") or str(run.current_stage or "").strip().lower() == "verifying")
+    verification_findings: List[str] = []
+    if latest_execution_payload.get("command"):
+        verification_findings.append(f"Latest live command: {str(latest_execution_payload.get('command') or '').strip()}")
+    if latest_execution_payload.get("final_answer"):
+        verification_findings.append(str(latest_execution_payload.get("final_answer") or "").strip())
+    elif verification_complete:
+        verification_findings.append("Verification is in progress or waiting on a command result.")
+    if not verification_findings:
+        verification_findings.append("No live verification command has been executed yet.")
+    verification_inference = "The system has not yet validated the hypothesis with live command output."
+    if latest_execution_payload.get("final_answer"):
+        verification_inference = "Live command output has been folded back into the investigation, so the RCA is now grounded in direct runtime evidence."
+    steps.append(
+        step(
+            "verification",
+            "Verify With Live Runtime Evidence",
+            completed=verification_complete,
+            summary="Using command output or live follow-up evidence to confirm whether the suspected root cause is actually true.",
+            findings=verification_findings,
+            inference=verification_inference,
+            tool_names=[],
+            technical_details={"execution_event": latest_execution_payload, "post_command_log_excerpt": evidence_bundle.get("post_command_log_excerpt") or []},
+        )
+    )
+
+    return steps
+
+
+def _serialize_investigation_live_payload(run: InvestigationRun) -> Dict[str, Any]:
+    base = _serialize_investigation_run_summary(run)
+    tool_calls = _tool_calls_for_run(run)
+    active_step_key = _infer_current_live_step_key(run, tool_calls)
+    live_steps = _build_investigation_live_steps(run)
+    active_step = next((item for item in live_steps if item.get("step_key") == active_step_key), live_steps[0] if live_steps else {})
+    terminal = str(run.status or "").strip().lower() in {"resolved", "completed", "failed"}
+    return {
+        **base,
+        "tool_calls": _tool_activity_summary(tool_calls),
+        "live_steps": live_steps,
+        "live_summary": {
+            "active_step_key": active_step_key,
+            "current_title": active_step.get("title") or "",
+            "current_summary": active_step.get("summary") or "",
+            "current_inference": active_step.get("inference") or "",
+            "completed_steps": sum(1 for item in live_steps if str(item.get("status") or "") == "completed"),
+            "total_steps": len(live_steps),
+            "stream_state": "final" if terminal else "live",
+        },
+        "stream_url": f"/genai/investigations/{run.run_id}/stream/",
+    }
+
+
+def _latest_investigation_ui_projection(incident: Optional[Incident]) -> Dict[str, Any]:
+    run = _latest_investigation_run_for_incident(incident)
+    if not run:
+        return {}
+
+    projection = _serialize_investigation_run_summary(run)
+    execution_event = _latest_execution_event_for_incident_type(incident, "diagnostic_command_executed")
+    payload = execution_event.payload if execution_event and isinstance(execution_event.payload, dict) else {}
+    analysis_sections = payload.get("analysis_sections") if isinstance(payload.get("analysis_sections"), dict) else {}
+    final_answer = str(payload.get("final_answer") or "").strip()
+    command_output = str(payload.get("command_output") or "").strip()
+    diagnostic_command = str(payload.get("command") or "").strip()
+    execution_target = str(payload.get("target_host") or projection.get("target_host") or "").strip()
+    evidence_assessment = projection.get("evidence_assessment") or {}
+    alert_family = str(evidence_assessment.get("alert_family") or "generic")
+    decision_policy = evidence_assessment.get("safe_action") or "diagnose"
+    planned_target = execution_target or str(projection.get("target_host") or projection.get("service") or "").strip()
+    if not diagnostic_command and planned_target and decision_policy != "observe":
+        planned_target, diagnostic_command = _default_diagnostic_plan_for_target(planned_target, alert_family=alert_family)
+    should_execute = bool(diagnostic_command and planned_target and decision_policy != "observe")
+    if planned_target == "db":
+        target_type = "database"
+    elif planned_target.startswith("app-"):
+        target_type = "application_container"
+    elif planned_target == "gateway":
+        target_type = "edge_proxy"
+    elif planned_target == "frontend":
+        target_type = "edge_frontend"
+    elif planned_target == CONTROL_AGENT_HOST:
+        target_type = "control_plane"
+    else:
+        target_type = ""
+
+    return {
+        **projection,
+        "alert_id": "",
+        "decision_policy": decision_policy,
+        "confidence_reason": str(evidence_assessment.get("confidence_reason") or "").strip(),
+        "hard_evidence": evidence_assessment.get("hard_evidence") or [],
+        "missing_evidence": projection.get("missing_evidence") or evidence_assessment.get("missing_evidence") or [],
+        "initial_ai_diagnosis": final_answer or str(evidence_assessment.get("confidence_reason") or "").strip(),
+        "initial_ai_reasoning": final_answer or str(evidence_assessment.get("confidence_reason") or "").strip(),
+        "post_command_ai_analysis": final_answer,
+        "final_answer": final_answer,
+        "analysis_sections": analysis_sections,
+        "diagnostic_command": diagnostic_command,
+        "command_output": command_output,
+        "target_host": planned_target,
+        "target_type": target_type,
+        "execution_status": "completed" if execution_event else "pending",
+        "last_execution_at": execution_event.created_at.isoformat() if execution_event else projection.get("updated_at"),
+        "should_execute": should_execute,
+    }
+
+
+def _apply_investigation_projection(base: Dict[str, Any], projection: Dict[str, Any]) -> Dict[str, Any]:
+    if not projection:
+        return dict(base or {})
+    merged = dict(base or {})
+    merged["latest_investigation"] = projection
+    for field in (
+        "decision_policy",
+        "confidence_reason",
+        "confidence_assessment",
+        "hard_evidence",
+        "missing_evidence",
+        "contradiction_assessment",
+        "evidence_gap_assessment",
+        "evidence_assessment",
+        "initial_ai_diagnosis",
+        "initial_ai_reasoning",
+        "post_command_ai_analysis",
+        "final_answer",
+        "analysis_sections",
+        "diagnostic_command",
+        "command_output",
+        "execution_status",
+        "last_execution_at",
+        "should_execute",
+        "target_host",
+        "target_type",
+    ):
+        value = projection.get(field)
+        if value not in (None, "", [], {}):
+            merged[field] = value
+    return merged
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, "", [], {}):
+            return value
+    return None
+
+
+def _incident_deep_dive_projection(
+    *,
+    incident: Optional[Incident],
+    linked_recommendation: Optional[Dict[str, Any]],
+    latest_investigation: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not incident and not linked_recommendation and not latest_investigation:
+        return {}
+
+    linked = dict(linked_recommendation or {})
+    investigation = dict(latest_investigation or {})
+    merged = {**investigation, **linked}
+    linked_evidence = linked.get("evidence_assessment") if isinstance(linked.get("evidence_assessment"), dict) else {}
+    investigation_evidence = investigation.get("evidence_assessment") if isinstance(investigation.get("evidence_assessment"), dict) else {}
+
+    diagnostic_event = _latest_execution_event_for_incident_type(incident, "diagnostic_command_executed")
+    remediation_event = _latest_execution_event_for_incident_type(incident, "remediation_command_executed")
+    diagnostic_payload = diagnostic_event.payload if diagnostic_event and isinstance(diagnostic_event.payload, dict) else {}
+    remediation_payload = remediation_event.payload if remediation_event and isinstance(remediation_event.payload, dict) else {}
+    diagnostic_sections = diagnostic_payload.get("analysis_sections") if isinstance(diagnostic_payload.get("analysis_sections"), dict) else {}
+    remediation_sections = remediation_payload.get("analysis_sections") if isinstance(remediation_payload.get("analysis_sections"), dict) else {}
+    live_alert_plan: Dict[str, Any] = {}
+    if incident and not diagnostic_event and not linked.get("diagnostic_command"):
+        active_alert = (
+            incident.alerts.exclude(status="resolved")
+            .order_by("-last_seen_at")
+            .first()
+        )
+        if active_alert:
+            alert_payload = dict(active_alert.raw_payload or {})
+            labels = dict(alert_payload.get("labels") or {})
+            labels.setdefault("alertname", active_alert.alert_name)
+            labels.setdefault("service", active_alert.service_name or incident.primary_service or incident.target_host)
+            alert_payload.update(
+                {
+                    "alert_name": alert_payload.get("alert_name") or active_alert.alert_name,
+                    "status": alert_payload.get("status") or active_alert.status or "firing",
+                    "target_host": alert_payload.get("target_host") or active_alert.target_host or incident.target_host,
+                    "labels": labels,
+                    "annotations": alert_payload.get("annotations") or active_alert.annotations or {},
+                }
+            )
+            try:
+                context = collect_alert_context(alert_payload)
+                live_alert_plan = _coerce_diagnostic_plan(
+                    alert_payload,
+                    context,
+                    {},
+                    context.get("target_host") or active_alert.target_host or incident.target_host,
+                )
+            except Exception:
+                logger.warning("Failed to derive live deep-dive plan for incident %s", incident.incident_key, exc_info=True)
+
+    diagnostic_command = _first_present(
+        diagnostic_payload.get("command"),
+        linked.get("diagnostic_command"),
+        live_alert_plan.get("diagnostic_command"),
+        investigation.get("diagnostic_command"),
+    )
+    target_host = _first_present(
+        diagnostic_payload.get("target_host"),
+        linked.get("target_host"),
+        live_alert_plan.get("target_host"),
+        investigation.get("target_host"),
+        incident.target_host if incident else "",
+    )
+    target_type = _first_present(linked.get("target_type"), live_alert_plan.get("target_type"), investigation.get("target_type"))
+    if not target_type and target_host:
+        if target_host == CONTROL_AGENT_HOST:
+            target_type = "control_plane"
+        elif str(target_host).startswith("app-"):
+            target_type = "application_container"
+        elif target_host == "db":
+            target_type = "database"
+        elif target_host == "gateway":
+            target_type = "edge_proxy"
+        elif target_host == "frontend":
+            target_type = "edge_frontend"
+
+    analysis_sections = diagnostic_sections or linked.get("analysis_sections") or investigation.get("analysis_sections") or {}
+    final_answer = str(_first_present(diagnostic_payload.get("final_answer"), linked.get("final_answer"), investigation.get("final_answer")) or "").strip()
+    command_output = str(_first_present(diagnostic_payload.get("command_output"), linked.get("command_output"), investigation.get("command_output")) or "").strip()
+    execution_status = (
+        "completed"
+        if diagnostic_event
+        else str(_first_present(linked.get("execution_status"), investigation.get("execution_status"), "pending") or "pending")
+    )
+    last_execution_at = (
+        diagnostic_event.created_at.isoformat()
+        if diagnostic_event
+        else _first_present(linked.get("last_execution_at"), investigation.get("last_execution_at"))
+    )
+    should_execute = bool(
+        _first_present(linked.get("should_execute"), live_alert_plan.get("should_execute"), investigation.get("should_execute"), False)
+        and diagnostic_command
+        and target_host
+        and execution_status in {"", "pending"}
+    )
+
+    return {
+        **merged,
+        "source": "incident_deep_dive_projection",
+        "incident_key": str(incident.incident_key) if incident else str(merged.get("incident_key") or ""),
+        "incident_title": incident.title if incident else str(merged.get("incident_title") or ""),
+        "alert_id": str(linked.get("alert_id") or merged.get("alert_id") or ""),
+        "target_host": target_host or "",
+        "target_type": target_type or "",
+        "diagnostic_command": diagnostic_command or "",
+        "should_execute": should_execute,
+        "execution_status": execution_status,
+        "last_execution_at": last_execution_at,
+        "decision_policy": _first_present(linked.get("decision_policy"), live_alert_plan.get("decision_policy"), investigation.get("decision_policy"), "diagnose"),
+        "confidence_reason": _first_present(linked.get("confidence_reason"), live_alert_plan.get("confidence_reason"), investigation.get("confidence_reason"), ""),
+        "evidence_assessment": _first_present(linked.get("evidence_assessment"), live_alert_plan.get("evidence_assessment"), investigation.get("evidence_assessment"), {}),
+        "hard_evidence": linked.get("hard_evidence", linked_evidence.get("hard_evidence", (live_alert_plan.get("evidence_assessment") or {}).get("hard_evidence", investigation.get("hard_evidence", investigation_evidence.get("hard_evidence", []))))),
+        "missing_evidence": linked.get("missing_evidence", linked_evidence.get("missing_evidence", (live_alert_plan.get("evidence_assessment") or {}).get("missing_evidence", investigation.get("missing_evidence", investigation_evidence.get("missing_evidence", []))))),
+        "initial_ai_diagnosis": _first_present(linked.get("initial_ai_diagnosis"), live_alert_plan.get("summary"), investigation.get("initial_ai_diagnosis"), merged.get("summary"), ""),
+        "initial_ai_reasoning": _first_present(linked.get("initial_ai_reasoning"), live_alert_plan.get("why"), investigation.get("initial_ai_reasoning"), merged.get("why"), ""),
+        "post_command_ai_analysis": _first_present(linked.get("post_command_ai_analysis"), investigation.get("post_command_ai_analysis"), final_answer, ""),
+        "final_answer": final_answer,
+        "analysis_sections": analysis_sections,
+        "command_output": command_output,
+        "diagnostic_typed_action": _first_present(linked.get("diagnostic_typed_action"), investigation.get("diagnostic_typed_action"), {}),
+        "remediation_command": _first_present(
+            linked.get("remediation_command"),
+            remediation_payload.get("command"),
+            remediation_sections.get("remediation_command"),
+            (analysis_sections or {}).get("remediation_command"),
+            investigation.get("remediation_command"),
+            "",
+        ),
+        "remediation_target_host": _first_present(
+            linked.get("remediation_target_host"),
+            remediation_payload.get("target_host"),
+            remediation_sections.get("remediation_target_host"),
+            (analysis_sections or {}).get("remediation_target_host"),
+            investigation.get("remediation_target_host"),
+            "",
+        ),
+        "remediation_why": _first_present(
+            linked.get("remediation_why"),
+            remediation_sections.get("remediation_why"),
+            (analysis_sections or {}).get("remediation_why"),
+            investigation.get("remediation_why"),
+            "",
+        ),
+        "remediation_requires_approval": _first_present(
+            linked.get("remediation_requires_approval"),
+            (analysis_sections or {}).get("remediation_requires_approval"),
+            investigation.get("remediation_requires_approval"),
+            False,
+        ),
+        "remediation_typed_action": _first_present(
+            linked.get("remediation_typed_action"),
+            remediation_sections.get("remediation_typed_action"),
+            (analysis_sections or {}).get("remediation_typed_action"),
+            investigation.get("remediation_typed_action"),
+            {},
+        ),
+        "remediation_execution_status": _first_present(linked.get("remediation_execution_status"), "completed" if remediation_event else "", investigation.get("remediation_execution_status"), ""),
+        "remediation_last_execution_at": _first_present(linked.get("remediation_last_execution_at"), remediation_event.created_at.isoformat() if remediation_event else "", investigation.get("remediation_last_execution_at"), ""),
+        "remediation_output": _first_present(linked.get("remediation_output"), remediation_payload.get("command_output"), investigation.get("remediation_output"), ""),
+        "post_remediation_ai_analysis": _first_present(linked.get("post_remediation_ai_analysis"), remediation_payload.get("final_answer"), investigation.get("post_remediation_ai_analysis"), ""),
+        "agent_success": _first_present(linked.get("agent_success"), investigation.get("agent_success")),
+    }
+
+
 def _incident_state_cache_key(fingerprint: str) -> str:
     return f"{INCIDENT_STATE_CACHE_PREFIX}:{fingerprint}"
 
@@ -3225,14 +4659,17 @@ def _build_incident_state_fingerprint(
     dependency_graph = context.get("dependency_graph") if isinstance(context, dict) else {}
     linked_recommendation = context.get("linked_recommendation") if isinstance(context, dict) else {}
     signature_payload = {
+        "behavior_version": current_behavior_version_payload(),
         "alert_name": alert_payload.get("alert_name") or context.get("alert_name") or "",
         "status": alert_payload.get("status") or "firing",
         "target_host": context.get("target_host") or alert_payload.get("target_host") or "",
         "service_name": context.get("service_name") or alert_payload.get("service_name") or "",
+        "alert_family": structured_evidence.get("alert_family") or "generic",
         "candidate_dependencies": sorted(structured_evidence.get("candidate_dependencies") or []),
         "best_dependency_target": structured_evidence.get("best_dependency_target") or "",
         "blast_radius": sorted((dependency_graph or {}).get("blast_radius") or []),
         "alert_firing": observations.get("alert_firing"),
+        "alert_phase": observations.get("alert_phase") or "",
         "custom_query_value": round(float(observations.get("custom_query_value") or 0.0), 2) if observations.get("custom_query_value") is not None else None,
         "log_error_examples": observations.get("log_error_examples") or [],
         "trace_service_error": observations.get("trace_service_error"),
@@ -3611,8 +5048,33 @@ def _run_post_action_verification(
     execution_type: str,
     command: str,
     agent_success: bool,
+    analysis_sections: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     logger.info(f"[VERIFICATION] Starting post-action verification for command: {command[:60]}...")
+    analysis_sections = analysis_sections if isinstance(analysis_sections, dict) else {}
+    direct_runtime_evidence = [str(item) for item in (analysis_sections.get("evidence") or []) if item]
+    inferred_root_cause = str(analysis_sections.get("root_cause") or "").strip()
+    if agent_success and execution_type == "diagnostic" and (direct_runtime_evidence or inferred_root_cause):
+        return {
+            "status": "confirmed",
+            "reason": "The diagnostic command produced direct runtime evidence that confirms the working root-cause hypothesis.",
+            "execution_type": execution_type,
+            "command": command,
+            "baseline_issue_score": _issue_score_from_evidence(baseline_evidence or {}),
+            "post_issue_score": _issue_score_from_evidence(baseline_evidence or {}),
+            "issue_score_delta": 0.0,
+            "improvement_detected": False,
+            "verification_loop_state": "closed",
+            "requires_follow_up": False,
+            "recommended_next_step": "Proceed with the remediation or approval workflow now that the root cause has been confirmed.",
+            "baseline_evidence": baseline_evidence or {},
+            "post_evidence": baseline_evidence or {},
+            "post_context_summary": {
+                "alert_name": str(alert_payload.get("alert_name") or ""),
+                "target_host": str((baseline_context or {}).get("target_host") or alert_payload.get("target_host") or ""),
+                "service_name": str((baseline_context or {}).get("service_name") or alert_payload.get("service_name") or ""),
+            },
+        }
     if not any((METRICS_API_URL, ELASTICSEARCH_URL, JAEGER_URL)):
         logger.warning(f"[VERIFICATION] Backends not configured, marking inconclusive")
         return {
@@ -3635,6 +5097,9 @@ def _run_post_action_verification(
     if not agent_success:
         status = "execution_failed"
         reason = "The action did not complete successfully, so no improvement can be confirmed."
+    elif execution_type == "diagnostic" and (direct_runtime_evidence or inferred_root_cause):
+        status = "confirmed"
+        reason = "The diagnostic command produced direct runtime evidence that confirms the working root-cause hypothesis."
     elif fresh_score == 0 and (fresh_evidence.get("observations") or {}).get("alert_firing") is False:
         status = "resolved"
         reason = "Telemetry no longer shows an active alert or active failure indicators."
@@ -3662,11 +5127,13 @@ def _run_post_action_verification(
         "post_issue_score": fresh_score,
         "issue_score_delta": round(fresh_score - baseline_score, 3),
         "improvement_detected": fresh_score < baseline_score,
-        "verification_loop_state": "closed" if status == "resolved" else "follow_up_required" if status in {"partially_improved", "unchanged", "worsened", "inconclusive"} else "execution_failed",
-        "requires_follow_up": status not in {"resolved"},
+        "verification_loop_state": "closed" if status in {"resolved", "confirmed"} else "follow_up_required" if status in {"partially_improved", "unchanged", "worsened", "inconclusive"} else "execution_failed",
+        "requires_follow_up": status not in {"resolved", "confirmed"},
         "recommended_next_step": (
             "Close the incident or continue passive monitoring for recurrence."
             if status == "resolved"
+            else "Proceed with the remediation or approval workflow now that the root cause has been confirmed."
+            if status == "confirmed"
             else "Collect another telemetry sample and compare it against the baseline before taking further action."
             if status == "partially_improved"
             else "Re-scope the investigation and gather additional evidence before retrying remediation."
@@ -3724,7 +5191,12 @@ def delegate_command_to_agent(command_to_run: str, target_host: str, typed_actio
         agent_response["requested_target_host"] = requested_target_host
         agent_response["agent_target_host"] = target_host
         output = agent_response.get("output", "No output received from agent.")
-        return True, output, agent_response
+        exit_code = agent_response.get("exit_code")
+        try:
+            command_success = int(exit_code) == 0
+        except (TypeError, ValueError):
+            command_success = True
+        return command_success, output, agent_response
     except requests.RequestException as exc:
         logger.exception("Failed to communicate with agent at %s", agent_url)
         output = f"Error: Could not communicate with the agent on {requested_target_host}. Details: {exc}"
@@ -4533,6 +6005,8 @@ def recent_predictions_view(request: HttpRequest):
 
 @login_required
 def remediation_learning_view(request: HttpRequest):
+    if not has_permission(request, "operations.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "operations.read"}, status=403)
     service = str(request.GET.get("service") or "").strip()
     environment = str(request.GET.get("environment") or "").strip()
     action_type = str(request.GET.get("action_type") or "").strip()
@@ -4552,6 +6026,8 @@ def remediation_learning_view(request: HttpRequest):
 
 @login_required
 def preventive_recommendations_view(request: HttpRequest):
+    if not has_permission(request, "operations.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "operations.read"}, status=403)
     overview = _build_application_overview(include_ai=True, include_predictions=True)
     recommendations: List[Dict[str, Any]] = []
     for application in overview.get("results", []):
@@ -4588,6 +6064,8 @@ def preventive_recommendations_view(request: HttpRequest):
 def operator_feedback_view(request: HttpRequest):
     if request.method != "POST":
         return JsonResponse({"error": "Invalid request method"}, status=405)
+    if not has_permission(request, "incidents.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "incidents.manage"}, status=403)
     try:
         body = json.loads(request.body or "{}")
     except Exception as exc:
@@ -4602,8 +6080,8 @@ def operator_feedback_view(request: HttpRequest):
 
     intent_id = str(body.get("execution_intent_id") or "").strip()
     incident_key = str(body.get("incident_key") or "").strip()
-    execution_intent = ExecutionIntent.objects.filter(intent_id=intent_id).first() if intent_id else None
-    incident = Incident.objects.filter(incident_key=incident_key).first() if incident_key else None
+    execution_intent = tenant_queryset(request, ExecutionIntent).filter(intent_id=intent_id).first() if intent_id else None
+    incident = tenant_queryset(request, Incident).filter(incident_key=incident_key).first() if incident_key else None
     if not execution_intent and not incident:
         return JsonResponse({"error": "execution_intent_id or incident_key is required"}, status=400)
 
@@ -4616,6 +6094,7 @@ def operator_feedback_view(request: HttpRequest):
     notes = str(body.get("notes") or "").strip()
 
     feedback = OperatorFeedback.objects.create(
+        tenant=getattr(request, "tenant", None),
         execution_intent=execution_intent,
         incident=incident or (execution_intent.incident if execution_intent else None),
         user=request.user if getattr(request.user, "is_authenticated", False) else None,
@@ -4630,6 +6109,7 @@ def operator_feedback_view(request: HttpRequest):
         notes=notes,
         metadata_json={"behavior_version": current_behavior_version_payload()},
     )
+    audit_event(request, "operator.feedback_recorded", object_type="operator_feedback", object_id=feedback.feedback_id, metadata={"feedback_type": feedback.feedback_type, "outcome_quality": feedback.outcome_quality})
 
     if execution_intent:
         latest_outcome = RemediationOutcome.objects.filter(execution_intent=execution_intent).order_by("-created_at").first()
@@ -5232,6 +6712,166 @@ def get_faq_questions(request):
         return JsonResponse({"error": str(e)}, status=500)
 
 # ---------------- chat sessions, auth, incident views ----------------
+def _serialize_tenant_membership(membership: TenantMembership) -> Dict[str, Any]:
+    permissions = sorted(permissions_for_role(membership.role))
+    return {
+        "membership_id": str(membership.membership_id),
+        "tenant_id": str(membership.tenant.tenant_id),
+        "name": membership.tenant.name,
+        "slug": membership.tenant.slug,
+        "domain": membership.tenant.domain,
+        "role": membership.role,
+        "permissions": permissions,
+        "user": {
+            "id": membership.user_id,
+            "username": membership.user.get_username(),
+            "email": membership.user.email or "",
+            "is_active": bool(membership.user.is_active),
+        },
+        "is_active": bool(membership.is_active),
+    }
+
+
+@login_required
+def tenant_current_view(request: HttpRequest):
+    membership = getattr(request, "tenant_membership", None) or resolve_request_tenant(request)
+    if not membership:
+        return JsonResponse({"error": "tenant_required"}, status=403)
+    memberships = TenantMembership.objects.select_related("tenant").filter(
+        user=request.user,
+        is_active=True,
+        tenant__is_active=True,
+    )
+    return JsonResponse(
+        {
+            "current": _serialize_tenant_membership(membership),
+            "tenants": [_serialize_tenant_membership(item) for item in memberships],
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def tenant_select_view(request: HttpRequest):
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    try:
+        body = json.loads(request.body or "{}")
+    except Exception as exc:
+        return JsonResponse({"error": "invalid_json", "detail": str(exc)}, status=400)
+    tenant_id = str(body.get("tenant_id") or "").strip()
+    membership = (
+        TenantMembership.objects.select_related("tenant")
+        .filter(user=request.user, tenant__tenant_id=tenant_id, is_active=True, tenant__is_active=True)
+        .first()
+    )
+    if not membership:
+        return JsonResponse({"error": "tenant_not_found"}, status=404)
+    request.session["aiops_current_tenant_id"] = str(membership.tenant.tenant_id)
+    request.tenant = membership.tenant
+    request.tenant_membership = membership
+    audit_event(request, "tenant.selected", object_type="tenant", object_id=membership.tenant.tenant_id)
+    return JsonResponse({"current": _serialize_tenant_membership(membership)})
+
+
+@login_required
+def tenant_members_view(request: HttpRequest):
+    if not has_permission(request, "tenant.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "tenant.manage"}, status=403)
+    tenant = getattr(request, "tenant", None)
+    if not tenant:
+        return JsonResponse({"error": "tenant_required"}, status=403)
+
+    if request.method == "GET":
+        memberships = TenantMembership.objects.select_related("tenant", "user").filter(tenant=tenant).order_by("user__username")
+        return JsonResponse({"count": memberships.count(), "results": [_serialize_tenant_membership(item) for item in memberships]})
+
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+
+    try:
+        body = json.loads(request.body or "{}")
+    except Exception as exc:
+        return JsonResponse({"error": "invalid_json", "detail": str(exc)}, status=400)
+
+    username = str(body.get("username") or "").strip()
+    email = str(body.get("email") or "").strip().lower()
+    role = str(body.get("role") or "viewer").strip().lower()
+    valid_roles = {choice[0] for choice in TenantMembership._meta.get_field("role").choices}
+    if role not in valid_roles:
+        return JsonResponse({"error": "invalid_role"}, status=400)
+    if not username and not email:
+        return JsonResponse({"error": "username_or_email_required"}, status=400)
+
+    user = None
+    if username:
+        user = User.objects.filter(username=username).first()
+    if user is None and email:
+        user = User.objects.filter(email__iexact=email).first()
+    if user is None:
+        user = User.objects.create_user(username=username or email, email=email)
+        user.set_unusable_password()
+        user.save(update_fields=["password"])
+
+    membership, created = TenantMembership.objects.update_or_create(
+        tenant=tenant,
+        user=user,
+        defaults={"role": role, "is_active": True, "invited_by": request.user},
+    )
+    audit_event(
+        request,
+        "tenant.member.created" if created else "tenant.member.updated",
+        object_type="tenant_membership",
+        object_id=membership.membership_id,
+        metadata={"username": user.get_username(), "email": user.email, "role": role},
+    )
+    return JsonResponse({"status": "created" if created else "updated", "member": _serialize_tenant_membership(membership)}, status=201 if created else 200)
+
+
+@csrf_exempt
+@login_required
+def tenant_member_detail_view(request: HttpRequest, membership_id: str):
+    if not has_permission(request, "tenant.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "tenant.manage"}, status=403)
+    tenant = getattr(request, "tenant", None)
+    membership = TenantMembership.objects.select_related("tenant", "user").filter(tenant=tenant, membership_id=membership_id).first()
+    if not membership:
+        return JsonResponse({"error": "member_not_found"}, status=404)
+
+    if request.method == "GET":
+        return JsonResponse(_serialize_tenant_membership(membership))
+
+    if request.method not in {"POST", "PATCH", "DELETE"}:
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+
+    if request.method == "DELETE":
+        membership.is_active = False
+        membership.save(update_fields=["is_active", "updated_at"])
+        audit_event(request, "tenant.member.disabled", object_type="tenant_membership", object_id=membership.membership_id, metadata={"username": membership.user.get_username()})
+        return JsonResponse({"status": "disabled", "member": _serialize_tenant_membership(membership)})
+
+    try:
+        body = json.loads(request.body or "{}")
+    except Exception as exc:
+        return JsonResponse({"error": "invalid_json", "detail": str(exc)}, status=400)
+    valid_roles = {choice[0] for choice in TenantMembership._meta.get_field("role").choices}
+    role = str(body.get("role") or membership.role).strip().lower()
+    if role not in valid_roles:
+        return JsonResponse({"error": "invalid_role"}, status=400)
+    membership.role = role
+    if "is_active" in body:
+        membership.is_active = _to_bool(body.get("is_active"), default=membership.is_active)
+    membership.save(update_fields=["role", "is_active", "updated_at"])
+    audit_event(
+        request,
+        "tenant.member.updated",
+        object_type="tenant_membership",
+        object_id=membership.membership_id,
+        metadata={"username": membership.user.get_username(), "role": membership.role, "is_active": membership.is_active},
+    )
+    return JsonResponse({"status": "updated", "member": _serialize_tenant_membership(membership)})
+
+
 @csrf_exempt
 def chat_session_init_view(request: HttpRequest):
     session_id = request.GET.get("session_id") if request.method == "GET" else None
@@ -5380,11 +7020,15 @@ def applications_dashboard_view(request):
 
 @login_required
 def code_context_dashboard_view(request: HttpRequest):
+    if not has_permission(request, "code_context.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "code_context.read"}, status=403)
     return render(request, "genai/code_context_dashboard.html", {"active_nav": "code_context"})
 
 
 @login_required
 def code_context_graph_view(request: HttpRequest):
+    if not has_permission(request, "code_context.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "code_context.read"}, status=403)
     application = (request.GET.get("application") or "").strip()
     repository = (request.GET.get("repository") or "").strip()
     payload = _code_context_graph_payload(application=application, repository_name=repository)
@@ -5708,13 +7352,16 @@ def mcp_code_read_snippet_view(request: HttpRequest):
     return JsonResponse(payload)
 
 
-def _resolve_integration_ref(integration_ref: str) -> Optional[Integration]:
+def _resolve_integration_ref(integration_ref: str, request: Optional[HttpRequest] = None) -> Optional[Integration]:
     normalized = str(integration_ref or "").strip()
     if not normalized:
         return None
+    queryset = Integration.objects.all()
+    if request is not None and getattr(request, "tenant", None):
+        queryset = queryset.filter(tenant=request.tenant)
     return (
-        Integration.objects.filter(integration_id=normalized).first()
-        or Integration.objects.filter(integration_type=normalized).order_by("-updated_at").first()
+        queryset.filter(integration_id=normalized).first()
+        or queryset.filter(integration_type=normalized).order_by("-updated_at").first()
     )
 
 
@@ -5737,7 +7384,7 @@ def _serialize_integration(integration: Optional[Integration]) -> Dict[str, Any]
         "last_health_check_at": integration.last_health_check_at.isoformat() if integration.last_health_check_at else None,
         "credential": {
             "credential_id": str(credential.credential_id) if credential else "",
-            "secret_ref": credential.secret_ref if credential else "",
+            "secret_ref": _mask_secret_value(credential.secret_ref) if credential else "",
             "credential_metadata": credential.credential_metadata if credential else {},
             "rotation_status": credential.rotation_status if credential else "",
         },
@@ -5763,6 +7410,7 @@ def _serialize_integration(integration: Optional[Integration]) -> Dict[str, Any]
         } if latest_health else {},
         "created_at": integration.created_at.isoformat(),
         "updated_at": integration.updated_at.isoformat(),
+        "capabilities": INTEGRATION_CAPABILITIES.get(integration.integration_type, []),
     }
 
 
@@ -5777,6 +7425,7 @@ def _integration_defaults_payload(integration_type: str) -> Dict[str, Any]:
         "auth_mode": defaults.get("auth_mode") or "none",
         "enabled": True,
         "metadata_json": {},
+        "capabilities": INTEGRATION_CAPABILITIES.get(integration_type, []),
         "health_status": "unknown",
         "last_health_check_at": None,
         "credential": {
@@ -5803,12 +7452,27 @@ def _parse_integration_request_body(request: HttpRequest) -> Dict[str, Any]:
     return body
 
 
-def _upsert_integration_from_payload(existing: Optional[Integration], payload: Dict[str, Any]) -> Integration:
+def _mask_secret_value(value: str) -> str:
+    value = str(value or "")
+    if not value:
+        return ""
+    if len(value) <= 4:
+        return "********"
+    return f"********{value[-4:]}"
+
+
+def _looks_like_masked_secret(value: str) -> bool:
+    return str(value or "").startswith("********")
+
+
+def _upsert_integration_from_payload(existing: Optional[Integration], payload: Dict[str, Any], request: Optional[HttpRequest] = None) -> Integration:
     integration_type = str(payload.get("integration_type") or (existing.integration_type if existing else "")).strip().lower()
     if integration_type not in dict(Integration.INTEGRATION_TYPE_CHOICES):
         raise ValueError("invalid_integration_type")
     defaults = INTEGRATION_VENDOR_DEFAULTS.get(integration_type, INTEGRATION_VENDOR_DEFAULTS["custom"])
     integration = existing or Integration(integration_type=integration_type)
+    if request is not None and getattr(request, "tenant", None):
+        integration.tenant = request.tenant
     integration.name = str(payload.get("name") or integration.name or defaults.get("default_name") or integration_type.title()).strip()
     integration.integration_type = integration_type
     integration.category = str(payload.get("category") or integration.category or defaults.get("category") or "mixed").strip().lower()
@@ -5820,7 +7484,9 @@ def _upsert_integration_from_payload(existing: Optional[Integration], payload: D
 
     credential_payload = payload.get("credential") or {}
     credential, _ = IntegrationCredential.objects.get_or_create(integration=integration)
-    credential.secret_ref = str(credential_payload.get("secret_ref") or credential.secret_ref or "").strip()
+    incoming_secret = str(credential_payload.get("secret_ref") or "").strip()
+    if incoming_secret and not _looks_like_masked_secret(incoming_secret):
+        credential.secret_ref = incoming_secret
     credential.credential_metadata = credential_payload.get("credential_metadata") or credential.credential_metadata or {}
     credential.rotation_status = str(credential_payload.get("rotation_status") or credential.rotation_status or "").strip()
     credential.save()
@@ -5836,10 +7502,13 @@ def _upsert_integration_from_payload(existing: Optional[Integration], payload: D
         target = None
         target_ref = str(raw_binding.get("target_id") or raw_binding.get("target_name") or "").strip()
         if target_ref:
+            target_queryset = Target.objects.all()
+            if request is not None and getattr(request, "tenant", None):
+                target_queryset = target_queryset.filter(tenant=request.tenant)
             target = (
-                Target.objects.filter(target_id=target_ref).first()
-                or Target.objects.filter(name=target_ref).first()
-                or Target.objects.filter(hostname=target_ref).first()
+                target_queryset.filter(target_id=target_ref).first()
+                or target_queryset.filter(name=target_ref).first()
+                or target_queryset.filter(hostname=target_ref).first()
             )
         IntegrationBinding.objects.create(
             integration=integration,
@@ -5857,16 +7526,21 @@ def _upsert_integration_from_payload(existing: Optional[Integration], payload: D
 @csrf_exempt
 def integrations_view(request: HttpRequest):
     if request.method == "GET":
-        integrations = Integration.objects.all().prefetch_related("bindings__target", "health_checks").select_related("credential")
+        if not has_permission(request, "integrations.read"):
+            return JsonResponse({"error": "permission_denied", "required_permission": "integrations.read"}, status=403)
+        integrations = tenant_queryset(request, Integration).prefetch_related("bindings__target", "health_checks").select_related("credential")
         results = [_serialize_integration(item) for item in integrations]
         return JsonResponse({"count": len(results), "results": results})
     if request.method != "POST":
         return JsonResponse({"error": "Invalid request method"}, status=405)
+    if not has_permission(request, "integrations.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "integrations.manage"}, status=403)
     try:
         payload = _parse_integration_request_body(request)
         integration_type = str(payload.get("integration_type") or "").strip().lower()
-        existing = Integration.objects.filter(integration_type=integration_type).order_by("-updated_at").first() if integration_type else None
-        integration = _upsert_integration_from_payload(existing, payload)
+        existing = tenant_queryset(request, Integration).filter(integration_type=integration_type).order_by("-updated_at").first() if integration_type else None
+        integration = _upsert_integration_from_payload(existing, payload, request)
+        audit_event(request, "integration.saved", object_type="integration", object_id=integration.integration_id, metadata={"integration_type": integration.integration_type, "name": integration.name})
     except ValueError as exc:
         detail = str(exc)
         if detail.startswith("invalid_json:"):
@@ -5878,9 +7552,11 @@ def integrations_view(request: HttpRequest):
 @login_required
 @csrf_exempt
 def integration_detail_view(request: HttpRequest, integration_ref: str):
-    integration = _resolve_integration_ref(integration_ref)
+    integration = _resolve_integration_ref(integration_ref, request)
     normalized_ref = str(integration_ref or "").strip().lower()
     if request.method == "GET":
+        if not has_permission(request, "integrations.read"):
+            return JsonResponse({"error": "permission_denied", "required_permission": "integrations.read"}, status=403)
         if integration:
             payload = _serialize_integration(integration)
             payload["exists"] = True
@@ -5889,17 +7565,23 @@ def integration_detail_view(request: HttpRequest, integration_ref: str):
             return JsonResponse(_integration_defaults_payload(normalized_ref))
         return JsonResponse({"error": "integration_not_found"}, status=404)
     if request.method == "DELETE":
+        if not has_permission(request, "integrations.manage"):
+            return JsonResponse({"error": "permission_denied", "required_permission": "integrations.manage"}, status=403)
         if not integration:
             return JsonResponse({"error": "integration_not_found"}, status=404)
+        audit_event(request, "integration.deleted", object_type="integration", object_id=integration.integration_id, metadata={"integration_type": integration.integration_type, "name": integration.name})
         integration.delete()
         return JsonResponse({"status": "deleted"})
     if request.method != "POST":
         return JsonResponse({"error": "Invalid request method"}, status=405)
+    if not has_permission(request, "integrations.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "integrations.manage"}, status=403)
     try:
         payload = _parse_integration_request_body(request)
         if not payload.get("integration_type") and normalized_ref in dict(Integration.INTEGRATION_TYPE_CHOICES):
             payload["integration_type"] = normalized_ref
-        integration = _upsert_integration_from_payload(integration, payload)
+        integration = _upsert_integration_from_payload(integration, payload, request)
+        audit_event(request, "integration.saved", object_type="integration", object_id=integration.integration_id, metadata={"integration_type": integration.integration_type, "name": integration.name})
     except ValueError as exc:
         detail = str(exc)
         if detail.startswith("invalid_json:"):
@@ -5915,7 +7597,9 @@ def integration_detail_view(request: HttpRequest, integration_ref: str):
 def integration_test_view(request: HttpRequest, integration_ref: str):
     if request.method != "POST":
         return JsonResponse({"error": "POST required"}, status=405)
-    integration = _resolve_integration_ref(integration_ref)
+    if not has_permission(request, "integrations.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "integrations.manage"}, status=403)
+    integration = _resolve_integration_ref(integration_ref, request)
     if not integration:
         return JsonResponse({"error": "integration_not_found"}, status=404)
     start = time.perf_counter()
@@ -5940,6 +7624,7 @@ def integration_test_view(request: HttpRequest, integration_ref: str):
     integration.health_status = status_value
     integration.last_health_check_at = timezone.now()
     integration.save(update_fields=["health_status", "last_health_check_at", "updated_at"])
+    audit_event(request, "integration.tested", object_type="integration", object_id=integration.integration_id, metadata={"status": status_value, "latency_ms": latency_ms})
     return JsonResponse(
         {
             "integration": _serialize_integration(integration),
@@ -5953,12 +7638,16 @@ def integration_test_view(request: HttpRequest, integration_ref: str):
 
 @login_required
 def investigations_dashboard_view(request: HttpRequest):
+    if not has_permission(request, "investigations.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "investigations.read"}, status=403)
     return render(request, "genai/investigations_dashboard.html", {"active_nav": "investigations"})
 
 
 @login_required
 def investigations_recent_view(request: HttpRequest):
-    runs = InvestigationRun.objects.select_related("incident", "session", "evidence_bundle_record").prefetch_related("tool_invocations").all()
+    if not has_permission(request, "investigations.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "investigations.read"}, status=403)
+    runs = tenant_queryset(request, InvestigationRun).select_related("incident", "session", "evidence_bundle_record").prefetch_related("tool_invocations")
     incident_key = str(request.GET.get("incident_key") or "").strip()
     session_id = str(request.GET.get("session_id") or "").strip()
     target_host = str(request.GET.get("target_host") or "").strip()
@@ -5975,26 +7664,10 @@ def investigations_recent_view(request: HttpRequest):
         evidence = ((run.evidence_bundle_json or {}).get("evidence_assessment") or {})
         bundle = getattr(run, "evidence_bundle_record", None)
         return {
-            "run_id": str(run.run_id),
-            "status": run.status,
-            "question": run.question,
-            "application": run.application,
-            "service": run.service,
-            "target_host": run.target_host,
-            "incident_key": str(run.incident.incident_key) if run.incident else "",
-            "incident_title": run.incident.title if run.incident else "",
+            **_serialize_investigation_run_summary(run),
             "session_id": str(run.session.session_id) if run.session else "",
             "tool_call_count": run.tool_invocations.count(),
-            "current_stage": run.current_stage,
-            "confidence_score": run.confidence_score,
             "planner": run.planner_json or {},
-            "workflow": run.workflow_json or [],
-            "evidence_bundle": run.evidence_bundle_json or {},
-            "missing_evidence": run.missing_evidence_json or [],
-            "contradicting_evidence": run.contradicting_evidence_json or [],
-            "confidence_assessment": evidence.get("confidence_assessment") or {},
-            "contradiction_assessment": evidence.get("contradiction_assessment") or {},
-            "evidence_gap_assessment": evidence.get("evidence_gap_assessment") or {},
             "evidence_bundle_ref": {
                 "bundle_id": str(bundle.bundle_id),
                 "lifecycle_status": bundle.lifecycle_status,
@@ -6056,6 +7729,8 @@ def _serialize_retention_policy(policy: Optional[DataRetentionPolicy]) -> Dict[s
 
 @login_required
 def lifecycle_retention_policies_view(request: HttpRequest):
+    if not has_permission(request, "lifecycle.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "lifecycle.read"}, status=403)
     deployment_mode = str(request.GET.get("deployment_mode") or "").strip().lower()
     subject_type = str(request.GET.get("subject_type") or "").strip().lower()
     data_category = str(request.GET.get("data_category") or "").strip().lower()
@@ -6092,43 +7767,30 @@ def lifecycle_retention_policies_view(request: HttpRequest):
 
 @login_required
 def investigation_detail_view(request: HttpRequest, run_id: str):
+    if not has_permission(request, "investigations.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "investigations.read"}, status=403)
     run = (
-        InvestigationRun.objects.select_related("incident", "session", "evidence_bundle_record")
+        tenant_queryset(request, InvestigationRun).select_related("incident", "session", "evidence_bundle_record")
         .prefetch_related("tool_invocations", "evidence_bundle_record__snapshots", "evidence_bundle_record__transcript_entries")
         .filter(run_id=run_id)
         .first()
     )
     if not run:
         return JsonResponse({"error": "investigation_not_found"}, status=404)
-    evidence = ((run.evidence_bundle_json or {}).get("evidence_assessment") or {})
     invocations = list(run.tool_invocations.all().order_by("created_at"))
     bundle = getattr(run, "evidence_bundle_record", None)
     snapshots = list(bundle.snapshots.all().order_by("created_at")) if bundle else []
     transcript_entries = list(bundle.transcript_entries.all().order_by("created_at")) if bundle else []
+    live_payload = _serialize_investigation_live_payload(run)
     return JsonResponse(
         {
-            "run_id": str(run.run_id),
-            "status": run.status,
-            "route": run.route,
-            "question": run.question,
-            "application": run.application,
-            "service": run.service,
-            "target_host": run.target_host,
-            "incident_key": str(run.incident.incident_key) if run.incident else "",
-            "incident_title": run.incident.title if run.incident else "",
+            **live_payload,
             "session_id": str(run.session.session_id) if run.session else "",
-            "current_stage": run.current_stage,
-            "confidence_score": run.confidence_score,
             "planner": run.planner_json or {},
             "workflow": run.workflow_json or [],
             "evidence_bundle": run.evidence_bundle_json or {},
             "evidence_summary": run.evidence_summary or {},
             "hypotheses": run.hypotheses_json or [],
-            "missing_evidence": run.missing_evidence_json or [],
-            "contradicting_evidence": run.contradicting_evidence_json or [],
-            "confidence_assessment": evidence.get("confidence_assessment") or {},
-            "contradiction_assessment": evidence.get("contradiction_assessment") or {},
-            "evidence_gap_assessment": evidence.get("evidence_gap_assessment") or {},
             "evidence_bundle_ref": {
                 "bundle_id": str(bundle.bundle_id),
                 "lifecycle_status": bundle.lifecycle_status,
@@ -6184,13 +7846,119 @@ def investigation_detail_view(request: HttpRequest, run_id: str):
     )
 
 
+def _format_sse_event(event: str, data: Dict[str, Any], event_id: Optional[Any] = None) -> str:
+    lines: List[str] = []
+    if event_id not in {None, ""}:
+        lines.append(f"id: {event_id}")
+    lines.append(f"event: {event}")
+    lines.append(f"data: {json.dumps(data, default=str)}")
+    lines.append("")
+    lines.append("")
+    return "\n".join(lines)
+
+
+async def investigation_stream_view(request: HttpRequest, run_id: str):
+    is_authenticated = await sync_to_async(
+        lambda: bool(getattr(request, "user", None) and request.user.is_authenticated)
+    )()
+    if not is_authenticated:
+        return redirect_to_login(request.get_full_path(), login_url=getattr(settings, "LOGIN_URL", "/genai/login/"))
+    run = (
+        await sync_to_async(
+            lambda: InvestigationRun.objects.select_related("incident", "session", "evidence_bundle_record")
+            .prefetch_related("tool_invocations")
+            .filter(run_id=run_id)
+            .first()
+        )()
+    )
+    if not run:
+        return JsonResponse({"error": "investigation_not_found"}, status=404)
+
+    async def _event_stream():
+        yield "retry: 2000\n\n"
+        initial_payload = await sync_to_async(load_cached_stream_snapshot)(run_id)
+        if not initial_payload:
+            initial_payload = await sync_to_async(_serialize_investigation_live_payload)(run)
+        yield _format_sse_event("snapshot", initial_payload)
+        if str((((initial_payload.get("live_summary") or {}).get("stream_state")) or "")).strip().lower() == "final":
+            return
+
+        if investigation_streaming_enabled():
+            try:
+                client, pubsub = await sync_to_async(open_investigation_stream_subscription)(run_id)
+                heartbeat_counter = 0
+                try:
+                    while True:
+                        message = await sync_to_async(lambda: pubsub.get_message(timeout=1.0))()
+                        if message and message.get("type") == "message":
+                            heartbeat_counter = 0
+                            raw_payload = message.get("data") or ""
+                            if isinstance(raw_payload, bytes):
+                                raw_payload = raw_payload.decode("utf-8", errors="ignore")
+                            envelope = json.loads(raw_payload)
+                            payload = envelope.get("payload") or {}
+                            version = envelope.get("version")
+                            yield _format_sse_event("snapshot", payload, event_id=version)
+                            if str((((payload.get("live_summary") or {}).get("stream_state")) or "")).strip().lower() == "final":
+                                return
+                        else:
+                            heartbeat_counter += 1
+                            if heartbeat_counter >= 15:
+                                heartbeat_counter = 0
+                                yield ": heartbeat\n\n"
+                        await asyncio.sleep(0.25)
+                finally:
+                    await sync_to_async(pubsub.close)()
+                    await sync_to_async(client.close)()
+            except Exception:
+                logger.warning("Falling back to DB-polled SSE stream for run %s", run_id, exc_info=True)
+
+        last_fingerprint = hashlib.sha256(
+            json.dumps(initial_payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        heartbeat_counter = 0
+        while True:
+            current = await sync_to_async(
+                lambda: InvestigationRun.objects.select_related("incident", "session", "evidence_bundle_record")
+                .prefetch_related("tool_invocations")
+                .filter(run_id=run_id)
+                .first()
+            )()
+            if not current:
+                yield 'event: error\ndata: {"error":"investigation_not_found"}\n\n'
+                return
+            payload = await sync_to_async(_serialize_investigation_live_payload)(current)
+            fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+            if fingerprint != last_fingerprint:
+                last_fingerprint = fingerprint
+                heartbeat_counter = 0
+                yield _format_sse_event("snapshot", payload)
+                if str((((payload.get("live_summary") or {}).get("stream_state")) or "")).strip().lower() == "final":
+                    return
+            else:
+                heartbeat_counter += 1
+                if heartbeat_counter >= 15:
+                    heartbeat_counter = 0
+                    yield ": heartbeat\n\n"
+            await asyncio.sleep(1.0)
+
+    response = StreamingHttpResponse(_event_stream(), content_type="text/event-stream")
+    response["Cache-Control"] = "no-cache"
+    response["X-Accel-Buffering"] = "no"
+    return response
+
+
 @login_required
 def operations_dashboard_view(request: HttpRequest):
+    if not has_permission(request, "operations.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "operations.read"}, status=403)
     return render(request, "genai/operations_dashboard.html", {"active_nav": "operations"})
 
 
 @login_required
 def operations_summary_view(request: HttpRequest):
+    if not has_permission(request, "operations.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "operations.read"}, status=403)
     recent_intents = list(
         ExecutionIntent.objects.select_related("incident", "behavior_version", "approved_by")
         .order_by("-created_at")[:20]
@@ -6326,6 +8094,8 @@ def operations_summary_view(request: HttpRequest):
 @login_required
 def cache_stats_view(request: HttpRequest):
     """Return telemetry cache observability stats."""
+    if not has_permission(request, "cache.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "cache.read"}, status=403)
     return JsonResponse({"status": "ok", "data": get_cache_stats()})
 
 
@@ -6337,12 +8107,15 @@ def cache_purge_view(request: HttpRequest):
     """
     if request.method != "POST":
         return JsonResponse({"error": "POST required"}, status=405)
+    if not has_permission(request, "cache.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "cache.manage"}, status=403)
     try:
         body = json.loads(request.body) if request.body else {}
     except json.JSONDecodeError:
         body = {}
     prefix = body.get("prefix")  # None → flush all
     result = purge_cache(prefix)
+    audit_event(request, "cache.purged", object_type="cache", object_id=str(prefix or "all"), metadata=result)
     return JsonResponse({"status": "ok", **result})
 
 
@@ -6514,28 +8287,46 @@ def application_graph_view(request: HttpRequest, application_key: str):
 
 @login_required
 def alerts_dashboard_view(request):
+    if not has_permission(request, "alerts.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "alerts.read"}, status=403)
     return render(request, 'genai/alerts_dashboard.html', {"active_nav": "alerts"})
 
 
 @login_required
 def incidents_dashboard_view(request):
-    return render(request, "genai/incidents_dashboard.html", {"active_nav": "incidents"})
+    if not has_permission(request, "incidents.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "incidents.read"}, status=403)
+    return redirect("/incidents")
 
 
 @login_required
 def incidents_recent_view(request: HttpRequest):
-    incidents = list(Incident.objects.all()[:20])
+    if not has_permission(request, "incidents.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "incidents.read"}, status=403)
+    include_deleted = str(request.GET.get("include_deleted") or "").lower() in {"1", "true", "yes"}
+    queryset = tenant_queryset(request, Incident)
+    if not include_deleted:
+        queryset = queryset.filter(is_deleted=False)
+    incidents = list(queryset[:20])
     return JsonResponse({"count": len(incidents), "results": [_incident_summary_payload(incident) for incident in incidents]})
 
 
 @login_required
 def incident_timeline_page_view(request: HttpRequest, incident_key: str):
+    if not has_permission(request, "incidents.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "incidents.read"}, status=403)
     return render(request, "genai/incident_timeline.html", {"incident_key": incident_key})
 
 
 @login_required
 def incident_timeline_view(request: HttpRequest, incident_key: str):
-    incident = Incident.objects.filter(incident_key=incident_key).first()
+    if not has_permission(request, "incidents.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "incidents.read"}, status=403)
+    include_deleted = str(request.GET.get("include_deleted") or "").lower() in {"1", "true", "yes"}
+    queryset = tenant_queryset(request, Incident)
+    if not include_deleted:
+        queryset = queryset.filter(is_deleted=False)
+    incident = queryset.filter(incident_key=incident_key).first()
     if not incident:
         return JsonResponse({"error": "incident_not_found"}, status=404)
     return JsonResponse(_incident_timeline_payload(incident))
@@ -6543,10 +8334,61 @@ def incident_timeline_view(request: HttpRequest, incident_key: str):
 
 @login_required
 def incident_graph_view(request: HttpRequest, incident_key: str):
-    incident = Incident.objects.filter(incident_key=incident_key).first()
+    if not has_permission(request, "incidents.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "incidents.read"}, status=403)
+    include_deleted = str(request.GET.get("include_deleted") or "").lower() in {"1", "true", "yes"}
+    queryset = tenant_queryset(request, Incident)
+    if not include_deleted:
+        queryset = queryset.filter(is_deleted=False)
+    incident = queryset.filter(incident_key=incident_key).first()
     if not incident:
         return JsonResponse({"error": "incident_not_found"}, status=404)
     return JsonResponse(_incident_graph_payload(incident))
+
+
+@login_required
+@csrf_exempt
+def delete_incident_view(request: HttpRequest, incident_key: str):
+    if request.method not in {"POST", "DELETE"}:
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    if not has_permission(request, "incidents.archive"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "incidents.archive"}, status=403)
+
+    incident = tenant_queryset(request, Incident).filter(incident_key=incident_key, is_deleted=False).first()
+    if not incident:
+        return JsonResponse({"error": "incident_not_found"}, status=404)
+
+    reason = ""
+    if request.body:
+        try:
+            body = json.loads(request.body.decode("utf-8") or "{}")
+            reason = str(body.get("reason") or "").strip()
+        except Exception:
+            reason = ""
+    actor = request.user.get_username() if getattr(request, "user", None) and request.user.is_authenticated else "system"
+    deleted_at = timezone.now()
+
+    IncidentTimelineEvent.objects.create(
+        incident=incident,
+        event_type="incident_deleted",
+        title=f"Incident {incident.incident_number or incident.incident_key} archived",
+        detail=reason or "Incident hidden from active incident workspace.",
+        payload={"deleted_by": actor, "reason": reason, "deleted_at": deleted_at.isoformat()},
+    )
+    incident.is_deleted = True
+    incident.deleted_at = deleted_at
+    incident.deleted_by_username = actor
+    incident.delete_reason = reason
+    incident.save(update_fields=["is_deleted", "deleted_at", "deleted_by_username", "delete_reason", "updated_at"])
+    audit_event(request, "incident.archived", object_type="incident", object_id=incident.incident_key, metadata={"reason": reason})
+    return JsonResponse(
+        {
+            "status": "deleted",
+            "incident_key": str(incident.incident_key),
+            "incident_number": incident.incident_number or "",
+            "deleted_at": deleted_at.isoformat(),
+        }
+    )
 
 # This should be the same secret token configured on the secure agents.
 AGENT_SECRET_TOKEN = os.getenv("AGENT_SECRET_TOKEN")
@@ -6576,6 +8418,60 @@ def ingest_alert_view(request: HttpRequest):
 
     alert_name = alert_payload.get("alert_name") or ((alert_payload.get("labels") or {}).get("alertname") or "unknown")
     logger.info(f"[INGEST] Alert received: {alert_name} | From AlertManager: {from_alertmanager}")
+    alert_status = str(alert_payload.get("status") or "firing").lower()
+    alert_source = _alert_source_name(from_alertmanager, alert_payload)
+    tenant = getattr(request, "tenant", None)
+    alert_event, alert_event_duplicate = persist_alert_event(alert_payload, source=alert_source, tenant=tenant)
+    suppressed, suppression_reason = evaluate_suppression(alert_event)
+    if suppressed:
+        mark_suppression(alert_event, True, suppression_reason)
+        grouped_incidents = _materialize_grouped_alert_incidents(alert_payload, source=alert_source, tenant=tenant) if from_alertmanager else []
+        return JsonResponse(
+            {
+                "status": "accepted_suppressed",
+                "message": "Alert matched a suppression rule or maintenance window; no incident or LLM investigation was started.",
+                "alert_name": alert_name,
+                "alert_event_id": str(alert_event.event_id),
+                "repeat_count": alert_event.repeat_count,
+                "suppression_reason": suppression_reason,
+                "grouped_alert_count": len(alert_payload.get("grouped_alerts") or []),
+                "grouped_incidents": grouped_incidents,
+            },
+            status=200,
+        )
+    mark_suppression(alert_event, False, "")
+    existing_active_alert = _find_active_incident_alert_for_payload(alert_payload, tenant=tenant)
+    if (
+        from_alertmanager
+        and existing_active_alert
+        and alert_status == "firing"
+        and envelope_execute is None
+    ):
+        incident = _record_duplicate_alert_update(existing_active_alert, alert_payload)
+        attach_incident(alert_event, incident)
+        grouped_incidents = _materialize_grouped_alert_incidents(alert_payload, source=alert_source, tenant=tenant)
+        return JsonResponse(
+            {
+                "status": "accepted_duplicate",
+                "message": "Duplicate Alertmanager notification updated the active incident without rerunning full investigation.",
+                "alert_name": alert_name,
+                "alert_event_id": str(alert_event.event_id),
+                "alert_event_duplicate": alert_event_duplicate,
+                "repeat_count": alert_event.repeat_count,
+                "incident": {
+                    "incident_key": str(incident.incident_key),
+                    "incident_number": incident.incident_number or "",
+                    "title": incident.title,
+                    "status": incident.status,
+                    "primary_service": incident.primary_service,
+                    "target_host": incident.target_host,
+                },
+                "deduplicated": True,
+                "grouped_alert_count": len(alert_payload.get("grouped_alerts") or []),
+                "grouped_incidents": grouped_incidents,
+            },
+            status=200,
+        )
     
     context = collect_alert_context(alert_payload)
     target_host = (
@@ -6592,69 +8488,69 @@ def ingest_alert_view(request: HttpRequest):
     )
     state_fingerprint = _build_incident_state_fingerprint(alert_payload, context, structured_evidence)
     cached_state = _get_cached_state_decision(state_fingerprint)
-    cached_planning = cached_state.get("planning") if isinstance(cached_state.get("planning"), dict) else {}
-
-    if cached_planning:
-        logger.info(f"[INGEST] Using cached planning decision for fingerprint {state_fingerprint[:16]}...")
-        normalized_plan = _coerce_diagnostic_plan(alert_payload, context, cached_planning, target_host)
-    else:
-        planning_prompt = (
-            "You are an AIOps incident responder. Given the alert payload and telemetry context, "
-            "return JSON only with keys: summary, target_host, diagnostic_command, why, should_execute.\n"
-            "- diagnostic_command must be a single executable command suitable for the target troubleshooting agent.\n"
-            "- should_execute must be true only if there is enough information to run the command now.\n"
-            "- target_host must be the hostname or IP where the command should run.\n\n"
-            "- The telemetry context already contains Prometheus metrics, Elasticsearch logs, and Jaeger traces gathered by the app.\n"
-            "- If those logs are sufficient, summarize the root cause directly.\n"
-            "- If more evidence is needed, recommend one concrete diagnostic command appropriate for the execution target.\n"
-            "- Do not tell the operator to inspect logs manually. The command output will be sent back to the AI for analysis.\n\n"
-            "- Use the dependency graph context to estimate blast radius, upstream dependents, and the likely impacted services.\n"
-            "- If recent incident memory is present, use it to determine whether this is a recurrence of the same failure after a previous remediation.\n"
-            "- If runtime state shows the previous remediation was exhausted or insufficient, choose the next diagnostic command or remediation based on the current evidence, not just the prior command.\n"
-            "- Explicitly weigh contradictory evidence before recommending aggressive action. If contradictions are high, prefer observation or safe validation.\n"
-            "- The agent does not support shell operators, command substitution, pipes, or semicolons.\n"
-            f"- Prefer evidence-guided targeting using this structured evidence summary: {_format_structured_evidence_for_prompt(structured_evidence, 900)}\n"
-            f"- Contradiction assessment: {_head_for_prompt(json.dumps(contradiction_assessment, indent=2, default=str), 500)}\n"
-            f"- Historical outcome learning: {_head_for_prompt(json.dumps(learning_snapshot, indent=2, default=str), 700)}\n"
-            "- Prefer target-native diagnostics (service health, logs, metrics, database readiness) instead of platform-specific shell tricks.\n"
-            "- If the evidence points to a shared dependency path, pivot the target to that dependency instead of staying on the symptom service.\n"
-            "- Return a literal executable command only.\n\n"
-            f"ALERT PAYLOAD:\n{_head_for_prompt(json.dumps(alert_payload, indent=2, default=str), 2000)}\n\n"
-            f"OBSERVABILITY CONTEXT:\n{_head_for_prompt(json.dumps(context, indent=2, default=str), 2500)}\n"
+    planning_prompt = (
+        "You are an AIOps incident responder. Given the alert payload and telemetry context, "
+        "return JSON only with keys: summary, target_host, diagnostic_command, why, should_execute.\n"
+        "- diagnostic_command must be a single executable command suitable for the target troubleshooting agent.\n"
+        "- should_execute must be true only if there is enough information to run the command now.\n"
+        "- target_host must be the hostname or IP where the command should run.\n\n"
+        "- The telemetry context already contains Prometheus metrics, Elasticsearch logs, and Jaeger traces gathered by the app.\n"
+        "- If those logs are sufficient, summarize the root cause directly.\n"
+        "- If more evidence is needed, recommend one concrete diagnostic command appropriate for the execution target.\n"
+        "- Do not tell the operator to inspect logs manually. The command output will be sent back to the AI for analysis.\n\n"
+        "- Use the dependency graph context to estimate blast radius, upstream dependents, and the likely impacted services.\n"
+        "- If recent incident memory is present, use it only as background memory. Do not reuse prior decisions when current evidence differs.\n"
+        "- Explicitly weigh contradictory evidence before recommending aggressive action. If contradictions are high, prefer observation or safe validation.\n"
+        "- The agent does not support shell operators, command substitution, pipes, or semicolons.\n"
+        f"- Prefer evidence-guided targeting using this structured evidence summary: {_format_structured_evidence_for_prompt(structured_evidence, 900)}\n"
+        f"- Contradiction assessment: {_head_for_prompt(json.dumps(contradiction_assessment, indent=2, default=str), 500)}\n"
+        f"- Historical outcome learning: {_head_for_prompt(json.dumps(learning_snapshot, indent=2, default=str), 700)}\n"
+        "- Prefer target-native diagnostics (service health, logs, metrics, database readiness) instead of platform-specific shell tricks.\n"
+        "- If the evidence points to a shared dependency path, pivot the target to that dependency instead of staying on the symptom service.\n"
+        "- Return a literal executable command only.\n\n"
+        f"ALERT PAYLOAD:\n{_head_for_prompt(json.dumps(alert_payload, indent=2, default=str), 2000)}\n\n"
+        f"OBSERVABILITY CONTEXT:\n{_head_for_prompt(json.dumps(context, indent=2, default=str), 2500)}\n"
+    )
+    logger.info(f"[INGEST] Sending planning prompt to vLLM for {alert_name} on {target_host}")
+    ok, status, planning_body = query_llm(planning_prompt)
+    if not ok:
+        # CRITICAL: Never return a non-2xx to alertmanager — it will retry indefinitely and
+        # mark the webhook as dead after 9 attempts. Accept the alert, log the LLM failure,
+        # return 200 with a degraded response so alertmanager considers it delivered.
+        logger.error(f"[INGEST] vLLM planning failed (LLM unavailable): {status} | Alert will be stored without AI analysis")
+        incident = _correlate_alert_to_incident(alert_payload, context, f"AI analysis unavailable: {alert_name}", "LLM backend unreachable during ingestion.", tenant=tenant)
+        attach_incident(alert_event, incident)
+        correlation_links = correlate_incident(alert_event, incident)
+        return JsonResponse(
+            {
+                "status": "accepted_degraded",
+                "warning": "AI analysis skipped — LLM backend unavailable. Alert recorded.",
+                "alert_name": alert_name,
+                "alert_event_id": str(alert_event.event_id),
+                "alert_event_duplicate": alert_event_duplicate,
+                "repeat_count": alert_event.repeat_count,
+                "target_host": target_host,
+                "structured_evidence": structured_evidence,
+                "incident_state_fingerprint": state_fingerprint,
+                "llm_error": str(status)[:200],
+                "incident": _incident_summary_payload(incident),
+                "correlation_links": _serialize_correlation_links(correlation_links),
+            },
+            status=200,
         )
-        logger.info(f"[INGEST] Sending planning prompt to vLLM for {alert_name} on {target_host}")
-        ok, status, planning_body = query_llm(planning_prompt)
-        if not ok:
-            # CRITICAL: Never return a non-2xx to alertmanager — it will retry indefinitely and
-            # mark the webhook as dead after 9 attempts. Accept the alert, log the LLM failure,
-            # return 200 with a degraded response so alertmanager considers it delivered.
-            logger.error(f"[INGEST] vLLM planning failed (LLM unavailable): {status} | Alert will be stored without AI analysis")
-            _correlate_alert_to_incident(alert_payload, context, f"AI analysis unavailable: {alert_name}", "LLM backend unreachable during ingestion.")
-            return JsonResponse(
-                {
-                    "status": "accepted_degraded",
-                    "warning": "AI analysis skipped — LLM backend unavailable. Alert recorded.",
-                    "alert_name": alert_name,
-                    "target_host": target_host,
-                    "structured_evidence": structured_evidence,
-                    "incident_state_fingerprint": state_fingerprint,
-                    "llm_error": str(status)[:200],
-                },
-                status=200,
-            )
 
-        try:
-            start_index = planning_body.find("{")
-            end_index = planning_body.rfind("}")
-            if start_index != -1 and end_index != -1:
-                plan = json.loads(planning_body[start_index:end_index + 1])
-            else:
-                plan = {}
-        except json.JSONDecodeError:
+    try:
+        start_index = planning_body.find("{")
+        end_index = planning_body.rfind("}")
+        if start_index != -1 and end_index != -1:
+            plan = json.loads(planning_body[start_index:end_index + 1])
+        else:
             plan = {}
+    except json.JSONDecodeError:
+        plan = {}
 
-        normalized_plan = _coerce_diagnostic_plan(alert_payload, context, plan, target_host)
-        logger.info(f"[INGEST] Planning result: {normalized_plan.get('diagnostic_command', 'NO CMD')[:60]} | Should execute: {normalized_plan.get('should_execute')}")
+    normalized_plan = _coerce_diagnostic_plan(alert_payload, context, plan, target_host)
+    logger.info(f"[INGEST] Planning result: {normalized_plan.get('diagnostic_command', 'NO CMD')[:60]} | Should execute: {normalized_plan.get('should_execute')}")
     diagnostic_command = normalized_plan["diagnostic_command"]
     target_host = normalized_plan["target_host"]
     summary = normalized_plan["summary"]
@@ -6679,7 +8575,7 @@ def ingest_alert_view(request: HttpRequest):
         "contradiction_assessment": contradiction_assessment,
         "historical_outcome_learning": learning_snapshot,
         "incident_state_fingerprint": state_fingerprint,
-        "state_cache_hit": bool(cached_planning),
+        "state_cache_hit": False,
         "context": context,
     }
     response_payload["diagnostic_typed_action"] = infer_typed_action(
@@ -6690,8 +8586,17 @@ def ingest_alert_view(request: HttpRequest):
         service=str(context.get("service_name") or "") if isinstance(context, dict) else "",
     )
 
-    incident = _correlate_alert_to_incident(alert_payload, context, summary, why)
+    incident = _correlate_alert_to_incident(alert_payload, context, summary, why, tenant=tenant)
+    attach_incident(alert_event, incident)
+    correlation_links = correlate_incident(alert_event, incident)
+    grouped_incidents = _materialize_grouped_alert_incidents(alert_payload, source=alert_source, tenant=tenant) if from_alertmanager else []
     response_payload["incident"] = _incident_summary_payload(incident)
+    response_payload["alert_event_id"] = str(alert_event.event_id)
+    response_payload["alert_event_duplicate"] = alert_event_duplicate
+    response_payload["repeat_count"] = alert_event.repeat_count
+    response_payload["correlation_links"] = _serialize_correlation_links(correlation_links)
+    response_payload["grouped_alert_count"] = len(alert_payload.get("grouped_alerts") or [])
+    response_payload["grouped_incidents"] = grouped_incidents
     policy_context = {
         "labels": alert_payload.get("labels") or {},
         "target_type": target_type,
@@ -6710,27 +8615,6 @@ def ingest_alert_view(request: HttpRequest):
     )
     response_payload["policy_decision"] = policy_decision
     response_payload["behavior_version"] = current_behavior_version_payload()
-    _store_cached_state_decision(
-        state_fingerprint,
-        {
-            "planning": {
-                "summary": summary,
-                "why": why,
-                "target_host": target_host,
-                "target_type": target_type,
-                "diagnostic_command": diagnostic_command,
-                "should_execute": should_execute,
-                "decision_policy": decision_policy,
-                "confidence_reason": confidence_reason,
-                "evidence_assessment": evidence_assessment,
-                "policy_decision": policy_decision,
-                "diagnostic_typed_action": response_payload["diagnostic_typed_action"],
-                "behavior_version": response_payload["behavior_version"],
-            },
-            "structured_evidence": structured_evidence,
-            "incident_key": str(incident.incident_key),
-        },
-    )
 
     cache_entry = {
         "alert_id": f"alert-{uuid.uuid4().hex}",
@@ -6755,7 +8639,7 @@ def ingest_alert_view(request: HttpRequest):
         "contradiction_assessment": contradiction_assessment,
         "historical_outcome_learning": learning_snapshot,
         "incident_state_fingerprint": state_fingerprint,
-        "state_cache_hit": bool(cached_planning),
+        "state_cache_hit": False,
         "execute_immediately": execute_immediately,
         "from_alertmanager": from_alertmanager,
         "labels": alert_payload.get("labels") or {},
@@ -6850,6 +8734,7 @@ def ingest_alert_view(request: HttpRequest):
         execution_type="diagnostic",
         command=diagnostic_command,
         agent_success=success,
+        analysis_sections=analysis_sections,
     )
     _merge_command_output_into_investigation_run(
         incident=incident,
@@ -6888,7 +8773,7 @@ def ingest_alert_view(request: HttpRequest):
         event_type="diagnostic_command_executed",
         title=f"Executed diagnostic command on {target_host}",
         detail=diagnostic_command,
-        payload={
+        payload=_json_safe({
             "command": diagnostic_command,
             "target_host": target_host,
             "agent_success": success,
@@ -6899,7 +8784,7 @@ def ingest_alert_view(request: HttpRequest):
             "verification": verification,
             "incident_state_fingerprint": state_fingerprint,
             "policy_decision": policy_decision,
-        },
+        }),
     )
     cache_entry.update({
         "agent_success": success,
@@ -6928,6 +8813,8 @@ def ingest_alert_view(request: HttpRequest):
 
 @login_required
 def recent_alert_recommendations_view(request: HttpRequest):
+    if not has_permission(request, "alerts.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "alerts.read"}, status=403)
     entries = cache.get(RECENT_ALERT_CACHE_KEY) or []
     if not isinstance(entries, list):
         entries = []
@@ -6946,6 +8833,13 @@ def recent_alert_recommendations_view(request: HttpRequest):
             changed = True
             entry = {**entry, "alert_id": f"alert-{uuid.uuid4().hex}"}
         
+        incident = None
+        incident_key = str(entry.get("incident_key") or "").strip()
+        if incident_key:
+            incident = tenant_queryset(request, Incident).filter(incident_key=incident_key).first()
+        projection = _latest_investigation_ui_projection(incident)
+        entry = _apply_investigation_projection(entry, projection)
+
         normalized_entries.append(entry)
         
         # Only include firing alerts (filter out resolved alerts)
@@ -6956,6 +8850,165 @@ def recent_alert_recommendations_view(request: HttpRequest):
         cache.set(RECENT_ALERT_CACHE_KEY, normalized_entries[:MAX_RECENT_ALERTS], RECENT_ALERT_CACHE_TTL)
     
     return JsonResponse({"count": len(firing_entries), "results": firing_entries})
+
+
+@login_required
+def alerts_noise_view(request: HttpRequest):
+    if not has_permission(request, "alerts.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "alerts.read"}, status=403)
+    try:
+        minutes = int(request.GET.get("minutes") or 1440)
+    except (TypeError, ValueError):
+        minutes = 1440
+    minutes = max(5, min(minutes, 43200))
+    return JsonResponse(noise_reduction_stats(minutes=minutes, tenant=getattr(request, "tenant", None)))
+
+
+def _parse_request_datetime(value: Any):
+    if not value:
+        return None
+    if hasattr(value, "isoformat"):
+        return value
+    parsed = django_parse_datetime(str(value))
+    if parsed and timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, timezone=timezone.get_current_timezone())
+    return parsed
+
+
+def _alert_suppression_payload(rule: AlertSuppression) -> Dict[str, Any]:
+    return {
+        "rule_type": "suppression",
+        "id": str(rule.suppression_id),
+        "name": rule.name,
+        "enabled": rule.enabled,
+        "alert_name": rule.alert_name,
+        "service_name": rule.service_name,
+        "target_host": rule.target_host,
+        "environment": rule.environment,
+        "reason": rule.reason,
+        "expires_at": rule.expires_at.isoformat() if rule.expires_at else None,
+        "created_by_username": rule.created_by_username,
+        "created_at": rule.created_at.isoformat(),
+        "updated_at": rule.updated_at.isoformat(),
+    }
+
+
+def _maintenance_window_payload(window: MaintenanceWindow) -> Dict[str, Any]:
+    return {
+        "rule_type": "maintenance",
+        "id": str(window.window_id),
+        "name": window.name,
+        "enabled": window.enabled,
+        "service_name": window.service_name,
+        "target_host": window.target_host,
+        "environment": window.environment,
+        "reason": window.reason,
+        "starts_at": window.starts_at.isoformat(),
+        "ends_at": window.ends_at.isoformat(),
+        "created_by_username": window.created_by_username,
+        "created_at": window.created_at.isoformat(),
+        "updated_at": window.updated_at.isoformat(),
+    }
+
+
+@login_required
+def alerts_noise_rules_view(request: HttpRequest):
+    if request.method == "GET":
+        if not has_permission(request, "alerts.read"):
+            return JsonResponse({"error": "permission_denied", "required_permission": "alerts.read"}, status=403)
+        return JsonResponse(
+            {
+                "stats": noise_reduction_stats(minutes=1440, tenant=getattr(request, "tenant", None)),
+                "suppressions": [
+                    _alert_suppression_payload(rule)
+                    for rule in tenant_queryset(request, AlertSuppression).order_by("-enabled", "-updated_at")[:200]
+                ],
+                "maintenance_windows": [
+                    _maintenance_window_payload(window)
+                    for window in tenant_queryset(request, MaintenanceWindow).order_by("-enabled", "-starts_at")[:200]
+                ],
+            }
+        )
+
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    if not has_permission(request, "alerts.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "alerts.manage"}, status=403)
+
+    try:
+        body = json.loads(request.body or "{}")
+    except Exception as exc:
+        return JsonResponse({"error": "invalid_json", "detail": str(exc)}, status=400)
+
+    rule_type = str(body.get("rule_type") or "suppression").strip().lower()
+    actor = request.user.get_username() if request.user.is_authenticated else "system"
+    name = str(body.get("name") or "").strip()
+    if not name:
+        return JsonResponse({"error": "name_required"}, status=400)
+
+    if rule_type == "maintenance":
+        starts_at = _parse_request_datetime(body.get("starts_at"))
+        ends_at = _parse_request_datetime(body.get("ends_at"))
+        if not starts_at or not ends_at:
+            return JsonResponse({"error": "maintenance_window_time_required"}, status=400)
+        if ends_at <= starts_at:
+            return JsonResponse({"error": "maintenance_window_invalid_range"}, status=400)
+        window = MaintenanceWindow.objects.create(
+            tenant=getattr(request, "tenant", None),
+            name=name,
+            enabled=_to_bool(body.get("enabled"), default=True),
+            service_name=str(body.get("service_name") or "").strip(),
+            target_host=str(body.get("target_host") or "").strip(),
+            environment=str(body.get("environment") or "").strip().lower(),
+            starts_at=starts_at,
+            ends_at=ends_at,
+            reason=str(body.get("reason") or "maintenance_window").strip(),
+            created_by_username=actor,
+        )
+        audit_event(request, "alert_rule.created", object_type="maintenance_window", object_id=window.window_id, metadata={"name": window.name})
+        return JsonResponse({"status": "created", "rule": _maintenance_window_payload(window)}, status=201)
+
+    expires_at = _parse_request_datetime(body.get("expires_at"))
+    rule = AlertSuppression.objects.create(
+        tenant=getattr(request, "tenant", None),
+        name=name,
+        enabled=_to_bool(body.get("enabled"), default=True),
+        alert_name=str(body.get("alert_name") or "").strip(),
+        service_name=str(body.get("service_name") or "").strip(),
+        target_host=str(body.get("target_host") or "").strip(),
+        environment=str(body.get("environment") or "").strip().lower(),
+        reason=str(body.get("reason") or "suppression_rule").strip(),
+        expires_at=expires_at,
+        created_by_username=actor,
+    )
+    audit_event(request, "alert_rule.created", object_type="alert_suppression", object_id=rule.suppression_id, metadata={"name": rule.name})
+    return JsonResponse({"status": "created", "rule": _alert_suppression_payload(rule)}, status=201)
+
+
+@login_required
+def alerts_noise_rule_delete_view(request: HttpRequest, rule_type: str, rule_id: str):
+    if request.method not in {"POST", "DELETE"}:
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    if not has_permission(request, "alerts.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "alerts.manage"}, status=403)
+    normalized_type = str(rule_type or "").strip().lower()
+    if normalized_type == "maintenance":
+        window = tenant_queryset(request, MaintenanceWindow).filter(window_id=rule_id).first()
+        if not window:
+            return JsonResponse({"error": "rule_not_found"}, status=404)
+        window.enabled = False
+        window.save(update_fields=["enabled", "updated_at"])
+        audit_event(request, "alert_rule.disabled", object_type="maintenance_window", object_id=window.window_id, metadata={"name": window.name})
+        return JsonResponse({"status": "disabled", "rule": _maintenance_window_payload(window)})
+
+    rule = tenant_queryset(request, AlertSuppression).filter(suppression_id=rule_id).first()
+    if not rule:
+        return JsonResponse({"error": "rule_not_found"}, status=404)
+    rule.enabled = False
+    rule.save(update_fields=["enabled", "updated_at"])
+    audit_event(request, "alert_rule.disabled", object_type="alert_suppression", object_id=rule.suppression_id, metadata={"name": rule.name})
+    return JsonResponse({"status": "disabled", "rule": _alert_suppression_payload(rule)})
+
 
 @csrf_exempt
 @login_required
@@ -6976,10 +9029,16 @@ def execute_command_view(request: HttpRequest):
         approval_token = str(body.get("approval_token") or "").strip()
         idempotency_key_input = str(body.get("idempotency_key") or "").strip()
         dry_run = _to_bool(body.get("dry_run"), default=False)
+        break_glass = _to_bool(body.get("break_glass"), default=False)
+        break_glass_reason = str(body.get("break_glass_reason") or "").strip()
+        requires_verification = _to_bool(body.get("requires_verification"), default=False)
         command_to_run = body.get("command") or command_from_typed_action(typed_action_payload)
         original_question = body.get("original_question")
         target_host = body.get("target_host") or (typed_action_payload or {}).get("target_host") or (typed_action_payload or {}).get("target") # The IP or hostname of the server to run the command on.
         execution_type = _summarize_execution_type(str(body.get("execution_type") or "diagnostic").strip().lower())
+        required_permission = "remediations.execute" if execution_type == "remediation" else "investigations.execute_diagnostic"
+        if not has_permission(request, required_permission):
+            return JsonResponse({"error": "permission_denied", "required_permission": required_permission}, status=403)
         target_record = _find_target_by_host_alias(str(target_host or ""))
 
         if (not AGENT_SECRET_TOKEN) and not (target_record and target_record.target_type == "kubernetes"):
@@ -7024,18 +9083,64 @@ def execute_command_view(request: HttpRequest):
         incident = None
         incident_key = str((linked_recommendation or {}).get("incident_key") or "").strip()
         if incident_key:
-            incident = Incident.objects.filter(incident_key=incident_key).first()
-        session = ChatSession.objects.filter(session_id=session_id).first() if session_id else None
+            incident = tenant_queryset(request, Incident).filter(incident_key=incident_key).first()
+        session = tenant_queryset(request, ChatSession).filter(session_id=session_id).first() if session_id else None
+        # Resolve environment-aware policy pack before policy evaluation
+        _pack_obj = _resolve_policy_pack_for_execution(
+            target_host=str(target_host or ""),
+            execution_context=execution_context,
+        )
+        _pack_dict = _policy_pack_to_dict(_pack_obj) if _pack_obj else None
+
+        actor_identity = getattr(request.user, "username", "") or getattr(request.user, "email", "") or "operator"
         policy_decision = evaluate_execution_policy(
             command=command_to_run,
             target_host=target_host,
             execution_type=execution_type,
             context=execution_context,
             approval_present=False,
-            actor=getattr(request.user, "username", "") or getattr(request.user, "email", "") or "operator",
+            actor=actor_identity,
+            break_glass=break_glass,
+            break_glass_reason=break_glass_reason,
+            policy_pack=_pack_dict,
         )
         environment = str(policy_decision.get("environment") or "")
         service_name = str(execution_context.get("service_name") or "")
+
+        # Pre-execution blast radius estimation (B2)
+        pre_blast_radius = estimate_pre_execution_blast_radius(
+            service=service_name,
+            action_type=str(policy_decision.get("action_type") or "unknown"),
+            environment=environment,
+            dependency_graph=(execution_context.get("dependency_graph") or {}),
+            target_host=str(target_host or ""),
+        )
+        # Upgrade requires_approval if blast radius estimate says so
+        if pre_blast_radius.get("requires_approval") and policy_decision.get("decision") == "allowed" and not break_glass:
+            policy_decision = {
+                **policy_decision,
+                "decision": "requires_approval",
+                "allowed": False,
+                "requires_approval": True,
+                "approval_reasons": (policy_decision.get("approval_reasons") or []) + [
+                    f"Blast radius estimate: {pre_blast_radius['affected_count']} service(s) affected "
+                    f"(risk={pre_blast_radius['risk_label']})."
+                ],
+                "reason": f"Blast radius estimate requires approval: {pre_blast_radius['risk_label']} risk across {pre_blast_radius['affected_count']} service(s).",
+            }
+        # Pre-execution DB snapshot for database_change actions (B2-DB)
+        # Captured before intent creation so rollback is always available, even if execution fails.
+        _pre_db_snapshot: Dict[str, Any] = {}
+        if str(policy_decision.get("action_type") or "") == "database_change" and not dry_run:
+            try:
+                _pre_db_snapshot = capture_pre_execution_snapshot(
+                    command=command_to_run,
+                    service=service_name,
+                    environment=environment,
+                )
+            except Exception as _snap_exc:
+                logger.warning("[ROLLBACK-SNAPSHOT] Non-fatal snapshot error: %s", _snap_exc)
+
         ranking = rank_typed_action(
             resolved_typed_action,
             service=service_name,
@@ -7059,6 +9164,7 @@ def execute_command_view(request: HttpRequest):
             original_question=str(original_question or ""),
         )
         intent, reused_existing = _prepare_execution_intent(
+            tenant=getattr(request, "tenant", None),
             session=session,
             user=request.user,
             incident=incident,
@@ -7074,11 +9180,38 @@ def execute_command_view(request: HttpRequest):
             dry_run=dry_run,
             rollback_metadata=rollback_metadata,
             idempotency_key=idempotency_key,
+            break_glass=break_glass,
+            break_glass_reason=break_glass_reason,
+            estimated_blast_radius=pre_blast_radius,
+            rollback_snapshot=_pre_db_snapshot,
+            requires_verification=requires_verification or (execution_type == "remediation"),
+            policy_pack=_pack_obj,
         )
         if reused_existing and intent.response_json:
+            if intent.status == "approval_required":
+                if not approval_token:
+                    return JsonResponse(intent.response_json, status=409)
+            elif intent.status not in {"planned", "approved"}:
+                return JsonResponse(intent.response_json)
+            elif not approval_token:
+                return JsonResponse(intent.response_json)
+
+        if approval_token and not str(body.get("approval_reason") or "").strip():
+            return JsonResponse({"error": "approval_reason is required for approved execution."}, status=400)
+
+        if reused_existing and approval_token:
+            intent.command = command_to_run
+            intent.action_json = resolved_typed_action or {}
+            intent.target_host = target_host
+            intent.service = service_name
+            intent.environment = environment
+            intent.execution_type = execution_type
+            intent.save(update_fields=["command", "action_json", "target_host", "service", "environment", "execution_type", "updated_at"])
+
+        if reused_existing and intent.response_json and not approval_token:
             return JsonResponse(intent.response_json)
 
-        frequency_check = _check_service_execution_frequency(service_name)
+        frequency_check = _check_service_execution_frequency(service_name, policy_pack=_pack_dict)
         if not frequency_check["allowed"]:
             policy_decision = {
                 **policy_decision,
@@ -7121,6 +9254,7 @@ def execute_command_view(request: HttpRequest):
                     "policy_decision": policy_decision,
                     "typed_action": resolved_typed_action,
                     "ranking": ranking,
+                    "estimated_blast_radius": pre_blast_radius,
                     "behavior_version": current_behavior_version_payload(),
                     "workflow": approval_workflow,
                 }
@@ -7129,8 +9263,10 @@ def execute_command_view(request: HttpRequest):
                 return JsonResponse(approval_response, status=409)
             intent.approved_at = timezone.now()
             intent.approved_by = request.user
+            intent.approver_identity = actor_identity
+            intent.approval_reason = str(body.get("approval_reason") or "").strip()
             intent.status = "approved"
-            intent.save(update_fields=["approved_at", "approved_by", "status", "updated_at"])
+            intent.save(update_fields=["approved_at", "approved_by", "approver_identity", "approval_reason", "status", "updated_at"])
 
         if policy_decision["decision"] == "blocked":
             blocked_workflow = build_execution_workflow(
@@ -7190,10 +9326,13 @@ def execute_command_view(request: HttpRequest):
                 "typed_action_summary": action_summary(resolved_typed_action),
                 "policy_decision": policy_decision,
                 "ranking": ranking,
+                "estimated_blast_radius": pre_blast_radius,
                 "behavior_version": current_behavior_version_payload(),
                 "execution_intent_id": intent.intent_id,
                 "idempotency_key": idempotency_key,
                 "rollback_metadata": rollback_metadata,
+                "would_execute_command": command_to_run,
+                "would_target_host": target_host,
                 "workflow": dry_run_workflow,
             }
             intent.status = "dry_run"
@@ -7247,6 +9386,7 @@ def execute_command_view(request: HttpRequest):
             execution_type=execution_type,
             command=command_to_run,
             agent_success=success,
+            analysis_sections=analysis_sections,
         )
         logger.info(f"[EXECUTE] Verification result: {verification.get('status')} | Variance detected: {bool(remediation_variance)}")
 
@@ -7285,7 +9425,7 @@ def execute_command_view(request: HttpRequest):
                 },
             )
             if incident_key:
-                incident = Incident.objects.filter(incident_key=incident_key).first()
+                incident = tenant_queryset(request, Incident).filter(incident_key=incident_key).first()
                 if incident:
                     _merge_command_output_into_investigation_run(
                         incident=incident,
@@ -7295,9 +9435,16 @@ def execute_command_view(request: HttpRequest):
                         analysis_sections=analysis_sections,
                         execution_type=execution_type,
                     )
-                    incident.status = "investigating"
+                    # B3 — verification gate: only auto-resolve if no pending verifications
+                    _vgate = _check_pending_verification_gate(incident)
+                    if verification.get("status") == "resolved" and not _vgate:
+                        incident.status = "resolved"
+                        incident.resolved_at = timezone.now()
+                    else:
+                        incident.status = "investigating"
+                        incident.resolved_at = None
                     incident.summary = incident.summary or original_question
-                    incident.save(update_fields=["status", "summary", "updated_at"])
+                    incident.save(update_fields=["status", "resolved_at", "summary", "updated_at"])
                     if remediation_variance:
                         previous_variance = remediation_variance.get("previous") or {}
                         remediation_variance["previous"] = {**previous_variance, "structured_evidence": cached_state.get("structured_evidence") or {}}
@@ -7341,6 +9488,7 @@ def execute_command_view(request: HttpRequest):
             },
         )
         RemediationOutcome.objects.create(
+            tenant=intent.tenant,
             execution_intent=intent,
             incident=incident,
             action_type=str(resolved_typed_action.get("action") or ""),
@@ -7348,7 +9496,7 @@ def execute_command_view(request: HttpRequest):
             environment=environment,
             context_fingerprint=intent_context_fingerprint,
             action_signature=execution_action_signature(resolved_typed_action),
-            success=bool(success and verification.get("status") in {"resolved", "partially_improved"}),
+            success=bool(success and verification.get("status") in {"resolved", "confirmed", "partially_improved"}),
             verification_status=str(verification.get("status") or ""),
             time_to_recovery_seconds=0 if verification.get("status") == "resolved" else None,
             recurrence_within_minutes=None,
@@ -7361,6 +9509,7 @@ def execute_command_view(request: HttpRequest):
             },
         )
         replay_scenario = ReplayScenario.objects.create(
+            tenant=intent.tenant,
             incident=incident,
             session=session,
             source="execution",
@@ -7408,6 +9557,8 @@ def execute_command_view(request: HttpRequest):
             dry_run=dry_run,
         )
 
+        verification_pending = requires_verification and verification.get("status") not in {"resolved", "confirmed"}
+        final_status = "verification_pending" if verification_pending else execution_status
         response_payload = {
             "execution_type": execution_type,
             "final_answer": final_answer,
@@ -7416,14 +9567,18 @@ def execute_command_view(request: HttpRequest):
             "agent_success": success,
             "agent_response": agent_response,
             "last_execution_at": execution_time,
-            "execution_status": execution_status,
+            "execution_status": final_status,
             "verification": verification,
+            "verification_pending": verification_pending,
+            "requires_verification": requires_verification,
             "remediation_variance": remediation_variance or None,
             "incident_state_fingerprint": state_fingerprint,
             "policy_decision": policy_decision,
             "typed_action": resolved_typed_action,
             "typed_action_summary": action_summary(resolved_typed_action),
             "ranking": ranking,
+            "estimated_blast_radius": pre_blast_radius,
+            "break_glass": break_glass,
             "behavior_version": current_behavior_version_payload(),
             "execution_intent_id": intent.intent_id,
             "idempotency_key": idempotency_key,
@@ -7431,17 +9586,340 @@ def execute_command_view(request: HttpRequest):
             "replay_scores": replay_scores,
             "workflow": workflow,
         }
-        intent.status = execution_status
+        intent.status = final_status
         intent.verification_json = verification
+        intent.requires_verification = requires_verification
         intent.response_json = _json_safe(response_payload)
         intent.completed_at = timezone.now()
-        intent.save(update_fields=["status", "verification_json", "response_json", "completed_at", "updated_at"])
+        intent.save(update_fields=["status", "verification_json", "requires_verification", "response_json", "completed_at", "updated_at"])
+        audit_event(
+            request,
+            "execution.completed" if final_status in {"completed", "verification_pending"} else "execution.failed",
+            object_type="execution_intent",
+            object_id=intent.intent_id,
+            metadata={"execution_type": execution_type, "target_host": target_host, "status": final_status},
+        )
 
         return JsonResponse(response_payload)
 
     except Exception as e:
         logger.exception("execute_command_view error: %s", e)
         return JsonResponse({"error": "An unexpected error occurred.", "detail": str(e)}, status=500)
+
+
+# ---------------------------------------------------------------------------
+# B1 — Dedicated approval endpoint
+# POST /genai/executions/<intent_id>/approve/
+# ---------------------------------------------------------------------------
+
+@csrf_exempt
+@login_required
+def approve_execution_intent_view(request: HttpRequest, intent_id: str):
+    """
+    Approve a pending execution intent.
+    Captures approver identity and a mandatory reason, validates the approval
+    token, and transitions the intent to 'approved'.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required."}, status=405)
+    if not has_permission(request, "remediations.execute"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "remediations.execute"}, status=403)
+
+    try:
+        body = json.loads(request.body or "{}")
+        approval_token = str(body.get("approval_token") or "").strip()
+        approval_reason = str(body.get("approval_reason") or "").strip()
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({"error": "Invalid JSON body."}, status=400)
+
+    if not approval_reason:
+        return JsonResponse({"error": "approval_reason is required for approval."}, status=400)
+
+    intent = tenant_queryset(request, ExecutionIntent).filter(intent_id=intent_id).first()
+    if not intent:
+        return JsonResponse({"error": "Execution intent not found."}, status=404)
+
+    if intent.status not in ("approval_required", "planned"):
+        return JsonResponse({"error": f"Intent is not awaiting approval (status={intent.status})."}, status=409)
+
+    if not verify_approval_token(approval_token, intent.approval_token_hash, intent.approval_expires_at):
+        return JsonResponse({"error": "Approval token is invalid or expired."}, status=403)
+
+    actor_identity = (
+        getattr(request.user, "username", "")
+        or getattr(request.user, "email", "")
+        or "operator"
+    )
+
+    intent.approved_at = timezone.now()
+    intent.approved_by = request.user if getattr(request.user, "is_authenticated", False) else None
+    intent.approver_identity = actor_identity
+    intent.approval_reason = approval_reason
+    intent.status = "approved"
+    intent.save(update_fields=["approved_at", "approved_by", "approver_identity", "approval_reason", "status", "updated_at"])
+    audit_event(request, "execution.approved", object_type="execution_intent", object_id=intent.intent_id, metadata={"reason": approval_reason, "action_type": intent.action_type})
+
+    if intent.incident:
+        IncidentTimelineEvent.objects.create(
+            incident=intent.incident,
+            event_type="execution_approved",
+            title=f"Execution approved by {actor_identity}",
+            detail=approval_reason,
+            payload=_json_safe({
+                "intent_id": intent.intent_id,
+                "approver_identity": actor_identity,
+                "approval_reason": approval_reason,
+                "action_type": intent.action_type,
+                "command": intent.command,
+            }),
+        )
+
+    return JsonResponse({
+        "approved": True,
+        "intent_id": intent.intent_id,
+        "status": intent.status,
+        "approver_identity": actor_identity,
+        "approval_reason": approval_reason,
+        "approved_at": intent.approved_at.isoformat(),
+    })
+
+
+# ---------------------------------------------------------------------------
+# A2 — Rollback endpoint
+# POST /genai/executions/<intent_id>/rollback/
+# ---------------------------------------------------------------------------
+
+@csrf_exempt
+@login_required
+def rollback_execution_intent_view(request: HttpRequest, intent_id: str):
+    """
+    Create and immediately enqueue a rollback intent for a completed execution.
+    The rollback typed action is derived from the original command/action type.
+    Returns the new rollback intent for the caller to confirm/approve.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required."}, status=405)
+    if not has_permission(request, "remediations.execute"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "remediations.execute"}, status=403)
+
+    try:
+        body = json.loads(request.body or "{}")
+        rollback_reason = str(body.get("reason") or "").strip()
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({"error": "Invalid JSON body."}, status=400)
+
+    original = tenant_queryset(request, ExecutionIntent).filter(intent_id=intent_id).first()
+    if not original:
+        return JsonResponse({"error": "Execution intent not found."}, status=404)
+
+    if original.status not in ("completed", "verified", "verification_pending", "failed"):
+        return JsonResponse(
+            {"error": f"Only completed or failed intents can be rolled back (status={original.status})."},
+            status=409,
+        )
+
+    if original.action_type == "rollback":
+        return JsonResponse({"error": "Cannot roll back a rollback."}, status=409)
+
+    rollback_action = infer_rollback_action(
+        original_command=original.command,
+        original_action_type=original.action_type,
+        target_host=original.target_host,
+        service=original.service,
+        why=rollback_reason or f"Operator rollback of intent {original.intent_id}",
+    )
+    rollback_command = rollback_action.get("command") or ""
+
+    # For DB changes: use the pre-execution snapshot to generate a data-safe rollback
+    snapshot_data = original.rollback_snapshot_json or {}
+    snapshot_feasibility = "unknown"
+    if original.action_type == "database_change" and snapshot_data:
+        snapshot_cmd, snapshot_feasibility = build_rollback_command_from_snapshot(
+            snapshot_data, original.command
+        )
+        if snapshot_feasibility in ("exact", "approximate"):
+            rollback_command = snapshot_cmd
+            rollback_action = {**rollback_action, "command": rollback_command,
+                               "rollback_feasibility": snapshot_feasibility,
+                               "source": "pre_execution_snapshot"}
+
+    actor_identity = (
+        getattr(request.user, "username", "")
+        or getattr(request.user, "email", "")
+        or "operator"
+    )
+
+    rollback_intent = ExecutionIntent.objects.create(
+        tenant=original.tenant,
+        session=original.session,
+        user=request.user if getattr(request.user, "is_authenticated", False) else None,
+        incident=original.incident,
+        original_intent=original,
+        policy_pack=original.policy_pack,
+        execution_type="remediation",
+        action_type="rollback",
+        service=original.service,
+        environment=original.environment,
+        target_host=original.target_host,
+        command=rollback_command,
+        action_json=rollback_action,
+        action_signature=execution_action_signature(rollback_action),
+        requires_approval=True,
+        rollback_json={"original_command": original.command, "original_action_type": original.action_type},
+        policy_decision_json={},
+        ranking_json={},
+        context_fingerprint=original.context_fingerprint,
+        requires_verification=True,
+        break_glass=False,
+        status="rollback_pending",
+        idempotency_key=f"rollback:{original.intent_id}",
+    )
+
+    original.status = "rollback_pending"
+    original.save(update_fields=["status", "updated_at"])
+    audit_event(request, "execution.rollback_initiated", object_type="execution_intent", object_id=original.intent_id, metadata={"rollback_intent_id": rollback_intent.intent_id, "reason": rollback_reason})
+
+    if original.incident:
+        IncidentTimelineEvent.objects.create(
+            incident=original.incident,
+            event_type="rollback_initiated",
+            title=f"Rollback initiated by {actor_identity}",
+            detail=rollback_reason or f"Rollback of command: {original.command[:80]}",
+            payload=_json_safe({
+                "original_intent_id": original.intent_id,
+                "rollback_intent_id": rollback_intent.intent_id,
+                "rollback_command": rollback_command,
+                "actor": actor_identity,
+            }),
+        )
+
+    return JsonResponse({
+        "rollback_initiated": True,
+        "rollback_intent_id": rollback_intent.intent_id,
+        "rollback_command": rollback_command,
+        "rollback_action": rollback_action,
+        "rollback_feasibility": snapshot_feasibility if original.action_type == "database_change" else "derived",
+        "snapshot_available": bool(snapshot_data),
+        "status": rollback_intent.status,
+        "requires_approval": rollback_intent.requires_approval,
+        "original_intent_id": original.intent_id,
+    }, status=201)
+
+
+# ---------------------------------------------------------------------------
+# B3 — Verification confirmation endpoint
+# POST /genai/executions/<intent_id>/verify/
+# ---------------------------------------------------------------------------
+
+@csrf_exempt
+@login_required
+def verify_execution_intent_view(request: HttpRequest, intent_id: str):
+    """
+    Confirm that post-action verification has passed for a completed intent.
+    Must be called before a linked incident can be resolved when
+    ``requires_verification=True``.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required."}, status=405)
+    if not has_permission(request, "remediations.execute"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "remediations.execute"}, status=403)
+
+    try:
+        body = json.loads(request.body or "{}")
+        verification_outcome = str(body.get("outcome") or "").strip().lower()
+        verification_notes = str(body.get("notes") or "").strip()
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({"error": "Invalid JSON body."}, status=400)
+
+    valid_outcomes = {"resolved", "confirmed", "partially_improved", "unchanged", "worsened", "inconclusive"}
+    if verification_outcome not in valid_outcomes:
+        return JsonResponse(
+            {"error": f"outcome must be one of: {', '.join(sorted(valid_outcomes))}."},
+            status=400,
+        )
+
+    intent = tenant_queryset(request, ExecutionIntent).filter(intent_id=intent_id).first()
+    if not intent:
+        return JsonResponse({"error": "Execution intent not found."}, status=404)
+
+    if intent.status not in ("verification_pending", "completed", "failed"):
+        return JsonResponse(
+            {"error": f"Intent is not in a verifiable state (status={intent.status})."},
+            status=409,
+        )
+
+    actor_identity = (
+        getattr(request.user, "username", "")
+        or getattr(request.user, "email", "")
+        or "operator"
+    )
+
+    verification_record = {
+        **(intent.verification_json or {}),
+        "manual_outcome": verification_outcome,
+        "manual_notes": verification_notes,
+        "verified_by": actor_identity,
+        "verified_at": timezone.now().isoformat(),
+        "status": verification_outcome,
+    }
+    intent.verification_json = verification_record
+    intent.status = "verified" if verification_outcome in {"resolved", "confirmed"} else intent.status
+    intent.save(update_fields=["verification_json", "status", "updated_at"])
+    audit_event(request, "execution.verified", object_type="execution_intent", object_id=intent.intent_id, metadata={"outcome": verification_outcome, "notes": verification_notes})
+
+    if intent.incident:
+        IncidentTimelineEvent.objects.create(
+            incident=intent.incident,
+            event_type="verification_confirmed",
+            title=f"Verification confirmed: {verification_outcome}",
+            detail=verification_notes,
+            payload=_json_safe({
+                "intent_id": intent.intent_id,
+                "outcome": verification_outcome,
+                "notes": verification_notes,
+                "verified_by": actor_identity,
+            }),
+        )
+
+    return JsonResponse({
+        "verified": True,
+        "intent_id": intent.intent_id,
+        "status": intent.status,
+        "verification_outcome": verification_outcome,
+        "verified_by": actor_identity,
+    })
+
+
+# ---------------------------------------------------------------------------
+# B3 — Incident resolution gate
+# Called from the incident resolve path to block early resolution
+# ---------------------------------------------------------------------------
+
+def _check_pending_verification_gate(incident: "Incident") -> Dict[str, Any]:
+    """
+    Returns a blocking payload if any remediation intents linked to this
+    incident have requires_verification=True but have not been verified.
+    Returns empty dict if the incident may proceed to resolved.
+    """
+    pending = ExecutionIntent.objects.filter(
+        incident=incident,
+        requires_verification=True,
+        status__in=["verification_pending", "executing", "completed"],
+    ).exclude(status="verified")
+
+    if not pending.exists():
+        return {}
+
+    blocking_intents = list(pending.values("intent_id", "action_type", "service", "command", "status")[:5])
+    return {
+        "blocked": True,
+        "reason": (
+            f"Incident cannot be resolved: {pending.count()} remediation action(s) require post-action "
+            "verification before the incident is marked resolved."
+        ),
+        "pending_verifications": blocking_intents,
+    }
+
 
 FLEET_PROFILE_SEED = [
     {
@@ -8660,8 +11138,10 @@ def _get_profile_by_slug(slug: str, target_type: Optional[str] = None) -> Teleme
 
 @login_required
 def fleet_targets_view(request: HttpRequest):
+    if not has_permission(request, "fleet.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "fleet.read"}, status=403)
     _ensure_fleet_profiles()
-    targets = Target.objects.select_related("profile").prefetch_related("components", "discovered_services").all()
+    targets = tenant_queryset(request, Target).select_related("profile").prefetch_related("components", "discovered_services")
     return JsonResponse({"count": targets.count(), "results": [_serialize_target(target) for target in targets]})
 
 
@@ -8669,9 +11149,11 @@ def fleet_targets_view(request: HttpRequest):
 def fleet_target_detail_view(request: HttpRequest, target_id: str):
     if request.method != "GET":
         return JsonResponse({"error": "Invalid request method"}, status=405)
+    if not has_permission(request, "fleet.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "fleet.read"}, status=403)
     _ensure_fleet_profiles()
     target = (
-        Target.objects.select_related(
+        tenant_queryset(request, Target).select_related(
             "profile",
             "runtime_profile",
             "policy_assignment__policy_profile",
@@ -8689,7 +11171,7 @@ def fleet_target_detail_view(request: HttpRequest, target_id: str):
 @login_required
 def fleet_target_config_view(request: HttpRequest, target_id: str):
     target = (
-        Target.objects.select_related(
+        tenant_queryset(request, Target).select_related(
             "profile",
             "runtime_profile",
             "policy_assignment__policy_profile",
@@ -8703,10 +11185,14 @@ def fleet_target_config_view(request: HttpRequest, target_id: str):
         return JsonResponse({"error": "Unknown target"}, status=404)
 
     if request.method == "GET":
+        if not has_permission(request, "fleet.read"):
+            return JsonResponse({"error": "permission_denied", "required_permission": "fleet.read"}, status=403)
         return JsonResponse(_target_generated_config_payload(target))
 
     if request.method != "POST":
         return JsonResponse({"error": "Invalid request method"}, status=405)
+    if not has_permission(request, "fleet.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "fleet.manage"}, status=403)
 
     try:
         payload = json.loads(request.body or "{}")
@@ -8715,6 +11201,7 @@ def fleet_target_config_view(request: HttpRequest, target_id: str):
     try:
         _update_target_configuration_from_payload(target, payload)
         target.refresh_from_db()
+        audit_event(request, "fleet.target_config_saved", object_type="target", object_id=target.target_id, metadata={"name": target.name})
         return JsonResponse(_target_generated_config_payload(target))
     except Exception as exc:
         logger.exception("fleet_target_config_view error: %s", exc)
@@ -8726,8 +11213,10 @@ def fleet_target_config_view(request: HttpRequest, target_id: str):
 def fleet_target_config_apply_view(request: HttpRequest, target_id: str):
     if request.method != "POST":
         return JsonResponse({"error": "Invalid request method"}, status=405)
+    if not has_permission(request, "fleet.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "fleet.manage"}, status=403)
     target = (
-        Target.objects.select_related(
+        tenant_queryset(request, Target).select_related(
             "runtime_profile",
             "policy_assignment__policy_profile",
             "log_ingestion_profile",
@@ -8739,7 +11228,9 @@ def fleet_target_config_apply_view(request: HttpRequest, target_id: str):
     if not target:
         return JsonResponse({"error": "Unknown target"}, status=404)
     try:
-        return JsonResponse(_mark_target_config_apply_requested(target))
+        payload = _mark_target_config_apply_requested(target)
+        audit_event(request, "fleet.target_config_apply_requested", object_type="target", object_id=target.target_id, metadata={"name": target.name})
+        return JsonResponse(payload)
     except Exception as exc:
         logger.exception("fleet_target_config_apply_view error: %s", exc)
         return JsonResponse({"error": "Unable to request config apply", "detail": str(exc)}, status=500)
@@ -8747,6 +11238,8 @@ def fleet_target_config_apply_view(request: HttpRequest, target_id: str):
 
 @login_required
 def fleet_profiles_view(request: HttpRequest):
+    if not has_permission(request, "fleet.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "fleet.read"}, status=403)
     target_type = (request.GET.get("target_type") or "").strip().lower() or None
     profiles = _ensure_fleet_profiles(target_type)
     return JsonResponse({"count": len(profiles), "results": [_serialize_profile(profile) for profile in profiles]})
@@ -8754,6 +11247,8 @@ def fleet_profiles_view(request: HttpRequest):
 
 @login_required
 def fleet_policy_profiles_view(request: HttpRequest):
+    if not has_permission(request, "fleet.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "fleet.read"}, status=403)
     if request.method != "GET":
         return JsonResponse({"error": "Invalid request method"}, status=405)
     target_type = (request.GET.get("target_type") or "").strip().lower() or None
@@ -8797,6 +11292,8 @@ def _kubernetes_blueprint_payload(
 
 @login_required
 def fleet_enroll_blueprint_view(request: HttpRequest):
+    if not has_permission(request, "fleet.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "fleet.manage"}, status=403)
     target_type = (request.GET.get("target_type") or "linux").strip().lower()
     profile_slug = (request.GET.get("profile") or ("kubernetes-observability" if target_type == "kubernetes" else "infra-observability")).strip()
     profile = _get_profile_by_slug(profile_slug, target_type)
@@ -8857,6 +11354,7 @@ def fleet_enroll_view(request: HttpRequest):
         target, _ = Target.objects.update_or_create(
             target_id=target_id,
             defaults={
+                "tenant": token.tenant,
                 "name": target_name,
                 "target_type": token.target_type,
                 "environment": str(body.get("environment") or "production").strip(),
@@ -8874,7 +11372,7 @@ def fleet_enroll_view(request: HttpRequest):
         onboarding = None
         onboarding_id = str((token.metadata_json or {}).get("onboarding_id") or "").strip()
         if onboarding_id:
-            onboarding = TargetOnboardingRequest.objects.select_related("policy_profile").filter(onboarding_id=onboarding_id).first()
+            onboarding = TargetOnboardingRequest.objects.select_related("policy_profile").filter(onboarding_id=onboarding_id, tenant=token.tenant).first()
             if onboarding:
                 onboarding.target = target
                 onboarding.status = "installed"
@@ -9062,11 +11560,15 @@ def _serialize_onboarding_request(onboarding: TargetOnboardingRequest) -> Dict[s
 @login_required
 def fleet_onboarding_requests_view(request: HttpRequest):
     if request.method == "GET":
-        requests_qs = TargetOnboardingRequest.objects.select_related("profile", "policy_profile", "target").all()
+        if not has_permission(request, "fleet.read"):
+            return JsonResponse({"error": "permission_denied", "required_permission": "fleet.read"}, status=403)
+        requests_qs = tenant_queryset(request, TargetOnboardingRequest).select_related("profile", "policy_profile", "target")
         return JsonResponse({"count": requests_qs.count(), "results": [_serialize_onboarding_request(item) for item in requests_qs]})
 
     if request.method != "POST":
         return JsonResponse({"error": "Invalid request method"}, status=405)
+    if not has_permission(request, "fleet.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "fleet.manage"}, status=403)
 
     try:
         name = str(request.POST.get("name") or "").strip()
@@ -9103,6 +11605,7 @@ def fleet_onboarding_requests_view(request: HttpRequest):
                 target_role=track1_config["target_role"],
             )
         onboarding = TargetOnboardingRequest.objects.create(
+            tenant=getattr(request, "tenant", None),
             name=name,
             hostname=hostname,
             target_role=track1_config["target_role"],
@@ -9120,6 +11623,7 @@ def fleet_onboarding_requests_view(request: HttpRequest):
         if pem_file:
             onboarding.pem_file = pem_file
             onboarding.save(update_fields=["pem_file", "updated_at"])
+        audit_event(request, "fleet.onboarding_created", object_type="target_onboarding_request", object_id=onboarding.onboarding_id, metadata={"name": onboarding.name, "target_type": onboarding.target_type})
         return JsonResponse(_serialize_onboarding_request(onboarding), status=201)
     except Exception as exc:
         logger.exception("fleet_onboarding_requests_view error: %s", exc)
@@ -9128,14 +11632,19 @@ def fleet_onboarding_requests_view(request: HttpRequest):
 
 @login_required
 def fleet_onboarding_request_detail_view(request: HttpRequest, onboarding_id: str):
-    onboarding = TargetOnboardingRequest.objects.select_related("profile", "policy_profile", "target").filter(onboarding_id=onboarding_id).first()
+    onboarding = tenant_queryset(request, TargetOnboardingRequest).select_related("profile", "policy_profile", "target").filter(onboarding_id=onboarding_id).first()
     if not onboarding:
         return JsonResponse({"error": "Unknown onboarding request"}, status=404)
 
     if request.method == "GET":
+        if not has_permission(request, "fleet.read"):
+            return JsonResponse({"error": "permission_denied", "required_permission": "fleet.read"}, status=403)
         return JsonResponse(_serialize_onboarding_request(onboarding))
 
     if request.method == "DELETE":
+        if not has_permission(request, "fleet.manage"):
+            return JsonResponse({"error": "permission_denied", "required_permission": "fleet.manage"}, status=403)
+        audit_event(request, "fleet.onboarding_deleted", object_type="target_onboarding_request", object_id=onboarding.onboarding_id, metadata={"name": onboarding.name})
         if onboarding.pem_file:
             onboarding.pem_file.delete(save=False)
         onboarding.delete()
@@ -9143,6 +11652,8 @@ def fleet_onboarding_request_detail_view(request: HttpRequest, onboarding_id: st
 
     if request.method != "POST":
         return JsonResponse({"error": "Invalid request method"}, status=405)
+    if not has_permission(request, "fleet.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "fleet.manage"}, status=403)
 
     try:
         name = str(request.POST.get("name") or onboarding.name).strip()
@@ -9194,6 +11705,7 @@ def fleet_onboarding_request_detail_view(request: HttpRequest, onboarding_id: st
         onboarding.connectivity_message = ""
         onboarding.status = "draft"
         onboarding.save()
+        audit_event(request, "fleet.onboarding_updated", object_type="target_onboarding_request", object_id=onboarding.onboarding_id, metadata={"name": onboarding.name, "target_type": onboarding.target_type})
         return JsonResponse(_serialize_onboarding_request(onboarding))
     except Exception as exc:
         logger.exception("fleet_onboarding_request_detail_view error: %s", exc)
@@ -9228,7 +11740,9 @@ def _ssh_base_command(onboarding: TargetOnboardingRequest) -> List[str]:
 def fleet_onboarding_test_view(request: HttpRequest, onboarding_id: str):
     if request.method != "POST":
         return JsonResponse({"error": "Invalid request method"}, status=405)
-    onboarding = TargetOnboardingRequest.objects.select_related("profile", "policy_profile", "target").filter(onboarding_id=onboarding_id).first()
+    if not has_permission(request, "fleet.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "fleet.manage"}, status=403)
+    onboarding = tenant_queryset(request, TargetOnboardingRequest).select_related("profile", "policy_profile", "target").filter(onboarding_id=onboarding_id).first()
     if not onboarding:
         return JsonResponse({"error": "Unknown onboarding request"}, status=404)
     try:
@@ -9243,6 +11757,7 @@ def fleet_onboarding_test_view(request: HttpRequest, onboarding_id: str):
             )[:2000]
             onboarding.status = "validated" if prereqs["control_plane_ready"] else "failed"
             onboarding.save(update_fields=["last_connectivity_check_at", "connectivity_status", "connectivity_message", "status", "updated_at"])
+            audit_event(request, "fleet.onboarding_tested", object_type="target_onboarding_request", object_id=onboarding.onboarding_id, metadata={"status": onboarding.connectivity_status})
             return JsonResponse(_serialize_onboarding_request(onboarding))
         tcp_check = subprocess.run(
             ["nc", "-vz", "-w", "5", onboarding.hostname, str(onboarding.ssh_port)],
@@ -9259,6 +11774,7 @@ def fleet_onboarding_test_view(request: HttpRequest, onboarding_id: str):
             )[:2000]
             onboarding.status = "failed"
             onboarding.save(update_fields=["last_connectivity_check_at", "connectivity_status", "connectivity_message", "status", "updated_at"])
+            audit_event(request, "fleet.onboarding_tested", object_type="target_onboarding_request", object_id=onboarding.onboarding_id, metadata={"status": onboarding.connectivity_status})
             return JsonResponse(_serialize_onboarding_request(onboarding), status=502)
 
         command = _ssh_base_command(onboarding) + ["printf aiops-connectivity-ok"]
@@ -9275,6 +11791,7 @@ def fleet_onboarding_test_view(request: HttpRequest, onboarding_id: str):
             )[:2000]
             onboarding.status = "failed"
         onboarding.save(update_fields=["last_connectivity_check_at", "connectivity_status", "connectivity_message", "status", "updated_at"])
+        audit_event(request, "fleet.onboarding_tested", object_type="target_onboarding_request", object_id=onboarding.onboarding_id, metadata={"status": onboarding.connectivity_status})
         return JsonResponse(_serialize_onboarding_request(onboarding))
     except Exception as exc:
         onboarding.last_connectivity_check_at = timezone.now()
@@ -9407,7 +11924,9 @@ spec:
 def fleet_onboarding_install_view(request: HttpRequest, onboarding_id: str):
     if request.method != "POST":
         return JsonResponse({"error": "Invalid request method"}, status=405)
-    onboarding = TargetOnboardingRequest.objects.select_related("profile", "policy_profile", "target").filter(onboarding_id=onboarding_id).first()
+    if not has_permission(request, "fleet.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "fleet.manage"}, status=403)
+    onboarding = tenant_queryset(request, TargetOnboardingRequest).select_related("profile", "policy_profile", "target").filter(onboarding_id=onboarding_id).first()
     if not onboarding:
         return JsonResponse({"error": "Unknown onboarding request"}, status=404)
     if onboarding.connectivity_status != "reachable":
@@ -9425,6 +11944,7 @@ def fleet_onboarding_install_view(request: HttpRequest, onboarding_id: str):
         token_prefix = "k8s" if onboarding.target_type == "kubernetes" else "lnx"
         token_value = f"{token_prefix}_{uuid.uuid4().hex[:24]}"
         token = EnrollmentToken.objects.create(
+            tenant=onboarding.tenant,
             token=token_value,
             target_type=onboarding.target_type,
             target_name=onboarding.name,
@@ -9450,6 +11970,7 @@ def fleet_onboarding_install_view(request: HttpRequest, onboarding_id: str):
             payload = _serialize_onboarding_request(onboarding)
             payload["install_command"] = install_command
             payload["install_mode"] = "generated_kubernetes_manifest"
+            audit_event(request, "fleet.onboarding_install_generated", object_type="target_onboarding_request", object_id=onboarding.onboarding_id, metadata={"target_type": onboarding.target_type})
             return JsonResponse(payload)
         install_command = _build_linux_install_command(
             control_plane,
@@ -9473,6 +11994,7 @@ def fleet_onboarding_install_view(request: HttpRequest, onboarding_id: str):
         onboarding.save(update_fields=["status", "last_install_at", "install_message", "updated_at"])
         payload = _serialize_onboarding_request(onboarding)
         payload["install_command"] = install_command
+        audit_event(request, "fleet.onboarding_install_completed", object_type="target_onboarding_request", object_id=onboarding.onboarding_id, metadata={"status": onboarding.status})
         return JsonResponse(payload)
     except Exception as exc:
         onboarding.status = "failed"
@@ -10217,8 +12739,10 @@ def generate_runbook_view(request: HttpRequest, incident_key: str):
     """Generate an AI runbook from incident RCA + timeline and save to Knowledge Base."""
     if request.method != "POST":
         return JsonResponse({"error": "POST required"}, status=405)
+    if not has_permission(request, "incidents.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "incidents.manage"}, status=403)
 
-    incident = Incident.objects.filter(incident_key=incident_key).first()
+    incident = tenant_queryset(request, Incident).filter(incident_key=incident_key).first()
     if not incident:
         return JsonResponse({"error": "incident_not_found"}, status=404)
 
@@ -10256,6 +12780,7 @@ def generate_runbook_view(request: HttpRequest, incident_key: str):
             DocumentChunk.objects.create(document=doc, chunk_text=chunk, chunk_index=index)
     except Exception as kb_err:
         logger.warning("Runbook KB save failed (non-fatal): %s", kb_err)
+    audit_event(request, "incident.runbook_generated", object_type="incident", object_id=incident.incident_key, metadata={"title": payload.get("title")})
     return JsonResponse(payload)
 
 
@@ -10264,8 +12789,10 @@ def download_runbook_view(request: HttpRequest, incident_key: str):
     """Download the latest saved runbook for an incident as CSV."""
     if request.method != "GET":
         return JsonResponse({"error": "GET required"}, status=405)
+    if not has_permission(request, "incidents.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "incidents.read"}, status=403)
 
-    incident = Incident.objects.filter(incident_key=incident_key).first()
+    incident = tenant_queryset(request, Incident).filter(incident_key=incident_key).first()
     if not incident:
         return JsonResponse({"error": "incident_not_found"}, status=404)
 
@@ -10307,7 +12834,15 @@ def explain_anomaly_view(request: HttpRequest):
     summary = body.get("summary") or body.get("initial_ai_diagnosis") or ""
     incident_key = body.get("incident_key") or ""
 
-    incident = Incident.objects.filter(incident_key=incident_key).first() if incident_key else None
+    incident = tenant_queryset(request, Incident).filter(incident_key=incident_key).first() if incident_key else None
+    latest_investigation = _latest_investigation_ui_projection(incident)
+    latest_explanation = (
+        str(latest_investigation.get("post_command_ai_analysis") or "").strip()
+        or str(latest_investigation.get("final_answer") or "").strip()
+        or str(latest_investigation.get("confidence_reason") or "").strip()
+    )
+    if latest_explanation:
+        return JsonResponse({"alert_name": alert_name, "explanation": latest_explanation})
     try:
         payload = explain_anomaly_payload(
             alert_name=alert_name,
@@ -10355,7 +12890,7 @@ def change_risk_view(request: HttpRequest):
 
     # Recent incidents for context
     recent_incidents = []
-    for inc in Incident.objects.filter(
+    for inc in tenant_queryset(request, Incident).filter(
         models.Q(primary_service=service) | models.Q(application=application_key)
     ).order_by("-created_at")[:5].values("title", "severity", "status", "opened_at"):
         recent_incidents.append({
@@ -10390,13 +12925,16 @@ def acknowledge_sla_view(request: HttpRequest, incident_key: str):
     """Mark the SLA response as acknowledged for an incident."""
     if request.method != "POST":
         return JsonResponse({"error": "POST required"}, status=405)
+    if not has_permission(request, "incidents.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "incidents.manage"}, status=403)
 
-    incident = Incident.objects.filter(incident_key=incident_key).first()
+    incident = tenant_queryset(request, Incident).filter(incident_key=incident_key).first()
     if not incident:
         return JsonResponse({"error": "incident_not_found"}, status=404)
 
     incident.sla_response_acknowledged_at = timezone.now()
     incident.save(update_fields=["sla_response_acknowledged_at", "updated_at"])
+    audit_event(request, "incident.sla_acknowledged", object_type="incident", object_id=incident.incident_key)
 
     IncidentTimelineEvent.objects.create(
         incident=incident,
@@ -10418,8 +12956,10 @@ def incident_timeline_narrative_view(request: HttpRequest, incident_key: str):
     """Generate a plain-English post-incident narrative from existing timeline events."""
     if request.method != "POST":
         return JsonResponse({"error": "POST required"}, status=405)
+    if not has_permission(request, "incidents.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "incidents.manage"}, status=403)
 
-    incident = Incident.objects.filter(incident_key=incident_key).first()
+    incident = tenant_queryset(request, Incident).filter(incident_key=incident_key).first()
     if not incident:
         return JsonResponse({"error": "incident_not_found"}, status=404)
 
@@ -10431,6 +12971,7 @@ def incident_timeline_narrative_view(request: HttpRequest, incident_key: str):
         )
     except RuntimeError as exc:
         return JsonResponse({"error": "llm_failed", "detail": str(exc)}, status=502)
+    audit_event(request, "incident.narrative_generated", object_type="incident", object_id=incident.incident_key)
     return JsonResponse(payload)
 
 
@@ -10439,8 +12980,10 @@ def download_timeline_narrative_view(request: HttpRequest, incident_key: str):
     """Download the latest saved PIR narrative for an incident as CSV."""
     if request.method != "GET":
         return JsonResponse({"error": "GET required"}, status=405)
+    if not has_permission(request, "incidents.read"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "incidents.read"}, status=403)
 
-    incident = Incident.objects.filter(incident_key=incident_key).first()
+    incident = tenant_queryset(request, Incident).filter(incident_key=incident_key).first()
     if not incident:
         return JsonResponse({"error": "incident_not_found"}, status=404)
 

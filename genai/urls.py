@@ -1,5 +1,6 @@
 from django.urls import path
 from . import views
+from . import views_analytics
 
 app_name = 'genai'
 
@@ -8,6 +9,10 @@ urlpatterns = [
     path('login/', views.login_view, name='login'),
     path('sso/login/', views.sso_login_view, name='sso_login'),
     path('logout/', views.logout_view, name='logout'),
+    path('tenants/current/', views.tenant_current_view, name='tenant_current'),
+    path('tenants/select/', views.tenant_select_view, name='tenant_select'),
+    path('tenants/members/', views.tenant_members_view, name='tenant_members'),
+    path('tenants/members/<str:membership_id>/', views.tenant_member_detail_view, name='tenant_member_detail'),
     path('session/init/', views.chat_session_init_view, name='chat_session_init'),
     path('session/list/', views.chat_session_list_view, name='chat_session_list'),
     path('session/reset/', views.chat_session_reset_view, name='chat_session_reset'),
@@ -16,6 +21,7 @@ urlpatterns = [
     path('investigations/dashboard/', views.investigations_dashboard_view, name='investigations_dashboard'),
     path('investigations/recent/', views.investigations_recent_view, name='investigations_recent'),
     path('investigations/<str:run_id>/', views.investigation_detail_view, name='investigation_detail'),
+    path('investigations/<str:run_id>/stream/', views.investigation_stream_view, name='investigation_stream'),
     path('lifecycle/retention-policies/', views.lifecycle_retention_policies_view, name='lifecycle_retention_policies'),
     path('operations/dashboard/', views.operations_dashboard_view, name='operations_dashboard'),
     path('operations/summary/', views.operations_summary_view, name='operations_summary'),
@@ -52,12 +58,16 @@ urlpatterns = [
     path('predictions/recent/', views.recent_predictions_view, name='recent_predictions'),
     path('alerts/dashboard/', views.alerts_dashboard_view, name='alerts_dashboard'),
     path('alerts/ingest/', views.ingest_alert_view, name='ingest_alert'),
+    path('alerts/noise/', views.alerts_noise_view, name='alerts_noise'),
+    path('alerts/noise/rules/', views.alerts_noise_rules_view, name='alerts_noise_rules'),
+    path('alerts/noise/rules/<str:rule_type>/<str:rule_id>/delete/', views.alerts_noise_rule_delete_view, name='alerts_noise_rule_delete'),
     path('alerts/recent/', views.recent_alert_recommendations_view, name='recent_alert_recommendations'),
     path('incidents/dashboard/', views.incidents_dashboard_view, name='incidents_dashboard'),
     path('incidents/recent/', views.incidents_recent_view, name='incidents_recent'),
     path('incidents/<str:incident_key>/', views.incident_timeline_page_view, name='incident_timeline_page'),
     path('incidents/<str:incident_key>/timeline/', views.incident_timeline_view, name='incident_timeline'),
     path('incidents/<str:incident_key>/graph/', views.incident_graph_view, name='incident_graph'),
+    path('incidents/<str:incident_key>/delete/', views.delete_incident_view, name='delete_incident'),
     path('incidents/<str:incident_key>/generate-runbook/', views.generate_runbook_view, name='generate_runbook'),
     path('incidents/<str:incident_key>/runbook/download/', views.download_runbook_view, name='download_runbook'),
     path('incidents/<str:incident_key>/acknowledge-sla/', views.acknowledge_sla_view, name='acknowledge_sla'),
@@ -83,10 +93,16 @@ urlpatterns = [
     path('fleet/install/linux/', views.fleet_linux_install_script_view, name='fleet_linux_install_script'),
     path('fleet/install/kubernetes/', views.fleet_kubernetes_install_manifest_view, name='fleet_kubernetes_install_manifest'),
     path('execute_command/', views.execute_command_view, name='execute_command'),
+    path('executions/<str:intent_id>/approve/', views.approve_execution_intent_view, name='approve_execution_intent'),
+    path('executions/<str:intent_id>/rollback/', views.rollback_execution_intent_view, name='rollback_execution_intent'),
+    path('executions/<str:intent_id>/verify/', views.verify_execution_intent_view, name='verify_execution_intent'),
     path('download_excel/', views.download_excel, name='download_excel'),
     path('faq/', views.get_faq_questions, name='faq_questions'),
     path('console/', views.genai_console, name='genai_console'),
     path('widget/', views.widget_view, name='widget'),
     path('cache/stats/', views.cache_stats_view, name='cache_stats'),
     path('cache/purge/', views.cache_purge_view, name='cache_purge'),
+    # Analytics
+    path('analytics/signal-heatmap/', views_analytics.signal_heatmap_view, name='signal_heatmap'),
+    path('analytics/correlated-timeline/', views_analytics.correlated_timeline_view, name='correlated_timeline'),
 ]

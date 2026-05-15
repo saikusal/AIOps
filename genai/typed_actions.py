@@ -22,6 +22,13 @@ def build_validation_plan(action_type: str, service: str = "") -> List[str]:
             "Review the command output for concrete error signatures.",
             "Compare findings with current metrics, logs, and traces before remediating.",
         ]
+    if action_type == "rollback":
+        return [
+            f"Confirm {normalized_service or 'the service'} is healthy after the rollback.",
+            "Verify the original failure condition no longer reproduces.",
+            "Check that no new alerts were introduced by the rollback.",
+            "Review metrics for any latency or error rate regressions.",
+        ]
     return ["Run post-action verification before treating the incident as resolved."]
 
 
@@ -116,7 +123,18 @@ def infer_typed_action(
         )
         return action
 
-    diagnostic_prefixes = ("tail ", "grep ", "journalctl ", "ss ", "curl ", "ps ", "cat ")
+    diagnostic_prefixes = (
+        "tail ",
+        "grep ",
+        "journalctl ",
+        "ss ",
+        "curl ",
+        "ps ",
+        "cat ",
+        "docker inspect ",
+        "docker ps ",
+        "docker logs ",
+    )
     if normalized_command.lower().startswith(diagnostic_prefixes):
         action.update(
             {
@@ -128,6 +146,67 @@ def infer_typed_action(
         return action
 
     return action
+
+
+def infer_rollback_action(
+    *,
+    original_command: str,
+    original_action_type: str,
+    target_host: str,
+    service: str = "",
+    why: str = "",
+) -> Dict[str, Any]:
+    """Build a typed rollback action that reverses a previously executed action."""
+    normalized_service = (service or "").strip()
+    rollback_command = _derive_rollback_command(original_command, original_action_type, target_host, normalized_service)
+    return {
+        "action": "rollback",
+        "target": normalized_service or target_host or "",
+        "target_host": target_host or "",
+        "service": normalized_service,
+        "reason": why or f"Rolling back: {original_command[:80]}",
+        "requires_approval": True,
+        "command": rollback_command,
+        "validation_plan": build_validation_plan("rollback", normalized_service),
+        "metadata": {
+            "original_command": original_command,
+            "original_action_type": original_action_type,
+            "rollback_derived": True,
+        },
+    }
+
+
+def _derive_rollback_command(
+    original_command: str,
+    original_action_type: str,
+    target_host: str,
+    service: str,
+) -> str:
+    """Derive a best-effort rollback command from the original."""
+    normalized = (original_command or "").strip()
+
+    if original_action_type == "restart_service":
+        # A restart is its own rollback — restarting again returns to clean state
+        return normalized
+
+    docker_match = re.match(r"^docker restart\s+([A-Za-z0-9_.-]+)$", normalized)
+    if docker_match:
+        return normalized
+
+    kubectl_match = re.match(
+        r"^kubectl rollout restart (deployment|statefulset|daemonset)/([A-Za-z0-9_.-]+)(?: -n ([A-Za-z0-9_.-]+))?$",
+        normalized,
+    )
+    if kubectl_match:
+        kind = kubectl_match.group(1)
+        name = kubectl_match.group(2)
+        ns = kubectl_match.group(3) or "default"
+        return f"kubectl rollout undo {kind}/{name} -n {ns}"
+
+    if original_action_type == "database_change":
+        return f"# Manual rollback required — review the SQL change and apply inverse: {normalized[:120]}"
+
+    return f"# Rollback command must be supplied manually for: {normalized[:120]}"
 
 
 def command_from_typed_action(action_payload: Optional[Dict[str, Any]]) -> str:
@@ -150,9 +229,10 @@ def command_from_typed_action(action_payload: Optional[Dict[str, Any]]) -> str:
         return f"docker restart {container_name}".strip() if container_name else ""
 
     if action_type == "database_change":
-        metadata = action_payload.get("metadata") or {}
-        sql = str(metadata.get("sql") or "").strip()
-        return str(action_payload.get("command") or "").strip() if not sql else str(action_payload.get("command") or "").strip()
+        return str(action_payload.get("command") or "").strip()
+
+    if action_type == "rollback":
+        return str(action_payload.get("command") or "").strip()
 
     return str(action_payload.get("command") or "").strip()
 

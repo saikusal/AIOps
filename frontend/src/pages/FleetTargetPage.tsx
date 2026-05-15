@@ -14,6 +14,7 @@ import {
   type TypedAction,
 } from "../lib/api";
 import { useRefreshQueryOptions } from "../lib/refresh";
+import { useTenant } from "../lib/tenant";
 
 function healthTone(status: string) {
   const normalized = status.toLowerCase();
@@ -45,7 +46,7 @@ function actionLabel(action: WorkloadActionKind) {
 
 function verificationTone(status?: string) {
   const normalized = String(status || "").toLowerCase();
-  if (normalized === "resolved") return "healthy";
+  if (normalized === "resolved" || normalized === "confirmed") return "healthy";
   if (normalized === "partially_improved" || normalized === "unchanged" || normalized === "inconclusive") return "warning";
   return "critical";
 }
@@ -119,6 +120,10 @@ function buildConfigEditorState(config?: FleetTargetConfigPayload): ConfigEditor
 }
 
 export function FleetTargetPage() {
+  const { hasPermission } = useTenant();
+  const canManageFleet = hasPermission("fleet.manage");
+  const canRunDiagnostics = hasPermission("investigations.execute_diagnostic");
+  const canRunRemediation = hasPermission("remediations.execute");
   const { targetId = "" } = useParams();
   const queryClient = useQueryClient();
   const refreshQueryOptions = useRefreshQueryOptions();
@@ -580,10 +585,10 @@ export function FleetTargetPage() {
                 </label>
               </div>
               <div className="action-row">
-                <button className="action-button" onClick={() => configEditor && saveConfigMutation.mutate(configEditor)} disabled={saveConfigMutation.isPending}>
+                <button className="action-button" onClick={() => configEditor && saveConfigMutation.mutate(configEditor)} disabled={saveConfigMutation.isPending || !canManageFleet}>
                   {saveConfigMutation.isPending ? "Saving..." : "Save Config"}
                 </button>
-                <button className="action-button action-button--secondary" onClick={() => applyConfigMutation.mutate()} disabled={applyConfigMutation.isPending}>
+                <button className="action-button action-button--secondary" onClick={() => applyConfigMutation.mutate()} disabled={applyConfigMutation.isPending || !canManageFleet}>
                   {applyConfigMutation.isPending ? "Requesting..." : "Request Agent Refresh"}
                 </button>
                 {saveConfigMutation.isError ? <p className="inline-error">{(saveConfigMutation.error as Error).message}</p> : null}
@@ -759,13 +764,13 @@ export function FleetTargetPage() {
                         ) : null}
                       </div>
                       <div className="page-card__meta">
-                        <button className="shell__link shell__link--small" onClick={() => void runWorkloadAction(workload, "logs")}>
+                        <button className="shell__link shell__link--small" disabled={!canRunDiagnostics} onClick={() => void runWorkloadAction(workload, "logs")}>
                           Logs
                         </button>
-                        <button className="shell__link shell__link--small" onClick={() => void runWorkloadAction(workload, "inspect")}>
+                        <button className="shell__link shell__link--small" disabled={!canRunDiagnostics} onClick={() => void runWorkloadAction(workload, "inspect")}>
                           Inspect
                         </button>
-                        <button className="shell__link shell__link--small" onClick={() => void runWorkloadAction(workload, "restart")}>
+                        <button className="shell__link shell__link--small" disabled={!canRunRemediation} onClick={() => void runWorkloadAction(workload, "restart")}>
                           Restart
                         </button>
                         {(workload.owner || {}).repository ? (
@@ -854,13 +859,13 @@ export function FleetTargetPage() {
                         ) : null}
                       </div>
                       <div className="page-card__meta">
-                        <button className="shell__link shell__link--small" onClick={() => void runWorkloadAction(workload, "logs")}>
+                        <button className="shell__link shell__link--small" disabled={!canRunDiagnostics} onClick={() => void runWorkloadAction(workload, "logs")}>
                           Logs
                         </button>
-                        <button className="shell__link shell__link--small" onClick={() => void runWorkloadAction(workload, "describe")}>
+                        <button className="shell__link shell__link--small" disabled={!canRunDiagnostics} onClick={() => void runWorkloadAction(workload, "describe")}>
                           Describe
                         </button>
-                        <button className="shell__link shell__link--small" onClick={() => void runWorkloadAction(workload, "restart")}>
+                        <button className="shell__link shell__link--small" disabled={!canRunRemediation} onClick={() => void runWorkloadAction(workload, "restart")}>
                           Restart
                         </button>
                         {(workload.owner || {}).repository ? (

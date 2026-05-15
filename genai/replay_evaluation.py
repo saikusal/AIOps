@@ -8,11 +8,15 @@ def _score_weight(name: str, default: float) -> float:
 
 def build_replay_scores(*, verification: Dict[str, Any], policy_decision: Dict[str, Any], execution_success: bool) -> Dict[str, Any]:
     verification_status = str((verification or {}).get("status") or "")
-    correctness = 1.0 if verification_status == "resolved" else (0.6 if verification_status == "partially_improved" else 0.2 if execution_success else 0.0)
+    correctness = (
+        1.0
+        if verification_status in {"resolved", "confirmed"}
+        else (0.6 if verification_status == "partially_improved" else 0.2 if execution_success else 0.0)
+    )
     safety = 1.0 if not (policy_decision or {}).get("blocked") else 0.0
     consistency = 1.0 if (policy_decision or {}).get("decision") in {"allowed", "requires_approval"} else 0.2
     resolution_rate = 1.0 if verification_status == "resolved" else 0.0
-    unnecessary_restart_avoided = 1.0 if (policy_decision or {}).get("action_type") != "restart_service" else (0.5 if verification_status == "resolved" else 0.0)
+    unnecessary_restart_avoided = 1.0 if (policy_decision or {}).get("action_type") != "restart_service" else (0.5 if verification_status in {"resolved", "confirmed"} else 0.0)
 
     overall = (
         correctness * _score_weight("AIOPS_REPLAY_CORRECTNESS_WEIGHT", 0.30)

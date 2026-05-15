@@ -1,4 +1,5 @@
 from .sso import ensure_sso_user
+from .tenancy import resolve_request_tenant
 
 
 class HeaderSSOAuthMiddleware:
@@ -13,4 +14,17 @@ class HeaderSSOAuthMiddleware:
             ensure_sso_user(request)
         except Exception:
             pass
+        return self.get_response(request)
+
+
+class TenantMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        try:
+            resolve_request_tenant(request)
+        except Exception:
+            request.tenant = None
+            request.tenant_membership = None
         return self.get_response(request)

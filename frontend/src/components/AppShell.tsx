@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { useRefreshInterval } from "../lib/refresh";
+import { useTenant } from "../lib/tenant";
 
 const navItems = [
   { to: "/domain-onboarding", label: "Domain Onboarding",        meta: "Infra · Network · Cloud" },
@@ -17,6 +18,7 @@ const navItems = [
   { to: "/change-risk",       label: "Change Risk",              meta: "Deploy Risk · Maintenance Window" },
   { to: "/automation",        label: "Knowledge Base",           meta: "Runbooks · Auto-Remediation" },
   { to: "/analytics",         label: "Analytics & Reporting",    meta: "SLO · MTTR · Exec Views" },
+  { to: "/settings/members",  label: "Access Control",           meta: "Tenants · RBAC", permission: "tenant.manage" },
 ];
 
 function navGlyph(label: string): string {
@@ -31,6 +33,7 @@ function navGlyph(label: string): string {
 export function AppShell() {
   const location = useLocation();
   const { refreshMs, setRefreshMs, options } = useRefreshInterval();
+  const { current, tenants, switchTenant, switchPending, hasPermission } = useTenant();
   const currentNav = navItems.find((item) => location.pathname.startsWith(item.to));
   const pageTitle = currentNav?.label ?? "Operational Intelligence";
   const [theme, setTheme] = useState<"dark" | "light">(() => {
@@ -69,7 +72,7 @@ export function AppShell() {
         </div>
 
         <nav className="shell__nav">
-          {navItems.map((item) => (
+          {navItems.filter((item) => !item.permission || hasPermission(item.permission)).map((item) => (
             <NavLink
               key={item.to}
               className={({ isActive }) => `shell__nav-link${isActive ? " is-active" : ""}`}
@@ -109,6 +112,22 @@ export function AppShell() {
             />
           </label>
           <div className="shell__actions">
+            {current ? (
+              <label className="shell__tenant">
+                <span>Workspace</span>
+                <select
+                  value={current.tenant_id}
+                  onChange={(event) => switchTenant(event.target.value)}
+                  disabled={switchPending || tenants.length <= 1}
+                >
+                  {tenants.map((tenant) => (
+                    <option key={tenant.tenant_id} value={tenant.tenant_id}>
+                      {tenant.name} · {tenant.role}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
             <div className="shell__badge">Telemetry Live</div>
             <div className="shell__badge shell__badge--muted">AI Guided</div>
             <button

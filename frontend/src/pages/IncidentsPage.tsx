@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   acknowledgeSla,
+  deleteIncident,
   executeDiagnosticCommand,
   fetchIncidentTimeline,
   fetchRecentAlerts,
@@ -11,10 +12,13 @@ import {
   generateTimelineNarrative,
   getRunbookDownloadUrl,
   getTimelineNarrativeDownloadUrl,
+  type BlastRadiusEstimate,
   type RunbookResult,
   type TypedAction,
 } from "../lib/api";
+import { RemediationSafetyPanel } from "../components/RemediationSafetyPanel";
 import { useRefreshQueryOptions } from "../lib/refresh";
+import { useTenant } from "../lib/tenant";
 
 function formatCurrency(value?: number | null, currency = "INR") {
   if (value === undefined || value === null) return "—";
@@ -47,6 +51,17 @@ function formatSlaMinutes(minutes: number | null): string {
   if (minutes < 0) return `${Math.abs(Math.round(minutes))}m overdue`;
   if (minutes < 60) return `${Math.round(minutes)}m left`;
   return `${Math.round(minutes / 60)}h ${Math.round(minutes % 60)}m left`;
+}
+
+function hasDisplayValue(value: unknown): boolean {
+  if (value === undefined || value === null || value === "") return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(value as Record<string, unknown>).length > 0;
+  return true;
+}
+
+function firstDisplayValue<T>(...values: T[]): T | undefined {
+  return values.find((value) => hasDisplayValue(value));
 }
 
 type DecisionEvidenceMeta = {
@@ -140,14 +155,27 @@ function DecisionPanel({ meta }: { meta: DecisionEvidenceMeta }) {
 
 export function IncidentsPage() {
   const queryClient = useQueryClient();
+  const { hasPermission } = useTenant();
   const [searchParams] = useSearchParams();
   const [activeIncidentKey, setActiveIncidentKey] = useState<string | undefined>(undefined);
   const [executionState, setExecutionState] = useState<Record<string, Record<string, unknown>>>({});
   const [autoExecuted, setAutoExecuted] = useState<Record<string, boolean>>({});
   const [runbookState, setRunbookState] = useState<Record<string, RunbookResult | null>>({});
   const [narrativeState, setNarrativeState] = useState<Record<string, string | null>>({});
+  const [safetyPanel, setSafetyPanel] = useState<{
+    mode: "approval" | "break-glass" | "rollback" | "verify";
+    intentId: string;
+    approvalToken?: string;
+    blastRadius?: BlastRadiusEstimate;
+    typedAction?: TypedAction;
+    policyDecision?: Record<string, unknown>;
+  } | null>(null);
   const serviceFilter = searchParams.get("service");
   const refreshQueryOptions = useRefreshQueryOptions();
+  const canArchiveIncidents = hasPermission("incidents.archive");
+  const canManageIncidents = hasPermission("incidents.manage");
+  const canRunDiagnostics = hasPermission("investigations.execute_diagnostic");
+  const canRunRemediation = hasPermission("remediations.execute");
   const incidentsQuery = useQuery({
     queryKey: ["recent-incidents"],
     queryFn: fetchRecentIncidents,
@@ -164,6 +192,14 @@ export function IncidentsPage() {
     serviceFilter ? incident.primary_service === serviceFilter || incident.target_host === serviceFilter : true,
   );
   const selectedKey = activeIncidentKey || incidentList[0]?.incident_key;
+  const deleteMutation = useMutation({
+    mutationFn: (incidentKey: string) => deleteIncident(incidentKey, "Archived by operator from incident workspace."),
+    onSuccess: (_result, incidentKey) => {
+      if (activeIncidentKey === incidentKey) setActiveIncidentKey(undefined);
+      queryClient.invalidateQueries({ queryKey: ["recent-incidents"] });
+      queryClient.removeQueries({ queryKey: ["incident-timeline", incidentKey] });
+    },
+  });
   const timelineQuery = useQuery({
     queryKey: ["incident-timeline", selectedKey],
     queryFn: () => fetchIncidentTimeline(selectedKey!),
@@ -176,7 +212,7 @@ export function IncidentsPage() {
         alert.incident_key === timelineQuery.data.incident_key
       : false,
   );
-  const linkedRecommendation = timelineQuery.data?.linked_recommendation || null;
+  const canonicalDeepDive = timelineQuery.data?.deep_dive || null;
   const executionKey = selectedAlert?.alert_id || selectedKey || "incident";
   const executionOverlay = (executionState[executionKey] || {}) as {
     execution_status?: string;
@@ -220,13 +256,27 @@ export function IncidentsPage() {
       remediation_typed_action?: TypedAction;
     };
     agent_success?: boolean;
+    diagnostic_command?: string;
+    target_host?: string;
+    target_type?: string;
+    should_execute?: boolean;
   };
   const deepDiveEntry = useMemo(() => {
-    const source = linkedRecommendation || selectedAlert;
-    if (!source) return null;
+    if (!canonicalDeepDive) return null;
+    const source = canonicalDeepDive;
+    const diagnosticCommand = firstDisplayValue(source.diagnostic_command, executionOverlay.diagnostic_command);
+    const diagnosticTarget = firstDisplayValue(source.target_host, executionOverlay.target_host);
+    const diagnosticTargetType = firstDisplayValue(source.target_type, executionOverlay.target_type);
     return {
-      ...source,
       ...executionOverlay,
+      ...source,
+      diagnostic_command: diagnosticCommand,
+      target_host: diagnosticTarget,
+      target_type: diagnosticTargetType,
+      should_execute:
+        executionOverlay.should_execute ??
+        source.should_execute ??
+        Boolean(diagnosticCommand && diagnosticTarget),
       post_command_ai_analysis: executionOverlay.post_command_ai_analysis || source.post_command_ai_analysis,
       final_answer: executionOverlay.final_answer || source.final_answer,
       analysis_sections: executionOverlay.analysis_sections || source.analysis_sections,
@@ -234,33 +284,33 @@ export function IncidentsPage() {
       execution_status: executionOverlay.execution_status || source.execution_status,
       last_execution_at: executionOverlay.last_execution_at || source.last_execution_at,
       remediation_command:
-        executionOverlay.remediation_command ||
-        executionOverlay.analysis_sections?.remediation_command ||
         source.remediation_command ||
-        source.analysis_sections?.remediation_command,
+        source.analysis_sections?.remediation_command ||
+        executionOverlay.remediation_command ||
+        executionOverlay.analysis_sections?.remediation_command,
       remediation_target_host:
-        executionOverlay.remediation_target_host ||
-        executionOverlay.analysis_sections?.remediation_target_host ||
         source.remediation_target_host ||
-        source.analysis_sections?.remediation_target_host,
+        source.analysis_sections?.remediation_target_host ||
+        executionOverlay.remediation_target_host ||
+        executionOverlay.analysis_sections?.remediation_target_host,
       remediation_why:
-        executionOverlay.remediation_why ||
-        executionOverlay.analysis_sections?.remediation_why ||
         source.remediation_why ||
-        source.analysis_sections?.remediation_why,
+        source.analysis_sections?.remediation_why ||
+        executionOverlay.remediation_why ||
+        executionOverlay.analysis_sections?.remediation_why,
       remediation_requires_approval:
-        executionOverlay.remediation_requires_approval ??
-        executionOverlay.analysis_sections?.remediation_requires_approval ??
         source.remediation_requires_approval ??
-        source.analysis_sections?.remediation_requires_approval,
+        source.analysis_sections?.remediation_requires_approval ??
+        executionOverlay.remediation_requires_approval ??
+        executionOverlay.analysis_sections?.remediation_requires_approval,
       diagnostic_typed_action:
-        executionOverlay.diagnostic_typed_action ||
-        source.diagnostic_typed_action,
+        source.diagnostic_typed_action ||
+        executionOverlay.diagnostic_typed_action,
       remediation_typed_action:
-        executionOverlay.remediation_typed_action ||
-        executionOverlay.analysis_sections?.remediation_typed_action ||
         source.remediation_typed_action ||
-        source.analysis_sections?.remediation_typed_action,
+        source.analysis_sections?.remediation_typed_action ||
+        executionOverlay.remediation_typed_action ||
+        executionOverlay.analysis_sections?.remediation_typed_action,
       remediation_execution_status:
         executionOverlay.remediation_execution_status || source.remediation_execution_status,
       remediation_last_execution_at:
@@ -270,7 +320,7 @@ export function IncidentsPage() {
         executionOverlay.post_remediation_ai_analysis || source.post_remediation_ai_analysis,
       agent_success: typeof executionOverlay.agent_success === "boolean" ? executionOverlay.agent_success : source.agent_success,
     };
-  }, [executionOverlay, linkedRecommendation, selectedAlert]);
+  }, [canonicalDeepDive, executionOverlay]);
 
   const executeMutation = useMutation({
     mutationFn: async () => {
@@ -351,12 +401,42 @@ export function IncidentsPage() {
       }));
     },
     onSuccess: async (payload) => {
+      const rawPayload = payload as typeof payload & {
+        approval_required?: boolean;
+        approval_token?: string;
+        estimated_blast_radius?: BlastRadiusEstimate;
+        execution_intent_id?: string;
+        policy_decision?: Record<string, unknown>;
+      };
+
+      // Approval gate: show RemediationSafetyPanel instead of treating as done
+      if (rawPayload.approval_required || rawPayload.execution_status === "approval_required") {
+        setExecutionState((current) => ({
+          ...current,
+          [executionKey]: {
+            ...(current[executionKey] || {}),
+            remediation_execution_status: "approval_required",
+            remediation_intent_id: rawPayload.execution_intent_id,
+          },
+        }));
+        setSafetyPanel({
+          mode: "approval",
+          intentId: rawPayload.execution_intent_id || "",
+          approvalToken: rawPayload.approval_token,
+          blastRadius: rawPayload.estimated_blast_radius,
+          typedAction: deepDiveEntry?.remediation_typed_action,
+          policyDecision: rawPayload.policy_decision,
+        });
+        return;
+      }
+
       setExecutionState((current) => ({
         ...current,
         [executionKey]: {
           ...(current[executionKey] || {}),
           remediation_execution_status: payload.execution_status,
           remediation_last_execution_at: payload.last_execution_at,
+          remediation_intent_id: rawPayload.execution_intent_id,
           post_remediation_ai_analysis: payload.final_answer,
           remediation_output: payload.command_output,
           analysis_sections: payload.analysis_sections,
@@ -403,6 +483,7 @@ export function IncidentsPage() {
   });
 
   useEffect(() => {
+    if (!canRunDiagnostics) return;
     if (!deepDiveEntry?.should_execute || !deepDiveEntry?.diagnostic_command || !deepDiveEntry?.target_host) return;
     if (deepDiveEntry.execution_status && deepDiveEntry.execution_status !== "pending") return;
     if (executeMutation.isPending || autoExecuted[executionKey]) return;
@@ -410,6 +491,7 @@ export function IncidentsPage() {
     executeMutation.mutate();
   }, [
     autoExecuted,
+    canRunDiagnostics,
     deepDiveEntry?.diagnostic_command,
     deepDiveEntry?.execution_status,
     deepDiveEntry?.should_execute,
@@ -457,7 +539,10 @@ export function IncidentsPage() {
               className={`incident-summary incident-summary--${String(incident.severity || "medium").toLowerCase().replace(/_/g, "-")}${selectedKey === incident.incident_key ? " is-active" : ""}`}
             >
               <button className="incident-summary__body" onClick={() => setActiveIncidentKey(incident.incident_key)}>
-                <div className="eyebrow">{incident.severity}</div>
+                <div className="incident-summary__topline">
+                  <div className="eyebrow">{incident.incident_number || incident.incident_key}</div>
+                  <span className="incident-summary__severity">{incident.severity}</span>
+                </div>
                 <strong>{incident.title}</strong>
                 <span>{incident.summary}</span>
                 {incident.business_impact && (incident.business_impact.revenue_lost ?? 0) > 0 && (
@@ -479,6 +564,19 @@ export function IncidentsPage() {
                 >
                   Investigate
                 </Link>
+                <button
+                  className="shell__link shell__link--small incident-summary__archive"
+                  onClick={() => {
+                    const label = incident.incident_number || incident.title || incident.incident_key;
+                    if (window.confirm(`Archive ${label}? It will be hidden from the active incident list but retained for audit.`)) {
+                      deleteMutation.mutate(incident.incident_key);
+                    }
+                  }}
+                  disabled={deleteMutation.isPending || !canArchiveIncidents}
+                  title={canArchiveIncidents ? "Archive incident" : "Requires incident archive permission"}
+                >
+                  Archive
+                </button>
               </div>
             </article>
           ))}
@@ -489,7 +587,7 @@ export function IncidentsPage() {
               <div className="incident-detail__hero">
                 <div>
                   <div className="eyebrow">Incident</div>
-                  <h3>{timelineQuery.data.title}</h3>
+                  <h3>{timelineQuery.data.incident_number ? `${timelineQuery.data.incident_number} · ${timelineQuery.data.title}` : timelineQuery.data.title}</h3>
                   <p>{timelineQuery.data.reasoning || timelineQuery.data.summary}</p>
                   <div className="page-card__meta">
                     <Link
@@ -511,7 +609,7 @@ export function IncidentsPage() {
                         className="shell__link shell__link--small"
                         style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}
                         onClick={() => slaAckMutation.mutate()}
-                        disabled={slaAckMutation.isPending}
+                        disabled={slaAckMutation.isPending || !canManageIncidents}
                       >
                         {slaAckMutation.isPending ? "Acknowledging..." : "Acknowledge SLA"}
                       </button>
@@ -520,7 +618,7 @@ export function IncidentsPage() {
                       className="shell__link shell__link--small"
                       style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}
                       onClick={() => runbookMutation.mutate()}
-                      disabled={runbookMutation.isPending || !selectedKey}
+                      disabled={runbookMutation.isPending || !selectedKey || !canManageIncidents}
                     >
                       {runbookMutation.isPending ? "Generating Runbook..." : "Generate Runbook"}
                     </button>
@@ -528,7 +626,7 @@ export function IncidentsPage() {
                       className="shell__link shell__link--small"
                       style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}
                       onClick={() => narrativeMutation.mutate()}
-                      disabled={narrativeMutation.isPending || !selectedKey}
+                      disabled={narrativeMutation.isPending || !selectedKey || !canManageIncidents}
                     >
                       {narrativeMutation.isPending ? "Generating Narrative..." : "Post-Incident Narrative"}
                     </button>
@@ -589,6 +687,50 @@ export function IncidentsPage() {
                   </div>
                 </div>
               </div>
+              {(timelineQuery.data.related_incidents || []).length > 0 ? (
+                <article className="incident-related">
+                  <div>
+                    <div className="eyebrow">Correlation</div>
+                    <h3>Related Incidents</h3>
+                  </div>
+                  <div className="incident-related__list">
+                    {(timelineQuery.data.related_incidents || []).map((related) => (
+                      <button
+                        key={related.incident_key}
+                        className="incident-related__item"
+                        onClick={() => setActiveIncidentKey(related.incident_key)}
+                      >
+                        <span>{related.incident_number || related.incident_key}</span>
+                        <strong>{related.title}</strong>
+                        <small>{related.score}% · {(related.reasons || []).map((reason) => reason.replace(/_/g, " ")).join(", ")}</small>
+                      </button>
+                    ))}
+                  </div>
+                </article>
+              ) : null}
+              {(timelineQuery.data.external_tickets || []).length > 0 ? (
+                <article className="incident-related">
+                  <div>
+                    <div className="eyebrow">Writeback</div>
+                    <h3>External Tickets</h3>
+                  </div>
+                  <div className="incident-related__list">
+                    {(timelineQuery.data.external_tickets || []).map((ticket) => (
+                      <a
+                        key={ticket.ticket_id}
+                        className="incident-related__item"
+                        href={ticket.external_url || undefined}
+                        target={ticket.external_url ? "_blank" : undefined}
+                        rel="noreferrer"
+                      >
+                        <span>{ticket.integration_name}</span>
+                        <strong>{ticket.external_key || ticket.external_id || ticket.status}</strong>
+                        <small>{ticket.status} · {ticket.message || ticket.integration_type}</small>
+                      </a>
+                    ))}
+                  </div>
+                </article>
+              ) : null}
               <div className="incident-timeline-list">
                 {deepDiveEntry ? (
                   <article className="incident-deep-dive incident-deep-dive--investigation">
@@ -616,7 +758,7 @@ export function IncidentsPage() {
                       <button
                         className="assistant-button"
                         onClick={() => executeMutation.mutate()}
-                        disabled={executeMutation.isPending || !deepDiveEntry.diagnostic_command || !deepDiveEntry.target_host}
+                        disabled={executeMutation.isPending || !deepDiveEntry.diagnostic_command || !deepDiveEntry.target_host || !canRunDiagnostics}
                       >
                         {executeMutation.isPending || deepDiveEntry.execution_status === "running" ? "Running..." : "Run Deep Dive"}
                       </button>
@@ -669,8 +811,98 @@ export function IncidentsPage() {
                           <code>{deepDiveEntry.remediation_command}</code>
                           <div className="page-card__meta">
                             <span>Target: {deepDiveEntry.remediation_target_host || deepDiveEntry.target_host || "Unavailable"}</span>
-                            {deepDiveEntry.remediation_requires_approval ? <span>Approval gate ready</span> : null}
+                            {deepDiveEntry.remediation_requires_approval ? <span>Approval gate active</span> : null}
                           </div>
+
+                          {/* RemediationSafetyPanel — approval, break-glass, rollback, verify */}
+                          {safetyPanel && (
+                            <div style={{ marginTop: 12 }}>
+                              <RemediationSafetyPanel
+                                mode={safetyPanel.mode}
+                                intentId={safetyPanel.intentId}
+                                approvalToken={safetyPanel.approvalToken}
+                                blastRadius={safetyPanel.blastRadius}
+                                typedAction={safetyPanel.typedAction}
+                                policyDecision={safetyPanel.policyDecision}
+                                onComplete={async (result) => {
+                                  setSafetyPanel(null);
+                                  // Break-glass: re-submit with break_glass flag
+                                  if (result.break_glass && deepDiveEntry.remediation_command) {
+                                    await executeDiagnosticCommand({
+                                      alert_id: deepDiveEntry.alert_id,
+                                      command: deepDiveEntry.remediation_command,
+                                      original_question: `Break-glass remediation for ${timelineQuery.data?.title || "incident"}`,
+                                      target_host: deepDiveEntry.remediation_target_host,
+                                      execution_type: "remediation",
+                                      typed_action: deepDiveEntry.remediation_typed_action,
+                                      break_glass: true,
+                                      break_glass_reason: String(result.break_glass_reason || ""),
+                                    }).then(async () => {
+                                      await queryClient.invalidateQueries({ queryKey: ["incident-timeline", selectedKey] });
+                                    }).catch(() => undefined);
+                                    return;
+                                  }
+                                  if (result.approval_token && deepDiveEntry.remediation_command) {
+                                    try {
+                                      const approvedPayload = await executeDiagnosticCommand({
+                                        alert_id: deepDiveEntry.alert_id,
+                                        command: deepDiveEntry.remediation_command,
+                                        original_question: `Apply remediation for ${timelineQuery.data?.title || "incident"}`,
+                                        target_host: deepDiveEntry.remediation_target_host,
+                                        execution_type: "remediation",
+                                        typed_action: deepDiveEntry.remediation_typed_action,
+                                        approval_token: String(result.approval_token || ""),
+                                        approval_reason: String(result.approval_reason || ""),
+                                      });
+                                      setExecutionState((current) => ({
+                                        ...current,
+                                        [executionKey]: {
+                                          ...(current[executionKey] || {}),
+                                          remediation_execution_status: approvedPayload.execution_status,
+                                          remediation_last_execution_at: approvedPayload.last_execution_at,
+                                          remediation_intent_id: (approvedPayload as Record<string, unknown>).execution_intent_id,
+                                          post_remediation_ai_analysis: approvedPayload.final_answer,
+                                          remediation_output: approvedPayload.command_output,
+                                          analysis_sections: approvedPayload.analysis_sections,
+                                          remediation_command:
+                                            approvedPayload.analysis_sections?.remediation_command ||
+                                            (current[executionKey] as Record<string, unknown> | undefined)?.remediation_command,
+                                          remediation_target_host:
+                                            approvedPayload.analysis_sections?.remediation_target_host ||
+                                            (current[executionKey] as Record<string, unknown> | undefined)?.remediation_target_host,
+                                          remediation_typed_action:
+                                            approvedPayload.analysis_sections?.remediation_typed_action ||
+                                            approvedPayload.typed_action ||
+                                            (current[executionKey] as Record<string, unknown> | undefined)?.remediation_typed_action,
+                                        },
+                                      }));
+                                      await queryClient.invalidateQueries({ queryKey: ["incident-timeline", selectedKey] });
+                                    } catch (error) {
+                                      setExecutionState((current) => ({
+                                        ...current,
+                                        [executionKey]: {
+                                          ...(current[executionKey] || {}),
+                                          remediation_execution_status: "failed",
+                                          remediation_output: error instanceof Error ? error.message : "Approved remediation execution failed.",
+                                        },
+                                      }));
+                                    }
+                                    return;
+                                  }
+                                  setExecutionState((current) => ({
+                                    ...current,
+                                    [executionKey]: {
+                                      ...(current[executionKey] || {}),
+                                      remediation_execution_status: (result as Record<string, unknown>).status as string || "approved",
+                                    },
+                                  }));
+                                  await queryClient.invalidateQueries({ queryKey: ["incident-timeline", selectedKey] });
+                                }}
+                                onDismiss={() => setSafetyPanel(null)}
+                              />
+                            </div>
+                          )}
+
                           <div className="page-card__meta">
                             <button
                               className="assistant-button assistant-button--secondary"
@@ -678,13 +910,62 @@ export function IncidentsPage() {
                               disabled={
                                 remediationMutation.isPending ||
                                 !deepDiveEntry.remediation_command ||
-                                !deepDiveEntry.remediation_target_host
+                                !deepDiveEntry.remediation_target_host ||
+                                !canRunRemediation ||
+                                Boolean(safetyPanel)
                               }
                             >
                               {remediationMutation.isPending || deepDiveEntry.remediation_execution_status === "running"
                                 ? "Running Remediation..."
                                 : "Run Remediation"}
                             </button>
+                            {/* Break-glass escape hatch */}
+                            {deepDiveEntry.remediation_execution_status === "approval_required" && !safetyPanel && (
+                              <button
+                                className="assistant-button assistant-button--danger"
+                                disabled={!canRunRemediation}
+                                onClick={() => {
+                                  const intentId = (executionOverlay as Record<string, unknown>).remediation_intent_id as string || "";
+                                  setSafetyPanel({
+                                    mode: "break-glass",
+                                    intentId,
+                                    typedAction: deepDiveEntry.remediation_typed_action,
+                                  });
+                                }}
+                              >
+                                Break-Glass
+                              </button>
+                            )}
+                            {/* Rollback for completed remediations */}
+                            {(deepDiveEntry.remediation_execution_status === "completed" || deepDiveEntry.remediation_execution_status === "verified") && (
+                              <button
+                                className="assistant-button assistant-button--secondary"
+                                disabled={!canRunRemediation}
+                                onClick={() => {
+                                  const intentId = (executionOverlay as Record<string, unknown>).remediation_intent_id as string || "";
+                                  if (intentId) {
+                                    setSafetyPanel({ mode: "rollback", intentId, typedAction: deepDiveEntry.remediation_typed_action });
+                                  }
+                                }}
+                              >
+                                Rollback
+                              </button>
+                            )}
+                            {/* Verify gate for remediation pending verification */}
+                            {deepDiveEntry.remediation_execution_status === "verification_pending" && !safetyPanel && (
+                              <button
+                                className="assistant-button assistant-button--primary"
+                                disabled={!canRunRemediation}
+                                onClick={() => {
+                                  const intentId = (executionOverlay as Record<string, unknown>).remediation_intent_id as string || "";
+                                  if (intentId) {
+                                    setSafetyPanel({ mode: "verify", intentId });
+                                  }
+                                }}
+                              >
+                                Submit Verification
+                              </button>
+                            )}
                             <span>Status: {deepDiveEntry.remediation_execution_status || "pending"}</span>
                             {deepDiveEntry.remediation_last_execution_at ? (
                               <code>last-run:{new Date(deepDiveEntry.remediation_last_execution_at).toLocaleString()}</code>

@@ -16,6 +16,7 @@ markdown2
 django-cors-headers
 better-profanity
 gunicorn
+uvicorn[standard]
 numpy<2
 redis==4.6.0
 django-redis

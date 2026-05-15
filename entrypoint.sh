@@ -11,6 +11,10 @@ echo "Database is ready."
 echo "Applying database migrations..."
 python3 manage.py migrate --noinput
 
+# Seed default policy packs (idempotent — safe to run on every start)
+echo "Seeding policy packs..."
+python3 manage.py seed_policy_packs
+
 # Optionally sync local code-context indexes.
 # This is best-effort only: startup must continue even when no repositories
 # are registered yet or indexing is not enabled for the environment.
@@ -33,6 +37,20 @@ else:
     print('Superuser already exists.')
 EOF
  
-# Start the Gunicorn server
-echo "Starting Gunicorn server..."
-exec gunicorn --workers 2 --bind 0.0.0.0:8000 --timeout 120 aiops_platform.wsgi:application
+if [ "$#" -gt 0 ]; then
+  echo "Starting custom process: $*"
+  exec "$@"
+fi
+
+# Start the ASGI server stack.
+echo "Starting ASGI server..."
+exec gunicorn \
+  --worker-class uvicorn.workers.UvicornWorker \
+  --workers "${AIOPS_WEB_CONCURRENCY:-2}" \
+  --bind 0.0.0.0:8000 \
+  --timeout "${AIOPS_GUNICORN_TIMEOUT:-120}" \
+  --keep-alive "${AIOPS_GUNICORN_KEEPALIVE:-15}" \
+  --graceful-timeout "${AIOPS_GUNICORN_GRACEFUL_TIMEOUT:-30}" \
+  --max-requests "${AIOPS_GUNICORN_MAX_REQUESTS:-1000}" \
+  --max-requests-jitter "${AIOPS_GUNICORN_MAX_REQUESTS_JITTER:-100}" \
+  aiops_platform.asgi:application

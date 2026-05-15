@@ -122,6 +122,10 @@ application:
 predictor:
   intervalSeconds: 300
 
+integrationHealth:
+  schedule: "*/5 * * * *"
+  failAfter: 3
+
 observability:
   enabled: true
   metricsRetention: 30d
