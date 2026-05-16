@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>OpsMitra — Sample Design</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --cream:    #eceae3;
+    --cream-dk: #e4e1d9;
+    --ink:      #1a1916;
+    --ink-mid:  #5a5850;
+    --ink-soft: #9a9890;
+    --blue:     #3b52d4;
+    --blue-lt:  #eef0fb;
+    --green:    #2d6e4e;
+    --border:   rgba(26,25,22,0.10);
+  }
+
+  body {
+    background: var(--cream);
+    color: var(--ink);
+    font-family: 'Space Mono', monospace;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── NAV ── */
+  nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 24px 56px;
+    border-bottom: 1px solid var(--border);
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: 'Space Mono', monospace;
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: 0.04em;
+    color: var(--ink);
+  }
+  .brand-mark {
+    width: 28px; height: 28px;
+    background: var(--blue);
+    border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+  .nav-links {
+    display: flex; gap: 36px; list-style: none;
+  }
+  .nav-links a {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-mid);
+    text-decoration: none;
+    transition: color 0.15s;
+  }
+  .nav-links a:hover { color: var(--ink); }
+  .nav-actions { display: flex; gap: 12px; align-items: center; }
+  .btn-ghost {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+    padding: 10px 20px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--ink);
+    cursor: pointer;
+    text-decoration: none;
+  }
+  .btn-primary {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+    padding: 10px 20px;
+    border: none;
+    border-radius: 4px;
+    background: var(--blue);
+    color: #fff;
+    cursor: pointer;
+    text-decoration: none;
+  }
+
+  /* ── HERO ── */
+  .hero-section {
+    position: relative;
+    padding: 96px 56px 80px;
+    overflow: hidden;
+  }
+  .hero-eyebrow {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin-bottom: 32px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .hero-eyebrow::before {
+    content: '';
+    display: inline-block;
+    width: 24px; height: 1px;
+    background: var(--ink-soft);
+  }
+  .hero-headline {
+    font-family: 'Playfair Display', serif;
+    font-size: clamp(52px, 7vw, 96px);
+    font-weight: 400;
+    line-height: 1.05;
+    color: var(--ink);
+    max-width: 780px;
+    margin-bottom: 40px;
+  }
+  .hero-headline em {
+    font-style: italic;
+    color: var(--blue);
+  }
+  .hero-sub {
+    font-family: 'Space Mono', monospace;
+    font-size: 13px;
+    line-height: 1.8;
+    color: var(--ink-mid);
+    max-width: 480px;
+    margin-bottom: 48px;
+  }
+  .hero-actions {
+    display: flex; gap: 12px; align-items: center; margin-bottom: 64px;
+  }
+  .hero-tagline {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    color: var(--ink-soft);
+    letter-spacing: 0.04em;
+  }
+  .hero-tagline strong { color: var(--ink); font-weight: 700; }
+  .hero-tagline a { color: var(--blue); text-decoration: none; }
+
+  /* side text */
+  .side-text {
+    position: absolute;
+    font-family: 'Space Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.20em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    writing-mode: vertical-rl;
+    top: 50%; transform: translateY(-50%);
+  }
+  .side-text--left  { left: 18px; transform: translateY(-50%) rotate(180deg); }
+  .side-text--right { right: 18px; }
+
+  /* ── STATS ── */
+  .stats-band {
+    border-top: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+  }
+  .stat-cell {
+    padding: 40px 48px;
+    border-right: 1px solid var(--border);
+  }
+  .stat-cell:last-child { border-right: none; }
+  .stat-value {
+    font-family: 'Playfair Display', serif;
+    font-size: 42px;
+    font-weight: 400;
+    color: var(--blue);
+    line-height: 1;
+    margin-bottom: 10px;
+  }
+  .stat-value.green { color: var(--green); }
+  .stat-value.ink   { color: var(--ink); }
+  .stat-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin-bottom: 6px;
+  }
+  .stat-desc {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    color: var(--ink-mid);
+    line-height: 1.6;
+  }
+
+  /* ── SECTION ── */
+  .section {
+    padding: 96px 56px;
+    border-top: 1px solid var(--border);
+  }
+  .section-eyebrow {
+    font-family: 'Space Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin-bottom: 28px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .section-eyebrow::before {
+    content: '';
+    display: inline-block;
+    width: 20px; height: 1px;
+    background: var(--ink-soft);
+  }
+  .split-layout {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 80px;
+    align-items: start;
+  }
+  .split-headline {
+    font-family: 'Playfair Display', serif;
+    font-size: clamp(36px, 4.5vw, 58px);
+    font-weight: 400;
+    line-height: 1.08;
+    color: var(--ink);
+  }
+  .split-headline em {
+    font-style: italic;
+    color: var(--blue);
+  }
+  .split-body {
+    font-family: 'Space Mono', monospace;
+    font-size: 12px;
+    line-height: 1.9;
+    color: var(--ink-mid);
+    padding-top: 8px;
+  }
+  .split-body p { margin-bottom: 20px; }
+  .text-link {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: var(--blue);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  /* ── RCA CARD ── */
+  .rca-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 24px;
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+  }
+  .rca-card__header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 16px;
+    font-size: 11px;
+    color: var(--ink-mid);
+  }
+  .rca-badge {
+    font-size: 9px;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--blue);
+    border-color: var(--blue);
+  }
+  .rca-label {
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin-bottom: 8px;
+  }
+  .rca-root {
+    background: var(--blue-lt);
+    border-left: 3px solid var(--blue);
+    padding: 10px 14px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--ink-mid);
+    margin-bottom: 16px;
+    border-radius: 0 4px 4px 0;
+  }
+  .rca-complete {
+    display: flex; justify-content: flex-end; margin-bottom: 16px;
+  }
+  .rca-complete span {
+    font-size: 9px; letter-spacing: 0.10em; text-transform: uppercase;
+    color: var(--green); border: 1px solid var(--green);
+    padding: 3px 8px; border-radius: 3px;
+  }
+  .rca-conditions { margin-bottom: 16px; }
+  .rca-bullet {
+    font-size: 11px; color: var(--ink-mid);
+    padding: 3px 0; line-height: 1.5;
+  }
+  .rca-bullet::before { content: '· '; color: var(--ink-soft); }
+  .rca-actions { display: flex; flex-direction: column; gap: 8px; }
+  .rca-action-row {
+    display: flex; align-items: flex-start; gap: 10px;
+    font-size: 11px; color: var(--ink-mid); line-height: 1.5;
+  }
+  .badge-high {
+    font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+    background: #fff3e8; color: #b45309; border: 1px solid #f59e0b;
+    padding: 2px 6px; border-radius: 3px; flex-shrink: 0; margin-top: 1px;
+  }
+  .badge-med {
+    font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+    background: #fffbe8; color: #92400e; border: 1px solid #d97706;
+    padding: 2px 6px; border-radius: 3px; flex-shrink: 0; margin-top: 1px;
+  }
+
+  /* trusted logos strip */
+  .logos-strip {
+    border-top: 1px solid var(--border);
+    padding: 28px 56px;
+    display: flex; align-items: center; gap: 48px;
+  }
+  .logos-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--ink-soft); white-space: nowrap;
+  }
+  .logos-items {
+    display: flex; gap: 40px; align-items: center;
+    overflow: hidden;
+  }
+  .logo-item {
+    font-family: 'Space Mono', monospace;
+    font-size: 12px; color: var(--ink-soft);
+    letter-spacing: 0.06em; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="brand">
+    <div class="brand-mark">OM</div>
+    OPSMITRA
+  </div>
+  <ul class="nav-links">
+    <li><a href="#">Platform</a></li>
+    <li><a href="#">Capabilities</a></li>
+    <li><a href="#">Industries</a></li>
+    <li><a href="#">Workflow</a></li>
+    <li><a href="#">Compare</a></li>
+    <li><a href="#">Contact</a></li>
+  </ul>
+  <div class="nav-actions">
+    <a href="#" class="btn-ghost">Book a Demo</a>
+    <a href="#" class="btn-primary">Launch Console ↗</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero-section">
+  <span class="side-text side-text--left">Air-Gapped · Self-Hosted · Code-Aware</span>
+  <span class="side-text side-text--right">Memory · Safety · Resilience</span>
+
+  <div class="hero-eyebrow">AI Incident Control Plane</div>
+
+  <h1 class="hero-headline">
+    Your incidents,<br/>
+    <em>investigated and resolved.</em><br/>
+    Inside your network.
+  </h1>
+
+  <p class="hero-sub">
+    OpsMitra traces live failures from runtime telemetry all the way into your source code —
+    handler, route, span, and recent commit — then executes governed remediation
+    entirely inside your own infrastructure.<br/><br/>
+    No cloud AI. No data egress. Ever.
+  </p>
+
+  <div class="hero-actions">
+    <a href="#" class="btn-primary">Book A Demo</a>
+    <a href="#" class="btn-ghost">See All Capabilities →</a>
+  </div>
+
+  <p class="hero-tagline">
+    <a href="#">air-gapped by design</a> · <strong>runs on your own GPU</strong> · the longer it runs, the sharper it gets.
+  </p>
+</section>
+
+<!-- STATS BAND -->
+<div class="stats-band">
+  <div class="stat-cell">
+    <div class="stat-label">Integration Connectors</div>
+    <div class="stat-value">40+</div>
+    <div class="stat-desc">Observability, ITSM, DevOps,<br/>cloud, and OT in one platform.</div>
+  </div>
+  <div class="stat-cell">
+    <div class="stat-label">Data Egress</div>
+    <div class="stat-value green">Zero</div>
+    <div class="stat-desc">Every inference call runs<br/>on your own GPU. Always.</div>
+  </div>
+  <div class="stat-cell">
+    <div class="stat-label">RCA Depth</div>
+    <div class="stat-value ink">Code-Path</div>
+    <div class="stat-desc">Down to handler, route,<br/>span, and commit.</div>
+  </div>
+  <div class="stat-cell">
+    <div class="stat-label">Coverage</div>
+    <div class="stat-value ink">IT + OT</div>
+    <div class="stat-desc">K8s clusters to<br/>PLC machines.</div>
+  </div>
+</div>
+
+<!-- SPLIT SECTION: RCA -->
+<section class="section">
+  <div class="section-eyebrow">Magic Insights</div>
+  <div class="split-layout">
+    <div>
+      <h2 class="split-headline">
+        Root cause,<br/>
+        not just<br/>
+        <em>the symptom.</em>
+      </h2>
+    </div>
+    <div class="split-body">
+      <p>
+        Every anomaly surfaces with a complete multi-step investigation: observed conditions,
+        causal chain traced into your source code, and ranked remediation actions —
+        all grounded in real evidence, not AI guesswork.
+      </p>
+      <p>
+        OpsMitra does not stop at logs and metrics. It follows the path into handlers,
+        spans, repository ownership, and recent commits. An answer with evidence.
+        Not just an alert.
+      </p>
+      <a href="#" class="text-link">Explore the platform →</a>
+
+      <div style="margin-top: 32px;">
+        <div class="rca-card">
+          <div class="rca-card__header">
+            <span>app-orders · CrashLoopBackOff (restart: 5)</span>
+            <span class="rca-badge">RCA</span>
+          </div>
+          <div class="rca-label">Root Cause</div>
+          <div class="rca-root">
+            redis-cluster memory limit reached, triggering key eviction cascade into
+            session-service, causing app-orders initialization failures in views.py:health()
+          </div>
+          <div class="rca-complete"><span>Complete</span></div>
+          <div class="rca-label">Observed Conditions</div>
+          <div class="rca-conditions">
+            <div class="rca-bullet">redis-cluster memory at 97.8%; eviction policy active</div>
+            <div class="rca-bullet">session-service p99 latency up 6× over baseline</div>
+            <div class="rca-bullet">commit a3f92c1 raised max_connections 3 days ago</div>
+          </div>
+          <div class="rca-label">Recommended Actions</div>
+          <div class="rca-actions">
+            <div class="rca-action-row"><span class="badge-high">High</span> Scale redis-cluster memory from 2 GB → 4 GB immediately.</div>
+            <div class="rca-action-row"><span class="badge-med">Med</span> Add memory pressure alerting threshold at 80%.</div>
+            <div class="rca-action-row"><span class="badge-med">Med</span> Review session-service retry policy; current config amplifies cascades.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- LOGOS / TRUSTED BY -->
+<div class="logos-strip">
+  <div class="logos-label">Designed for</div>
+  <div class="logos-items">
+    <span class="logo-item">Manufacturing</span>
+    <span class="logo-item">Defence</span>
+    <span class="logo-item">Fintech</span>
+    <span class="logo-item">Healthcare</span>
+    <span class="logo-item">Energy</span>
+    <span class="logo-item">Telco</span>
+    <span class="logo-item">Public Sector</span>
+  </div>
+</div>
+
+</body>
+</html>
