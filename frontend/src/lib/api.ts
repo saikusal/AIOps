@@ -157,6 +157,7 @@ export type AlertRecommendation = {
   remediation_target_host?: string;
   remediation_why?: string;
   remediation_requires_approval?: boolean;
+  demo_command_bypass?: boolean;
   remediation_execution_status?: string;
   remediation_last_execution_at?: string;
   remediation_output?: string;
@@ -692,6 +693,8 @@ export type CommandExecutionResult = {
   idempotency_key?: string;
   rollback_metadata?: Record<string, unknown>;
   replay_scores?: Record<string, unknown>;
+  policy_decision?: Record<string, unknown>;
+  demo_command_bypass?: boolean;
   analysis_sections?: {
     root_cause?: string;
     evidence?: string;
@@ -797,16 +800,12 @@ async function fetchJson<T>(url: string): Promise<T> {
   });
 
   const contentType = response.headers.get("content-type") || "";
+  // Django's @login_required redirects to /genai/login/ for unauthenticated users.
+  // Surface that as a clean error — the React route guard handles redirecting to /login.
   if (
-    response.redirected &&
-    response.url.includes("/genai/login/")
+    (response.redirected && response.url.includes("/genai/login/")) ||
+    (contentType.includes("text/html") && response.url.includes("/genai/login/"))
   ) {
-    window.location.href = response.url;
-    throw new Error("Authentication required");
-  }
-
-  if (contentType.includes("text/html") && response.url.includes("/genai/login/")) {
-    window.location.href = response.url;
     throw new Error("Authentication required");
   }
 
@@ -816,6 +815,177 @@ async function fetchJson<T>(url: string): Promise<T> {
 
   return response.json() as Promise<T>;
 }
+
+async function readApiJson<T>(response: Response, fallbackMessage: string): Promise<T> {
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) {
+    const body = await response.text().catch(() => "");
+    const backendUnavailable =
+      response.status >= 500 ||
+      body.trimStart().startsWith("<!DOCTYPE html") ||
+      body.trimStart().startsWith("<html");
+
+    if (backendUnavailable) {
+      throw new Error("Backend is unavailable. Wait for the API service to finish starting, then try again.");
+    }
+
+    throw new Error(fallbackMessage);
+  }
+
+  return response.json() as Promise<T>;
+}
+
+export interface SessionUser {
+  id: number;
+  username: string;
+  email: string;
+  is_superuser: boolean;
+  is_staff: boolean;
+}
+
+export async function fetchSession(): Promise<{ authenticated: boolean; user?: SessionUser }> {
+  const response = await fetch("/genai/auth/session/", {
+    credentials: "include",
+    headers: { Accept: "application/json" },
+  });
+  if (response.status === 401) return { authenticated: false };
+  if (!response.ok) throw new Error(`Session check failed: ${response.status}`);
+  return readApiJson<{ authenticated: boolean; user?: SessionUser }>(response, "Unable to load session.");
+}
+
+export async function loginUser(username: string, password: string): Promise<{ status: string; user: SessionUser }> {
+  const response = await fetch("/genai/auth/login/", {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+    body: JSON.stringify({ username, password }),
+  });
+  const body = await readApiJson<{ status: string; user: SessionUser; error?: string }>(response, "Login failed.");
+  if (!response.ok) throw new Error(body.error === "invalid_credentials" ? "Invalid username or password." : body.error || "Login failed.");
+  return body;
+}
+
+export async function logoutUser(): Promise<void> {
+  const response = await fetch("/genai/auth/logout/", {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json", "X-CSRFToken": getCsrfToken() },
+  });
+  if (!response.ok) {
+    await readApiJson<{ error?: string }>(response, "Logout failed.");
+    throw new Error(`Logout failed: ${response.status}`);
+  }
+}
+
+/* ---------- Admin (super-admin only, cross-tenant) ---------- */
+
+export interface AdminTenant {
+  tenant_id: string;
+  name: string;
+  slug: string;
+  domain: string;
+  is_active: boolean;
+  created_at: string;
+  member_count: number;
+}
+
+export interface AdminUserMembership {
+  membership_id: string;
+  tenant_id: string;
+  tenant_name: string;
+  role: string;
+}
+
+export interface AdminUser {
+  id: number;
+  username: string;
+  email: string;
+  is_active: boolean;
+  is_superuser: boolean;
+  is_staff: boolean;
+  memberships: AdminUserMembership[];
+  date_joined: string;
+}
+
+export interface AdminMembership {
+  membership_id: string;
+  tenant_id: string;
+  name: string;
+  slug: string;
+  domain: string;
+  role: string;
+  permissions: string[];
+  extra_permissions: string[];
+  user: { id: number; username: string; email: string; is_active: boolean; is_superuser?: boolean };
+  is_active: boolean;
+}
+
+export interface AdminAuditEvent {
+  event_id: string;
+  tenant_id: string;
+  tenant_name: string;
+  actor: string;
+  action: string;
+  object_type: string;
+  object_id: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+async function adminJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, { credentials: "include", headers: { Accept: "application/json" } });
+  if (response.status === 401) throw new Error("authentication_required");
+  if (response.status === 403) throw new Error("superuser_required");
+  if (!response.ok) throw new Error(`Admin request failed: ${response.status}`);
+  return response.json();
+}
+
+async function adminSend<T>(url: string, method: "POST" | "PATCH" | "DELETE", body?: unknown): Promise<T> {
+  const response = await fetch(url, {
+    method,
+    credentials: "include",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const payload = (await response.json()) as T & { error?: string };
+  if (!response.ok) throw new Error(payload.error || `Admin ${method} failed: ${response.status}`);
+  return payload;
+}
+
+export const adminApi = {
+  listTenants: () => adminJson<{ count: number; results: AdminTenant[] }>("/genai/admin/tenants/"),
+  createTenant: (input: { name: string; slug?: string; domain?: string }) =>
+    adminSend<{ status: string; tenant: AdminTenant }>("/genai/admin/tenants/", "POST", input),
+  updateTenant: (tenantId: string, input: { name?: string; domain?: string; is_active?: boolean }) =>
+    adminSend<{ status: string; tenant: AdminTenant }>(`/genai/admin/tenants/${encodeURIComponent(tenantId)}/`, "PATCH", input),
+
+  listUsers: () => adminJson<{ count: number; results: AdminUser[] }>("/genai/admin/users/"),
+  createUser: (input: { username: string; email?: string; password: string; is_superuser?: boolean }) =>
+    adminSend<{ status: string; user: AdminUser }>("/genai/admin/users/", "POST", input),
+  updateUser: (userId: number, input: { email?: string; is_active?: boolean; is_superuser?: boolean; password?: string }) =>
+    adminSend<{ status: string; user: AdminUser }>(`/genai/admin/users/${userId}/`, "PATCH", input),
+
+  createMembership: (input: { tenant_id: string; user_id: number; role: string }) =>
+    adminSend<{ status: string; member: AdminMembership }>("/genai/admin/memberships/", "POST", input),
+  updateMembership: (membershipId: string, input: { role?: string; is_active?: boolean; extra_permissions?: string[] }) =>
+    adminSend<{ status: string; member: AdminMembership }>(`/genai/admin/memberships/${encodeURIComponent(membershipId)}/`, "PATCH", input),
+  disableMembership: (membershipId: string) =>
+    adminSend<{ status: string; member: AdminMembership }>(`/genai/admin/memberships/${encodeURIComponent(membershipId)}/`, "DELETE"),
+  fetchMembership: (membershipId: string) =>
+    adminJson<AdminMembership>(`/genai/admin/memberships/${encodeURIComponent(membershipId)}/`),
+
+  permissionCatalog: () =>
+    adminJson<{ count: number; permissions: string[]; grouped: Record<string, string[]> }>("/genai/admin/permissions/catalog/"),
+
+  auditLog: (params: { limit?: number; tenant_id?: string; action?: string } = {}) => {
+    const search = new URLSearchParams();
+    if (params.limit) search.set("limit", String(params.limit));
+    if (params.tenant_id) search.set("tenant_id", params.tenant_id);
+    if (params.action) search.set("action", params.action);
+    const suffix = search.toString();
+    return adminJson<{ count: number; results: AdminAuditEvent[] }>(`/genai/admin/audit/${suffix ? `?${suffix}` : ""}`);
+  },
+};
 
 export async function fetchCurrentTenant(): Promise<TenantContextPayload> {
   return fetchJson<TenantContextPayload>("/genai/tenants/current/");
@@ -876,6 +1046,18 @@ export async function disableTenantMember(membershipId: string): Promise<{ statu
 export async function fetchRecentAlerts(): Promise<AlertRecommendation[]> {
   const payload = await fetchJson<RecentAlertsResponse>("/genai/alerts/recent/");
   return payload.results || [];
+}
+
+export async function closeAlerts(alertIds: string[], reason?: string): Promise<{ status: string; closed_count: number; events_updated: number; closed_alert_ids: string[]; closed_at: string }> {
+  const response = await fetch("/genai/alerts/close/", {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+    body: JSON.stringify({ alert_ids: alertIds, reason: reason || "" }),
+  });
+  const body = (await response.json()) as { status: string; closed_count: number; events_updated: number; closed_alert_ids: string[]; closed_at: string; error?: string };
+  if (!response.ok) throw new Error(body.error || `Alert close failed: ${response.status}`);
+  return body;
 }
 
 export async function fetchAlertNoiseRules(): Promise<AlertNoiseRulesPayload> {

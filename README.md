@@ -6,6 +6,8 @@ OpsMitra traces live incidents from runtime telemetry all the way into your sour
 
 Built for teams in manufacturing, finance, defence, healthcare, and regulated enterprise where SaaS AIOps is not an option.
 
+**Current production status:** ready for controlled production rollout or internal production trial after environment-specific security, backup, integration-token, and load validation. It is not yet positioned as a turnkey HA replacement for established observability or ITSM suites.
+
 ---
 
 ## Why OpsMitra
@@ -104,23 +106,70 @@ cd opsmitra
 # Configure environment
 cp .env.example .env
 # Edit .env — at minimum set:
-#   SECRET_KEY, AGENT_SECRET_TOKEN, AIOPS_INTENT_SIGNING_SECRET
-#   VLLM_BASE_URL (your local vLLM endpoint)
+#   SECRET_KEY, AGENT_SECRET_TOKEN, MCP_INTERNAL_TOKEN, AIOPS_INTENT_SIGNING_SECRET
+#   VLLM_API_URL=http://<gpu-host>:8001/v1/chat/completions
+#   VLLM_MODEL_NAME=<served-chat-model-name>
+#   VLLM_EMBEDDING_URL=http://<embedding-host>:8002/v1/embeddings
+#   VECTOR_EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
+#   PGVECTOR_DIMENSIONS=384
 
 # Start the stack
 docker compose up -d
 
 # Stack includes:
 #   - web (Django backend, port 8000)
-#   - frontend-app (React UI, port 5173)
+#   - frontend-app (React UI, default port 8089)
 #   - predictor (prediction engine)
-#   - db (Postgres), redis, otel-collector
+#   - db (Postgres + pgvector), redis, otel-collector
 #   - prometheus, vmalert, alertmanager
 #   - jaeger, elasticsearch, grafana
 #   - db-agent, control-agent (fleet agents)
 ```
 
-Open `http://localhost:5173`. Default tenant and admin are bootstrapped via the `db-init` service.
+Open `http://localhost:8089`. Default tenant and admin are bootstrapped during startup.
+
+### Local AI Runtime
+
+OpsMitra uses two OpenAI-compatible endpoints:
+
+| Purpose | Endpoint variable | Recommended local/prod setup |
+|---|---|---|
+| Chat, RCA, remediation reasoning | `VLLM_API_URL` | vLLM serving Qwen/Llama/Mistral-style instruct model |
+| Semantic embeddings for vector search | `VLLM_EMBEDDING_URL` | TEI or vLLM embedding server, for example `sentence-transformers/all-MiniLM-L6-v2` |
+
+Example split deployment:
+
+```bash
+# GPU chat model on the inference host
+docker run -d --name vllm-qwen --gpus all --restart unless-stopped \
+  -p 8001:8000 \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  vllm/vllm-openai:latest \
+  --model Qwen/Qwen2.5-14B-Instruct-AWQ \
+  --quantization awq_marlin \
+  --max-model-len 8192 \
+  --gpu-memory-utilization 0.90 \
+  --served-model-name qwen14b \
+  --trust-remote-code
+
+# CPU embedding model on the same or separate host
+docker run -d --name aiops-embedding --restart unless-stopped \
+  -p 8002:80 \
+  -v ~/.cache/huggingface:/data \
+  ghcr.io/huggingface/text-embeddings-inference:cpu-1.8 \
+  --model-id sentence-transformers/all-MiniLM-L6-v2 \
+  --port 80
+```
+
+Set:
+
+```env
+VLLM_API_URL=http://<inference-host>:8001/v1/chat/completions
+VLLM_MODEL_NAME=qwen14b
+VLLM_EMBEDDING_URL=http://<inference-host>:8002/v1/embeddings
+VECTOR_EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
+PGVECTOR_DIMENSIONS=384
+```
 
 ### Kubernetes (Helm)
 
@@ -188,10 +237,10 @@ See `ARCHITECTURE.md` for design details.
 
 | Layer | Technology |
 |---|---|
-| Backend | Django 5, Django REST Framework, Channels (ASGI) |
-| Database | PostgreSQL 16 |
+| Backend | Django 4.2, ASGI/Gunicorn/Uvicorn |
+| Database | PostgreSQL 13 with pgvector in Compose; managed Postgres with pgvector recommended in production |
 | Cache &amp; queues | Redis / Valkey |
-| AI inference | vLLM (BYOL — any vLLM-compatible model) |
+| AI inference | vLLM for chat/reasoning; TEI or vLLM embedding endpoint for vector search |
 | Operator UI | React 19, Vite, TanStack Query, D3 |
 | Marketing site | Next.js 15, React 19, TypeScript |
 | Telemetry | OpenTelemetry Collector, Prometheus, VictoriaMetrics, Jaeger, Elasticsearch, Filebeat |
@@ -212,12 +261,17 @@ AIOPS_INTENT_SIGNING_SECRET=...      # EGAP intent signing
 DATABASE_URL=postgres://...          # Managed Postgres recommended in prod
 REDIS_URL=redis://...                # Managed Redis or in-cluster
 
-VLLM_BASE_URL=http://vllm:8000       # Your local vLLM endpoint
-VLLM_MODEL=...                       # Model id
+VLLM_API_URL=http://vllm:8000/v1/chat/completions
+VLLM_MODEL_NAME=qwen14b
+VLLM_EMBEDDING_URL=http://embedding:8002/v1/embeddings
+VECTOR_EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
+PGVECTOR_DIMENSIONS=384
 
 DJANGO_ALLOWED_HOSTS=opsmitra.example.com
 CSRF_TRUSTED_ORIGINS=https://opsmitra.example.com
 ```
+
+`VLLM_EMBEDDING_URL` must be set explicitly. The platform no longer derives `/v1/embeddings` from the chat endpoint by default, because most instruct/chat models do not serve valid embeddings.
 
 See `deploy/README.md` and `deploy/KUBERNETES_DEPLOYMENT.md` for full reference.
 

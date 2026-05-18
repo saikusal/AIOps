@@ -1,6 +1,6 @@
 # OpsMitra Production Readiness
 
-Last updated: 2026-05-14
+Last updated: 2026-05-15
 
 This file tracks what has already been implemented and what still needs to be completed before taking OpsMitra into production.
 
@@ -13,12 +13,14 @@ OpsMitra is now beyond demo-only state. It has the core shape of a self-hosted A
 - Grouped Alertmanager payloads preserve per-alert incident tracking instead of collapsing sibling alerts into one ticket.
 - Local vLLM-based investigation, deep-dive generation, diagnostic planning, and remediation recommendation.
 - React operator UI for alerts, incidents, investigations, integrations, fleet, analytics, and tenant access control.
+- React is the default operator/admin UI; Django admin is disabled unless explicitly enabled with `ENABLE_DJANGO_ADMIN=true`.
 - Controlled execution path with typed actions, policy evaluation, approval gates, dry-run handling, rollback metadata, break-glass controls, and post-action verification.
 - Multi-tenancy and RBAC across critical backend endpoints and React navigation.
 - Integration framework for observability, ITSM, notification, cloud, DevOps, and code/change providers.
 - Docker Compose deployment and Helm/Kubernetes deployment assets.
+- pgvector-backed vector storage is enabled in Compose through `pgvector/pgvector:pg13`; embeddings are supplied by an explicit OpenAI-compatible embedding endpoint.
 
-The platform is suitable for controlled internal production trials after environment-specific configuration, security review, and operational runbooks are completed. It should still be positioned as an AI incident control plane that works beside existing observability/ITSM systems, not as a full day-one replacement for Datadog, Dynatrace, PagerDuty, BigPanda, Splunk, or Grafana.
+The platform is suitable for controlled production rollout/internal production trials after environment-specific configuration, security review, backup/restore validation, integration-token validation, and operational runbooks are completed. It should still be positioned as an AI incident control plane that works beside existing observability/ITSM systems, not as a full day-one replacement for Datadog, Dynatrace, PagerDuty, BigPanda, Splunk, or Grafana.
 
 ## Implemented
 
@@ -73,6 +75,7 @@ The platform is suitable for controlled internal production trials after environ
 - Backend permissions now cover tenant, incident, alert, investigation, integration, fleet, execution, cache, lifecycle, code-context, and operations surfaces.
 - React tenant provider, tenant switcher, and permission-aware navigation exist.
 - Admin member management UI exists at `/settings/members`.
+- Platform admin UI exists in React at `/admin`; legacy Django admin is opt-in only for emergency/internal maintenance.
 - Tenant audit events are append-only at the Django model/signal layer.
 
 ### Audit Trail
@@ -94,6 +97,9 @@ The platform is suitable for controlled internal production trials after environ
 
 - Docker Compose startup runs migrations automatically through `entrypoint.sh`.
 - Predictor also uses the same startup migration path defensively.
+- Compose database image uses `pgvector/pgvector:pg13`, and `vector_store` is created with `vector(384)` for `sentence-transformers/all-MiniLM-L6-v2`.
+- Embeddings use explicit `VLLM_EMBEDDING_URL`; the platform no longer derives embeddings from the chat completion endpoint by default.
+- If pgvector is missing, vector upsert/search degrades without failing incident flow.
 - Helm chart includes migration job assets for Kubernetes upgrades.
 - Helm assets exist for web, frontend, predictor, integration health cron, and cluster-agent related deployment.
 - Kubernetes monitored-cluster onboarding/install assets exist.

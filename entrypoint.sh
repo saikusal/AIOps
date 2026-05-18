@@ -25,16 +25,33 @@ if [ "${AIOPS_CODE_CONTEXT_ENABLED:-false}" = "true" ] && [ "${AIOPS_CODE_CONTEX
   fi
 fi
  
-# Create a superuser if one does not exist
-echo "Creating superuser..."
-python3 manage.py shell <<EOF
+# Bootstrap the platform super-admin if missing.
+# Configure via env: AIOPS_ADMIN_USERNAME, AIOPS_ADMIN_EMAIL, AIOPS_ADMIN_PASSWORD.
+# Defaults are dev-only — override in production via .env or Helm values.
+AIOPS_ADMIN_USERNAME="${AIOPS_ADMIN_USERNAME:-admin}"
+AIOPS_ADMIN_EMAIL="${AIOPS_ADMIN_EMAIL:-admin@example.com}"
+AIOPS_ADMIN_PASSWORD="${AIOPS_ADMIN_PASSWORD:-password}"
+
+if [ "${AIOPS_ADMIN_PASSWORD}" = "password" ]; then
+  echo "WARNING: AIOPS_ADMIN_PASSWORD is using the insecure dev default. Set it in your environment for non-local deployments."
+fi
+
+echo "Bootstrapping platform super-admin '${AIOPS_ADMIN_USERNAME}' (if missing)..."
+AIOPS_ADMIN_USERNAME="${AIOPS_ADMIN_USERNAME}" \
+AIOPS_ADMIN_EMAIL="${AIOPS_ADMIN_EMAIL}" \
+AIOPS_ADMIN_PASSWORD="${AIOPS_ADMIN_PASSWORD}" \
+python3 manage.py shell <<'EOF'
+import os
 from django.contrib.auth import get_user_model
 User = get_user_model()
-if not User.objects.filter(username='admin').exists():
-    User.objects.create_superuser('admin', 'admin@example.com', 'password')
-    print('Superuser created.')
+username = os.environ["AIOPS_ADMIN_USERNAME"]
+email = os.environ["AIOPS_ADMIN_EMAIL"]
+password = os.environ["AIOPS_ADMIN_PASSWORD"]
+if not User.objects.filter(username=username).exists():
+    User.objects.create_superuser(username, email, password)
+    print(f"Superuser '{username}' created.")
 else:
-    print('Superuser already exists.')
+    print(f"Superuser '{username}' already exists.")
 EOF
  
 if [ "$#" -gt 0 ]; then

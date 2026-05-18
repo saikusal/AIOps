@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import {
+  closeAlerts,
   createAlertNoiseRule,
   disableAlertNoiseRule,
   explainAnomaly,
@@ -14,7 +15,17 @@ import { useRefreshQueryOptions } from "../lib/refresh";
 import { useTenant } from "../lib/tenant";
 import { useQuery } from "@tanstack/react-query";
 
-function AlertCard({ alert }: { alert: AlertRecommendation }) {
+function AlertCard({
+  alert,
+  selected,
+  onToggleSelect,
+  canManageAlerts,
+}: {
+  alert: AlertRecommendation;
+  selected: boolean;
+  onToggleSelect: (alertId: string) => void;
+  canManageAlerts: boolean;
+}) {
   const [explanation, setExplanation] = useState<string | null>(null);
   const source = alert.latest_investigation || alert;
   const explainMutation = useMutation({
@@ -32,9 +43,20 @@ function AlertCard({ alert }: { alert: AlertRecommendation }) {
   return (
     <article key={alert.alert_id} className="prediction-card">
       <div className="prediction-card__top">
-        <div>
-          <div className="eyebrow">{alert.status || "unknown"}</div>
-          <h3>{alert.alert_name}</h3>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: "0.6rem" }}>
+          {canManageAlerts ? (
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={() => onToggleSelect(alert.alert_id)}
+              aria-label={`Select alert ${alert.alert_name}`}
+              style={{ marginTop: "0.3rem", cursor: "pointer" }}
+            />
+          ) : null}
+          <div>
+            <div className="eyebrow">{alert.status || "unknown"}</div>
+            <h3>{alert.alert_name}</h3>
+          </div>
         </div>
         <div
           className={`app-portfolio__status app-portfolio__status--${
@@ -93,6 +115,24 @@ export function AlertsPage() {
   const canManageAlerts = hasPermission("alerts.manage");
   const refreshQueryOptions = useRefreshQueryOptions();
   const [ruleType, setRuleType] = useState<"suppression" | "maintenance">("suppression");
+  const [selectedAlertIds, setSelectedAlertIds] = useState<Set<string>>(new Set());
+  const [closeReason, setCloseReason] = useState("");
+  const toggleAlertSelection = (alertId: string) => {
+    setSelectedAlertIds((cur) => {
+      const next = new Set(cur);
+      if (next.has(alertId)) next.delete(alertId);
+      else next.add(alertId);
+      return next;
+    });
+  };
+  const closeAlertsMutation = useMutation({
+    mutationFn: ({ alertIds, reason }: { alertIds: string[]; reason: string }) => closeAlerts(alertIds, reason),
+    onSuccess: () => {
+      setSelectedAlertIds(new Set());
+      setCloseReason("");
+      queryClient.invalidateQueries({ queryKey: ["recent-alerts"] });
+    },
+  });
   const [ruleForm, setRuleForm] = useState({
     name: "",
     alert_name: "",
@@ -278,11 +318,73 @@ export function AlertsPage() {
           <p>The alert feed is unavailable right now.</p>
         </section>
       ) : (
-        <section className="prediction-grid">
-          {(alertsQuery.data || []).map((alert) => (
-            <AlertCard key={alert.alert_id} alert={alert} />
-          ))}
-        </section>
+        <>
+          {canManageAlerts && (alertsQuery.data || []).length > 0 ? (
+            <section
+              className="page-card"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                flexWrap: "wrap",
+                gap: "0.75rem",
+                padding: "0.75rem 1rem",
+                marginBottom: "0.75rem",
+              }}
+            >
+              <strong style={{ fontSize: "0.85rem" }}>
+                {selectedAlertIds.size} selected
+              </strong>
+              <button
+                className="shell__link shell__link--small"
+                onClick={() => {
+                  const all = (alertsQuery.data || []).map((a) => a.alert_id);
+                  setSelectedAlertIds(selectedAlertIds.size === all.length ? new Set() : new Set(all));
+                }}
+              >
+                {selectedAlertIds.size === (alertsQuery.data || []).length ? "Clear all" : "Select all"}
+              </button>
+              <input
+                placeholder="Close reason (optional)"
+                value={closeReason}
+                onChange={(event) => setCloseReason(event.target.value)}
+                style={{ flex: "1 1 220px", minWidth: "180px", padding: "0.4rem 0.6rem" }}
+              />
+              <button
+                className="assistant-button"
+                onClick={() =>
+                  closeAlertsMutation.mutate({
+                    alertIds: Array.from(selectedAlertIds),
+                    reason: closeReason.trim(),
+                  })
+                }
+                disabled={selectedAlertIds.size === 0 || closeAlertsMutation.isPending}
+              >
+                {closeAlertsMutation.isPending ? "Closing..." : `Close ${selectedAlertIds.size || ""} alert${selectedAlertIds.size === 1 ? "" : "s"}`}
+              </button>
+              {closeAlertsMutation.isError ? (
+                <span style={{ color: "var(--color-status-down, #ef4444)", fontSize: "0.8rem" }}>
+                  {closeAlertsMutation.error instanceof Error ? closeAlertsMutation.error.message : "Close failed"}
+                </span>
+              ) : null}
+              {closeAlertsMutation.isSuccess && closeAlertsMutation.data ? (
+                <span style={{ color: "var(--color-status-healthy, #22c55e)", fontSize: "0.8rem" }}>
+                  Closed {closeAlertsMutation.data.closed_count} alert(s)
+                </span>
+              ) : null}
+            </section>
+          ) : null}
+          <section className="prediction-grid">
+            {(alertsQuery.data || []).map((alert) => (
+              <AlertCard
+                key={alert.alert_id}
+                alert={alert}
+                selected={selectedAlertIds.has(alert.alert_id)}
+                onToggleSelect={toggleAlertSelection}
+                canManageAlerts={canManageAlerts}
+              />
+            ))}
+          </section>
+        </>
       )}
     </>
   );

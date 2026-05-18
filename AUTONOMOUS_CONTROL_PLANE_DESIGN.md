@@ -12,7 +12,7 @@ Supporting assessment:
 
 - [CODE_CONTEXT_GAP_ASSESSMENT.md](./CODE_CONTEXT_GAP_ASSESSMENT.md)
 
-This document defines how the OpsMitra control plane should evolve from a structured investigation orchestrator into a more autonomous, multi-step investigation and remediation system.
+This document defines the implemented Track 2 autonomous control-plane architecture and the remaining hardening work. OpsMitra has evolved from a structured investigation orchestrator into a bounded, multi-step investigation and remediation system.
 
 The goal is not to give the LLM unrestricted power. The goal is to let the control plane:
 
@@ -38,29 +38,30 @@ The autonomous control plane should be able to:
 - verify results after diagnostics or remediation
 - persist the entire reasoning and execution lifecycle
 
-## Why This Track Is Needed
+## Implementation Status
 
-Today, OpsMitra already does significant orchestration:
+**Status: core Track 2 implemented.**
+
+OpsMitra now implements the main Track 2 architecture:
 
 - route classification
 - metrics, logs, and trace retrieval
 - code-context lookup
 - workflow staging
+- structured planner output
+- normalized evidence bundle generation
+- evidence assessment, confidence, contradictions, and missing-evidence handling
+- bounded iteration planning with stop conditions
+- persisted investigation runs, evidence bundles, snapshots, and transcripts
 - typed-action generation
 - policy checks
 - agent dispatch
 - post-command analysis
+- approval-aware execution
+- post-action verification
+- replay/ranking/outcome primitives
 
-However, the current control plane is still mostly a structured single-pass or two-pass orchestrator.
-
-It does not yet fully operate as a long-running internal loop that:
-
-- explicitly tracks investigation state,
-- detects missing evidence as first-class planning outputs,
-- repeatedly selects the next best tool,
-- stops only when enough evidence has been gathered or the safety boundary has been reached.
-
-That is the gap this track addresses.
+Remaining work is now production hardening rather than core Track 2 implementation: stronger queue isolation for expensive runs, larger golden-scenario regression suites, richer UI affordances for confidence trends, and broader load/failover validation.
 
 ## Core Principles
 
@@ -71,9 +72,9 @@ That is the gap this track addresses.
 5. The autonomy loop must have explicit stop conditions.
 6. Remediation must remain policy-aware and approval-aware.
 
-## Current State
+## Implemented Components
 
-The current codebase already contains important pieces of this track:
+The current codebase contains the implemented Track 2 components:
 
 - investigation routing in `genai/views.py`
 - MCP-style tool orchestration in `genai/mcp_orchestrator.py`
@@ -81,16 +82,22 @@ The current codebase already contains important pieces of this track:
 - workflow staging in `genai/multi_step_workflow.py`
 - typed actions in `genai/typed_actions.py`
 - execution intents, rankings, and replay data in `genai/models.py`
+- evidence bundle persistence through `EvidenceBundle`, `EvidenceSnapshot`, and investigation transcript records
+- stream snapshots and live investigation views through the investigation stream path
+- post-action verification, remediation outcomes, and replay evaluation records
+- React operator/admin surfaces for incidents, investigations, integrations, tenant access, and safety controls
+- pgvector-backed semantic retrieval for code context, runbooks, and incident memory through an explicit embedding endpoint
+- tenant-scoped audit, RBAC, incident lifecycle tracking, and integration writeback
 
-This means Track 2 is not starting from zero. It is an evolution of the current orchestrator into a deeper investigation loop.
+As of 2026-05-15, the platform is ready for controlled production rollout/internal production trial once deployment-specific security, backup/restore, integration-token, networking, and load-validation checks are completed. Remaining autonomy work should improve depth, resilience, and HA posture; it should not bypass the existing EGAP, RBAC, audit, and approval boundaries.
 
-One important dependency for Track 2 is the quality of the code-context engine. The current maturity and gaps are captured in [CODE_CONTEXT_GAP_ASSESSMENT.md](./CODE_CONTEXT_GAP_ASSESSMENT.md).
+The code-context engine and integration adapters remain quality multipliers for Track 2. Stronger code ownership data, trace/span binding, runbooks, and normalized telemetry improve investigation quality, but the autonomous control-plane loop itself is implemented.
 
 Another important dependency is Track 4, because the autonomy loop must be able to consume normalized telemetry from either native or external platforms.
 
-## Target Architecture
+## Implemented Architecture
 
-The autonomous control plane should be modeled as an internal state machine with cooperating stages:
+The autonomous control plane is modeled as an internal workflow with cooperating stages:
 
 1. `Incident Intake`
 2. `Scope Resolver`
@@ -103,7 +110,7 @@ The autonomous control plane should be modeled as an internal state machine with
 9. `Verifier`
 10. `Outcome Recorder`
 
-These stages should be explicit in both backend state and UI workflow rendering.
+These stages are represented through investigation workflow JSON, evidence snapshots, tool invocations, timeline events, and React investigation detail rendering.
 
 ## Investigation State Machine
 
@@ -121,7 +128,7 @@ Each investigation run should move through states such as:
 - `needs_operator_input`
 - `failed`
 
-This state machine should be persisted so the system can:
+This state is persisted through `InvestigationRun`, workflow JSON, snapshots, transcripts, tool invocations, execution intents, and timeline events so the system can:
 
 - resume interrupted investigations
 - show progress in the UI
@@ -385,35 +392,24 @@ This enables:
 - evaluation
 - auditability
 
-## Proposed Model Extensions
+## Implemented Persistence Mapping
 
-The current `InvestigationRun` and `ToolInvocation` models should be extended or complemented with:
+The original proposed model extensions are now represented by the following implemented records:
 
-- `InvestigationPlanSnapshot`
-- `EvidenceBundleSnapshot`
-- `EvidenceGap`
-- `HypothesisRecord`
-- `VerificationRecord`
-- `AutonomyDecisionRecord`
+| Proposed Concept | Implemented Representation |
+|---|---|
+| `InvestigationPlanSnapshot` | `InvestigationRun.planner_json`, `EvidenceSnapshot.planner_json` |
+| `EvidenceBundleSnapshot` | `EvidenceBundle`, `EvidenceSnapshot.evidence_bundle_json` |
+| `EvidenceGap` | normalized evidence assessment and planner `missing_evidence` fields |
+| `HypothesisRecord` | `InvestigationRun.hypotheses_json` and planner candidate hypotheses |
+| `VerificationRecord` | execution intent verification JSON, incident timeline verification events, remediation outcomes |
+| `AutonomyDecisionRecord` | workflow JSON, iteration plan stop/continue decisions, policy decisions, execution intents |
 
-Suggested purposes:
+This avoids adding unnecessary parallel tables while preserving auditability and replay value.
 
-- `InvestigationPlanSnapshot`
-  stores planner outputs per iteration
-- `EvidenceBundleSnapshot`
-  stores normalized evidence at each loop stage
-- `EvidenceGap`
-  stores explicit missing evidence items
-- `HypothesisRecord`
-  stores candidate causes and confidence
-- `VerificationRecord`
-  stores pre/post execution validation
-- `AutonomyDecisionRecord`
-  stores stop/continue/escalate decisions
+## API And Service Layer Status
 
-## API And Service Layer Changes
-
-Track 2 likely requires:
+Implemented:
 
 - investigation-run detail endpoint with stage snapshots
 - evidence-bundle serialization helpers
@@ -422,16 +418,17 @@ Track 2 likely requires:
 - verification result schema
 - iteration budget and stop-condition logic
 
-It should also push more orchestration logic out of large view functions into dedicated services.
+Remaining cleanup: continue moving orchestration logic out of large view functions into dedicated services as the product hardens.
 
-Suggested service modules:
+Current service modules already covering most of the original proposal:
 
-- `genai/autonomy/planner.py`
-- `genai/autonomy/evidence.py`
-- `genai/autonomy/hypotheses.py`
-- `genai/autonomy/decision_gate.py`
-- `genai/autonomy/verifier.py`
-- `genai/autonomy/runtime_resolution.py`
+- `genai/multi_step_workflow.py`
+- `genai/mcp_orchestrator.py`
+- `genai/mcp_services.py`
+- `genai/tools/investigation.py`
+- `genai/typed_actions.py`
+- `genai/policy_engine.py`
+- `genai/execution_safety.py`
 
 ## UI Requirements
 
@@ -485,45 +482,44 @@ These should feed:
 - replay evaluation
 - future planner heuristics
 
-## Rollout Plan
+## Rollout Plan Status
 
-### Phase 1: Explicit Investigation State
+### Phase 1: Explicit Investigation State - Complete
 
-- add investigation state machine fields
-- persist current stage and iteration count
-- expose run details in the backend
+- investigation runs persist planner/workflow/evidence/hypothesis state
+- evidence snapshots and transcripts preserve stage-level context
+- run detail and stream endpoints expose state to React
 
-### Phase 2: Structured Planner Output
+### Phase 2: Structured Planner Output - Complete
 
-- define planner schema
-- store missing evidence and hypotheses explicitly
-- stop relying on free-form plan text alone
+- planner schema and candidate hypotheses exist
+- missing evidence is carried through planner/evidence assessment
+- free-form reasoning is grounded by structured evidence JSON
 
-### Phase 3: Evidence Bundle Normalization
+### Phase 3: Evidence Bundle Normalization - Complete
 
-- unify metrics/logs/traces/code/topology into one evidence bundle structure
-- attach relevance/freshness/confidence metadata
+- metrics, logs, traces, code context, topology, runbooks, and policy constraints are normalized into evidence bundles
+- confidence, contradiction, and evidence-gap assessments are generated
 
-### Phase 4: Next-Step Selection
+### Phase 4: Next-Step Selection - Complete
 
-- add bounded next-tool selection
-- support multiple internal evidence-gathering iterations
-- add iteration limits and stop conditions
+- bounded next-tool categories and iteration planning exist
+- stop conditions include sufficient evidence and iteration budget
 
-### Phase 5: Verification And Outcome Loop
+### Phase 5: Verification And Outcome Loop - Complete
 
-- formalize post-command verification
-- store verification records
-- loop back if the incident is not actually resolved
+- post-command verification is recorded
+- remediation outcomes and execution-intent verification fields exist
+- incident status remains unresolved or verification-pending when evidence does not support closure
 
-### Phase 6: Learning Integration
+### Phase 6: Learning Integration - Substantially Complete
 
-- link autonomy decisions to ranking and replay data
-- surface loop quality metrics on the operations dashboard
+- remediation ranking, replay evaluations, behavior versions, feedback, and outcomes exist
+- remaining work is broader golden-scenario coverage and production dashboards for autonomy quality trends
 
 ## Recommended Build Order
 
-Implement in this order:
+Historical build order, now completed at core level:
 
 1. investigation state machine
 2. planner and evidence-gap schema
@@ -535,7 +531,7 @@ Implement in this order:
 
 ## Expected Outcome
 
-With Track 2 implemented, OpsMitra should evolve from:
+With Track 2 implemented, OpsMitra has evolved from:
 
 - a structured single-pass investigation assistant
 
@@ -543,4 +539,4 @@ to:
 
 - a bounded, explainable, multi-step autonomous investigation and remediation orchestrator
 
-It will still remain policy-aware and approval-aware, but it will handle far more of the reasoning loop itself.
+It remains policy-aware and approval-aware, but it now handles far more of the reasoning loop itself.

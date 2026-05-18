@@ -13,19 +13,30 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+import os
+
 from django.contrib import admin
+from django.http import JsonResponse
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 from django.views.generic import RedirectView
 
+
+def healthz(_request):
+    return JsonResponse({"status": "ok"})
+
+
 urlpatterns = [
-    path('admin/', admin.site.urls),
     path('', RedirectView.as_view(url='/genai/widget/', permanent=False)),
+    path('healthz/', healthz, name='healthz'),
     path('accounts/', include('allauth.urls')),
     path('genai/', include('genai.urls')),
     path('documents/', include('doc_search.urls')),
 ]
+
+if os.getenv("ENABLE_DJANGO_ADMIN", "false").strip().lower() in {"1", "true", "yes", "on"}:
+    urlpatterns.insert(0, path('admin/', admin.site.urls))
 
 # This is the correct and standard way to serve static and media files in a
 # development environment.

@@ -181,12 +181,46 @@ def permissions_for_role(role: str) -> set[str]:
     return set(permissions)
 
 
+def all_known_permissions() -> set[str]:
+    """Union of every permission string referenced by any built-in role."""
+    expanded: set[str] = set()
+    for role_permissions in ROLE_PERMISSIONS.values():
+        for value in role_permissions:
+            if value != "*":
+                expanded.add(value)
+    return expanded
+
+
+def membership_permissions(membership) -> set[str]:
+    """All permissions granted to a membership: role permissions + extra grants."""
+    if not membership:
+        return set()
+    role_permissions = ROLE_PERMISSIONS.get(membership.role, set())
+    if "*" in role_permissions:
+        return all_known_permissions()
+    permissions = set(role_permissions)
+    extras = getattr(membership, "extra_permissions", None) or []
+    if isinstance(extras, (list, tuple, set)):
+        for value in extras:
+            if isinstance(value, str) and value:
+                permissions.add(value)
+    return permissions
+
+
 def has_permission(request: HttpRequest, permission: str) -> bool:
+    user = getattr(request, "user", None)
+    if user is not None and getattr(user, "is_superuser", False):
+        return True
     membership = getattr(request, "tenant_membership", None)
     if not membership:
         return False
     role_permissions = ROLE_PERMISSIONS.get(membership.role, set())
-    return "*" in role_permissions or permission in role_permissions
+    if "*" in role_permissions or permission in role_permissions:
+        return True
+    extras = getattr(membership, "extra_permissions", None) or []
+    if isinstance(extras, (list, tuple, set)) and permission in extras:
+        return True
+    return False
 
 
 def require_permission(permission: str):

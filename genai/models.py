@@ -57,6 +57,7 @@ class TenantMembership(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="aiops_tenant_memberships")
     role = models.CharField(max_length=32, choices=TENANT_ROLE_CHOICES, default=TENANT_ROLE_VIEWER)
     is_active = models.BooleanField(default=True)
+    extra_permissions = models.JSONField(default=list, blank=True)
     invited_by = models.ForeignKey(
         User,
         null=True,

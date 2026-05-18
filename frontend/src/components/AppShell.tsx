@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
-import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { useAuth } from "../lib/auth";
 import { useRefreshInterval } from "../lib/refresh";
 import { useTenant } from "../lib/tenant";
 
@@ -32,10 +33,21 @@ function navGlyph(label: string): string {
 
 export function AppShell() {
   const location = useLocation();
+  const navigate = useNavigate();
   const { refreshMs, setRefreshMs, options } = useRefreshInterval();
   const { current, tenants, switchTenant, switchPending, hasPermission } = useTenant();
-  const currentNav = navItems.find((item) => location.pathname.startsWith(item.to));
+  const { user, logout } = useAuth();
+  const navItemsForUser = [
+    ...navItems,
+    ...(user?.is_superuser ? [{ to: "/admin", label: "Platform Admin", meta: "Tenants · Users · Permissions" }] : []),
+  ];
+  const currentNav = navItemsForUser.find((item) => location.pathname.startsWith(item.to));
   const pageTitle = currentNav?.label ?? "Operational Intelligence";
+
+  const handleSignOut = async () => {
+    await logout();
+    navigate("/login", { replace: true });
+  };
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     if (typeof window === "undefined") return "dark";
     const stored = window.localStorage.getItem("aiops-theme");
@@ -72,7 +84,7 @@ export function AppShell() {
         </div>
 
         <nav className="shell__nav">
-          {navItems.filter((item) => !item.permission || hasPermission(item.permission)).map((item) => (
+          {navItemsForUser.filter((item) => !("permission" in item && item.permission) || hasPermission((item as { permission: string }).permission)).map((item) => (
             <NavLink
               key={item.to}
               className={({ isActive }) => `shell__nav-link${isActive ? " is-active" : ""}`}
@@ -153,9 +165,22 @@ export function AppShell() {
                 ))}
               </select>
             </label>
-            <a className="shell__link" href="/genai/logout/">
+            {user ? (
+              <div className="shell__user" style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.78rem", color: "var(--color-muted, #9ca3af)" }}>
+                <span>
+                  {user.username}
+                  {user.is_superuser ? " · admin" : ""}
+                </span>
+              </div>
+            ) : null}
+            <button
+              type="button"
+              className="shell__link"
+              onClick={handleSignOut}
+              style={{ background: "none", border: "none", cursor: "pointer", padding: 0, font: "inherit" }}
+            >
               Sign Out
-            </a>
+            </button>
           </div>
         </header>
         <header className="shell__header">

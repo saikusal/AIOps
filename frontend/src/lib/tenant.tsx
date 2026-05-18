@@ -1,6 +1,7 @@
 import { createContext, useContext, useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { fetchCurrentTenant, selectTenant, type TenantContextPayload, type TenantMembership } from "./api";
+import { useAuth } from "./auth";
 
 type TenantContextValue = {
   current?: TenantMembership;
@@ -21,10 +22,12 @@ const TenantContext = createContext<TenantContextValue>({
 
 export function TenantProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const tenantQuery = useQuery<TenantContextPayload>({
     queryKey: ["tenant-context"],
     queryFn: fetchCurrentTenant,
     retry: false,
+    enabled: !!user,
   });
   const switchMutation = useMutation({
     mutationFn: selectTenant,

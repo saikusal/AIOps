@@ -32,6 +32,7 @@ Environment variables:
   WEAVIATE_URL            http://weaviate:8080          (default)
   WEAVIATE_API_KEY        optional API key for WCS
   VECTOR_EMBED_MODEL      model name hint               (default: text-embedding-3-small)
+  VLLM_EMBEDDING_URL      explicit OpenAI-compatible embeddings endpoint
 """
 
 from __future__ import annotations
@@ -67,6 +68,10 @@ def _resolve_embedding_endpoint() -> str:
     explicit_url = os.environ.get("VLLM_EMBEDDING_URL", "").strip()
     if explicit_url:
         return explicit_url
+
+    derive_from_chat = os.environ.get("VLLM_DERIVE_EMBEDDING_URL_FROM_CHAT", "false").strip().lower()
+    if derive_from_chat not in {"1", "true", "yes", "on"}:
+        return ""
 
     base_url = os.environ.get("VLLM_API_URL", "").strip()
     if not base_url:
@@ -177,6 +182,7 @@ class PgvectorBackend(VectorBackend):
     def __init__(self, dimensions: int = PGVECTOR_DIMENSIONS):
         self._dims = dimensions
         self._initialised = False
+        self._available = True
 
     @property
     def backend_name(self) -> str:
@@ -213,11 +219,13 @@ class PgvectorBackend(VectorBackend):
                 """)
                 conn.connection.commit()
                 self._initialised = True
+                self._available = True
                 logger.info("pgvector schema initialised (dims=%d)", self._dims)
             except Exception as exc:
                 logger.warning("pgvector schema setup failed (extension may not be installed): %s", exc)
                 conn.connection.rollback()
                 self._initialised = True  # don't retry repeatedly
+                self._available = False
 
     def upsert(
         self,
@@ -228,6 +236,9 @@ class PgvectorBackend(VectorBackend):
     ) -> bool:
         import json as _json
         self._ensure_schema()
+        if not self._available:
+            logger.debug("pgvector backend unavailable; skipping upsert for %s/%s", collection, object_id)
+            return False
         meta_str = _json.dumps(metadata or {})
         vector_str = f"[{','.join(str(v) for v in vector)}]"
         conn = self._conn()
@@ -257,6 +268,9 @@ class PgvectorBackend(VectorBackend):
     ) -> List[Dict[str, Any]]:
         import json as _json
         self._ensure_schema()
+        if not self._available:
+            logger.debug("pgvector backend unavailable; skipping search for %s", collection)
+            return []
         vector_str = f"[{','.join(str(v) for v in vector)}]"
         conn = self._conn()
         try:
@@ -286,6 +300,9 @@ class PgvectorBackend(VectorBackend):
 
     def delete(self, collection: str, object_id: str) -> bool:
         self._ensure_schema()
+        if not self._available:
+            logger.debug("pgvector backend unavailable; skipping delete for %s/%s", collection, object_id)
+            return False
         conn = self._conn()
         try:
             with conn.cursor() as cur:

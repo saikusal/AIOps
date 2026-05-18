@@ -227,6 +227,8 @@ export function IncidentsPage() {
     remediation_target_host?: string;
     remediation_why?: string;
     remediation_requires_approval?: boolean;
+    demo_command_bypass?: boolean;
+    policy_decision?: Record<string, unknown>;
     diagnostic_typed_action?: TypedAction;
     remediation_typed_action?: TypedAction;
     decision_policy?: string;
@@ -303,6 +305,10 @@ export function IncidentsPage() {
         source.analysis_sections?.remediation_requires_approval ??
         executionOverlay.remediation_requires_approval ??
         executionOverlay.analysis_sections?.remediation_requires_approval,
+      demo_command_bypass:
+        source.demo_command_bypass ??
+        executionOverlay.demo_command_bypass ??
+        Boolean(executionOverlay.policy_decision?.demo_command_bypass),
       diagnostic_typed_action:
         source.diagnostic_typed_action ||
         executionOverlay.diagnostic_typed_action,
@@ -437,6 +443,10 @@ export function IncidentsPage() {
           remediation_execution_status: payload.execution_status,
           remediation_last_execution_at: payload.last_execution_at,
           remediation_intent_id: rawPayload.execution_intent_id,
+          policy_decision: rawPayload.policy_decision,
+          demo_command_bypass:
+            payload.demo_command_bypass ||
+            Boolean(rawPayload.policy_decision?.demo_command_bypass),
           post_remediation_ai_analysis: payload.final_answer,
           remediation_output: payload.command_output,
           analysis_sections: payload.analysis_sections,
@@ -811,7 +821,11 @@ export function IncidentsPage() {
                           <code>{deepDiveEntry.remediation_command}</code>
                           <div className="page-card__meta">
                             <span>Target: {deepDiveEntry.remediation_target_host || deepDiveEntry.target_host || "Unavailable"}</span>
-                            {deepDiveEntry.remediation_requires_approval ? <span>Approval gate active</span> : null}
+                            {deepDiveEntry.demo_command_bypass ? (
+                              <span>Demo unrestricted mode</span>
+                            ) : deepDiveEntry.remediation_requires_approval ? (
+                              <span>Approval gate active</span>
+                            ) : null}
                           </div>
 
                           {/* RemediationSafetyPanel — approval, break-glass, rollback, verify */}

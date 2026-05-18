@@ -13,7 +13,7 @@ import csv
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Tuple, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -31,7 +31,7 @@ from django.shortcuts import redirect, render
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.clickjacking import xframe_options_exempt
 from django.views.decorators.http import require_GET
-from django.db import connection, models
+from django.db import DatabaseError, connection, models
 from django.core.cache import cache
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime as django_parse_datetime
@@ -41,6 +41,7 @@ import pandas as pd
 
 from .models import (
     AgentBehaviorVersion,
+    AlertEvent,
     AlertSuppression,
     ChatMessage,
     ChatSession,
@@ -87,6 +88,8 @@ from .models import (
     PolicyPack,
     TargetServiceBinding,
     TelemetryProfile,
+    Tenant,
+    TenantAuditEvent,
     TenantInvitation,
     TenantMembership,
 )
@@ -168,8 +171,12 @@ from .blast_radius_estimation import estimate_blast_radius as estimate_pre_execu
 from .rollback_snapshots import capture_pre_execution_snapshot, build_rollback_command_from_snapshot
 from .egap_protocol import egap_dispatch as _egap_dispatch_direct
 from .tenancy import (
+    all_known_permissions,
     audit_event,
+    ensure_default_membership,
+    get_default_tenant,
     has_permission,
+    membership_permissions,
     permissions_for_role,
     require_permission,
     resolve_request_tenant,
@@ -774,6 +781,11 @@ def _alert_source_name(from_alertmanager: bool, alert_payload: Optional[Dict[str
     return str(payload.get("source") or "manual")
 
 
+def _resolve_alert_ingest_tenant(request: HttpRequest):
+    """Alertmanager/webhook requests are unauthenticated, so they use the default workspace."""
+    return getattr(request, "tenant", None) or get_default_tenant()
+
+
 def _serialize_correlation_links(links: List[Any]) -> List[Dict[str, Any]]:
     payload = []
     for link in links:
@@ -851,6 +863,7 @@ def _serialize_external_tickets(incident: Incident) -> List[Dict[str, Any]]:
 
 
 def _materialize_grouped_alert_incidents(primary_alert: Dict[str, Any], *, source: str = "alertmanager", tenant=None) -> List[Dict[str, Any]]:
+    tenant = tenant or get_default_tenant()
     grouped_alerts = primary_alert.get("grouped_alerts") if isinstance(primary_alert.get("grouped_alerts"), list) else []
     materialized: List[Dict[str, Any]] = []
     for grouped_alert in grouped_alerts:
@@ -920,6 +933,7 @@ def _correlate_alert_to_incident(
     auto_investigate: bool = True,
     tenant=None,
 ) -> Incident:
+    tenant = tenant or get_default_tenant()
     labels = alert_payload.get("labels") if isinstance(alert_payload.get("labels"), dict) else {}
     annotations = alert_payload.get("annotations") if isinstance(alert_payload.get("annotations"), dict) else {}
     alert_name = alert_payload.get("alert_name") or labels.get("alertname") or "unknown_alert"
@@ -1033,32 +1047,46 @@ def _compute_incident_revenue_impact(incident: Incident) -> Optional[Dict[str, A
     if orders_related:
         start_utc = opened_at.astimezone(ZoneInfo("UTC"))
         end_utc = resolved_at.astimezone(ZoneInfo("UTC"))
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT COUNT(*) FROM demo_orders
-                WHERE created_at >= %s AND created_at <= %s
-                """,
-                [start_utc, end_utc],
-            )
-            total_orders = cursor.fetchone()[0] or 0
+        try:
+            with connection.cursor() as cursor:
+                existing_tables = set(connection.introspection.table_names(cursor))
+                if not {"demo_orders", "demo_billing"}.issubset(existing_tables):
+                    raise LookupError("demo order impact tables are not installed")
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) FROM demo_orders
+                    WHERE created_at >= %s AND created_at <= %s
+                    """,
+                    [start_utc, end_utc],
+                )
+                total_orders = cursor.fetchone()[0] or 0
 
-            cursor.execute(
-                """
-                SELECT COUNT(DISTINCT o.order_ref)
-                FROM demo_orders o
-                LEFT JOIN demo_billing b
-                  ON o.order_ref = b.order_ref AND b.status = 'authorized'
-                WHERE o.created_at >= %s AND o.created_at <= %s
-                  AND b.order_ref IS NULL
-                """,
-                [start_utc, end_utc],
-            )
-            failed_transactions = cursor.fetchone()[0] or 0
+                cursor.execute(
+                    """
+                    SELECT COUNT(DISTINCT o.order_ref)
+                    FROM demo_orders o
+                    LEFT JOIN demo_billing b
+                      ON o.order_ref = b.order_ref AND b.status = 'authorized'
+                    WHERE o.created_at >= %s AND o.created_at <= %s
+                      AND b.order_ref IS NULL
+                    """,
+                    [start_utc, end_utc],
+                )
+                failed_transactions = cursor.fetchone()[0] or 0
 
-        revenue_lost = round(failed_transactions * avg_order_value, 2)
-        revenue_per_hour = round(revenue_lost / duration_hours, 2) if duration_hours > 0 else revenue_lost
-        data_source = "demo_orders+demo_billing"
+            revenue_lost = round(failed_transactions * avg_order_value, 2)
+            revenue_per_hour = round(revenue_lost / duration_hours, 2) if duration_hours > 0 else revenue_lost
+            data_source = "demo_orders+demo_billing"
+        except (DatabaseError, LookupError) as exc:
+            logger.warning("Revenue impact DB calculation skipped for incident %s: %s", incident.incident_key, exc)
+            baseline_per_hour = IMPACT_BASELINE_TX_PER_DAY / 24.0
+            total_orders = round(baseline_per_hour * duration_hours)
+            severity_error_map = {"critical": 0.25, "high": 0.15, "warning": 0.08, "low": 0.04}
+            error_rate = severity_error_map.get((incident.severity or "").lower(), 0.10)
+            failed_transactions = round(total_orders * error_rate)
+            revenue_lost = round(failed_transactions * avg_order_value, 2)
+            revenue_per_hour = round(revenue_lost / duration_hours, 2) if duration_hours > 0 else revenue_lost
+            data_source = "estimated_missing_demo_tables"
     else:
         # Synthetic estimate for non-orders services
         baseline_per_hour = IMPACT_BASELINE_TX_PER_DAY / 24.0
@@ -1481,6 +1509,11 @@ def _to_bool(v, default=False):
     if isinstance(v, str):
         return v.strip().lower() in ("1", "true", "yes", "y")
     return default
+
+
+def _demo_command_bypass_enabled() -> bool:
+    return _to_bool(os.getenv("AIOPS_DEMO_COMMAND_BYPASS"), default=False)
+
 
 def _safe_preview_value(val, max_len=80):
     try:
@@ -4497,6 +4530,7 @@ def _incident_deep_dive_projection(
     remediation_payload = remediation_event.payload if remediation_event and isinstance(remediation_event.payload, dict) else {}
     diagnostic_sections = diagnostic_payload.get("analysis_sections") if isinstance(diagnostic_payload.get("analysis_sections"), dict) else {}
     remediation_sections = remediation_payload.get("analysis_sections") if isinstance(remediation_payload.get("analysis_sections"), dict) else {}
+    demo_command_bypass = _demo_command_bypass_enabled()
     live_alert_plan: Dict[str, Any] = {}
     if incident and not diagnostic_event and not linked.get("diagnostic_command"):
         active_alert = (
@@ -4622,12 +4656,13 @@ def _incident_deep_dive_projection(
             investigation.get("remediation_why"),
             "",
         ),
-        "remediation_requires_approval": _first_present(
+        "remediation_requires_approval": False if demo_command_bypass else _first_present(
             linked.get("remediation_requires_approval"),
             (analysis_sections or {}).get("remediation_requires_approval"),
             investigation.get("remediation_requires_approval"),
             False,
         ),
+        "demo_command_bypass": demo_command_bypass,
         "remediation_typed_action": _first_present(
             linked.get("remediation_typed_action"),
             remediation_sections.get("remediation_typed_action"),
@@ -6713,7 +6748,9 @@ def get_faq_questions(request):
 
 # ---------------- chat sessions, auth, incident views ----------------
 def _serialize_tenant_membership(membership: TenantMembership) -> Dict[str, Any]:
-    permissions = sorted(permissions_for_role(membership.role))
+    permissions = sorted(membership_permissions(membership))
+    extras_raw = getattr(membership, "extra_permissions", None) or []
+    extras = sorted({value for value in extras_raw if isinstance(value, str) and value})
     return {
         "membership_id": str(membership.membership_id),
         "tenant_id": str(membership.tenant.tenant_id),
@@ -6722,11 +6759,13 @@ def _serialize_tenant_membership(membership: TenantMembership) -> Dict[str, Any]
         "domain": membership.tenant.domain,
         "role": membership.role,
         "permissions": permissions,
+        "extra_permissions": extras,
         "user": {
             "id": membership.user_id,
             "username": membership.user.get_username(),
             "email": membership.user.email or "",
             "is_active": bool(membership.user.is_active),
+            "is_superuser": bool(membership.user.is_superuser),
         },
         "is_active": bool(membership.is_active),
     }
@@ -6970,6 +7009,76 @@ def logout_view(request):
     return redirect("/genai/login/")
 
 
+@csrf_exempt
+def auth_login_api_view(request: HttpRequest):
+    """JSON login endpoint for the React app.
+
+    POST {"username": "...", "password": "..."}
+    Returns {"status": "ok", "user": {...}} on success and sets a session cookie.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except Exception:
+        return JsonResponse({"error": "invalid_body"}, status=400)
+
+    username = str(body.get("username") or "").strip()
+    password = body.get("password") or ""
+    if not username or not password:
+        return JsonResponse({"error": "credentials_required"}, status=400)
+
+    user = authenticate(request, username=username, password=password)
+    if user is None or not user.is_active:
+        return JsonResponse({"error": "invalid_credentials"}, status=401)
+
+    auth_login(request, user)
+    ensure_default_membership(user)
+    return JsonResponse(
+        {
+            "status": "ok",
+            "user": {
+                "id": user.id,
+                "username": user.get_username(),
+                "email": user.email or "",
+                "is_superuser": bool(user.is_superuser),
+                "is_staff": bool(user.is_staff),
+            },
+        }
+    )
+
+
+@csrf_exempt
+def auth_logout_api_view(request: HttpRequest):
+    """JSON logout endpoint. Clears the session."""
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    auth_logout(request)
+    return JsonResponse({"status": "ok"})
+
+
+def auth_session_view(request: HttpRequest):
+    """Returns the current session user (or 401 if not authenticated).
+
+    Used by the React app at boot to decide whether to redirect to /login.
+    """
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        return JsonResponse({"authenticated": False}, status=401)
+    return JsonResponse(
+        {
+            "authenticated": True,
+            "user": {
+                "id": user.id,
+                "username": user.get_username(),
+                "email": user.email or "",
+                "is_superuser": bool(user.is_superuser),
+                "is_staff": bool(user.is_staff),
+            },
+        }
+    )
+
+
 # ---------------- admin console view (document upload + process) ----------------
 @login_required
 def genai_console(request):
@@ -7010,19 +7119,19 @@ def widget_view(request):
 
 @login_required
 def assistant_app_view(request):
-    return render(request, 'genai/assistant.html', {"active_nav": "assistant"})
+    return redirect("/assistant")
 
 
 @login_required
 def applications_dashboard_view(request):
-    return render(request, 'genai/applications_dashboard.html', {"active_nav": "applications"})
+    return redirect("/topology")
 
 
 @login_required
 def code_context_dashboard_view(request: HttpRequest):
     if not has_permission(request, "code_context.read"):
         return JsonResponse({"error": "permission_denied", "required_permission": "code_context.read"}, status=403)
-    return render(request, "genai/code_context_dashboard.html", {"active_nav": "code_context"})
+    return redirect("/code-context")
 
 
 @login_required
@@ -7640,7 +7749,7 @@ def integration_test_view(request: HttpRequest, integration_ref: str):
 def investigations_dashboard_view(request: HttpRequest):
     if not has_permission(request, "investigations.read"):
         return JsonResponse({"error": "permission_denied", "required_permission": "investigations.read"}, status=403)
-    return render(request, "genai/investigations_dashboard.html", {"active_nav": "investigations"})
+    return redirect("/investigations")
 
 
 @login_required
@@ -7952,7 +8061,7 @@ async def investigation_stream_view(request: HttpRequest, run_id: str):
 def operations_dashboard_view(request: HttpRequest):
     if not has_permission(request, "operations.read"):
         return JsonResponse({"error": "permission_denied", "required_permission": "operations.read"}, status=403)
-    return render(request, "genai/operations_dashboard.html", {"active_nav": "operations"})
+    return redirect("/analytics")
 
 
 @login_required
@@ -8289,7 +8398,7 @@ def application_graph_view(request: HttpRequest, application_key: str):
 def alerts_dashboard_view(request):
     if not has_permission(request, "alerts.read"):
         return JsonResponse({"error": "permission_denied", "required_permission": "alerts.read"}, status=403)
-    return render(request, 'genai/alerts_dashboard.html', {"active_nav": "alerts"})
+    return redirect("/alerts")
 
 
 @login_required
@@ -8315,7 +8424,7 @@ def incidents_recent_view(request: HttpRequest):
 def incident_timeline_page_view(request: HttpRequest, incident_key: str):
     if not has_permission(request, "incidents.read"):
         return JsonResponse({"error": "permission_denied", "required_permission": "incidents.read"}, status=403)
-    return render(request, "genai/incident_timeline.html", {"incident_key": incident_key})
+    return redirect(f"/incidents?incident={quote(str(incident_key), safe='')}")
 
 
 @login_required
@@ -8420,7 +8529,7 @@ def ingest_alert_view(request: HttpRequest):
     logger.info(f"[INGEST] Alert received: {alert_name} | From AlertManager: {from_alertmanager}")
     alert_status = str(alert_payload.get("status") or "firing").lower()
     alert_source = _alert_source_name(from_alertmanager, alert_payload)
-    tenant = getattr(request, "tenant", None)
+    tenant = _resolve_alert_ingest_tenant(request)
     alert_event, alert_event_duplicate = persist_alert_event(alert_payload, source=alert_source, tenant=tenant)
     suppressed, suppression_reason = evaluate_suppression(alert_event)
     if suppressed:
@@ -8864,6 +8973,94 @@ def alerts_noise_view(request: HttpRequest):
     return JsonResponse(noise_reduction_stats(minutes=minutes, tenant=getattr(request, "tenant", None)))
 
 
+@login_required
+@csrf_exempt
+def alerts_close_view(request: HttpRequest):
+    """Manually close (resolve) one or more alerts from the operator dashboard.
+
+    Body: {"alert_ids": ["alert-...", ...], "reason": "optional"}
+    Marks each matching cached alert as resolved and updates the underlying
+    AlertEvent rows to status=resolved with ends_at=now.
+    """
+    if request.method not in {"POST", "PATCH"}:
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    if not has_permission(request, "alerts.manage"):
+        return JsonResponse({"error": "permission_denied", "required_permission": "alerts.manage"}, status=403)
+
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except Exception:
+        return JsonResponse({"error": "invalid_body"}, status=400)
+
+    raw_ids = body.get("alert_ids") or []
+    if isinstance(raw_ids, str):
+        raw_ids = [raw_ids]
+    alert_ids = {str(value).strip() for value in raw_ids if str(value).strip()}
+    if not alert_ids:
+        return JsonResponse({"error": "alert_ids_required"}, status=400)
+    reason = str(body.get("reason") or "").strip()
+    actor = request.user.get_username() if getattr(request, "user", None) and request.user.is_authenticated else "system"
+    closed_at = timezone.now()
+    closed_at_iso = closed_at.isoformat()
+
+    entries = cache.get(RECENT_ALERT_CACHE_KEY) or []
+    if not isinstance(entries, list):
+        entries = []
+
+    closed_records: List[Dict[str, Any]] = []
+    updated_entries: List[Dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            updated_entries.append(entry)
+            continue
+        entry_id = str(entry.get("alert_id") or "").strip()
+        if entry_id and entry_id in alert_ids:
+            patched = {
+                **entry,
+                "status": "resolved",
+                "closed_at": closed_at_iso,
+                "closed_by": actor,
+                "close_reason": reason,
+            }
+            updated_entries.append(patched)
+            closed_records.append(patched)
+        else:
+            updated_entries.append(entry)
+    cache.set(RECENT_ALERT_CACHE_KEY, updated_entries[:MAX_RECENT_ALERTS], RECENT_ALERT_CACHE_TTL)
+
+    alert_event_qs = tenant_queryset(request, AlertEvent)
+    closed_event_count = 0
+    for record in closed_records:
+        lifecycle_key = str(record.get("lifecycle_key") or "").strip()
+        if not lifecycle_key:
+            continue
+        events = alert_event_qs.filter(lifecycle_key=lifecycle_key).exclude(status="resolved")
+        for event in events:
+            event.status = "resolved"
+            if not event.ends_at:
+                event.ends_at = closed_at
+            event.save(update_fields=["status", "ends_at", "last_seen_at"])
+            closed_event_count += 1
+
+    audit_event(
+        request,
+        "alerts.closed",
+        object_type="alert",
+        object_id=",".join(sorted(alert_ids)),
+        metadata={"reason": reason, "count": len(closed_records), "events_updated": closed_event_count},
+    )
+
+    return JsonResponse(
+        {
+            "status": "closed",
+            "closed_count": len(closed_records),
+            "events_updated": closed_event_count,
+            "closed_alert_ids": [str(record.get("alert_id") or "") for record in closed_records],
+            "closed_at": closed_at_iso,
+        }
+    )
+
+
 def _parse_request_datetime(value: Any):
     if not value:
         return None
@@ -9106,6 +9303,7 @@ def execute_command_view(request: HttpRequest):
         )
         environment = str(policy_decision.get("environment") or "")
         service_name = str(execution_context.get("service_name") or "")
+        demo_command_bypass = _demo_command_bypass_enabled()
 
         # Pre-execution blast radius estimation (B2)
         pre_blast_radius = estimate_pre_execution_blast_radius(
@@ -9116,7 +9314,12 @@ def execute_command_view(request: HttpRequest):
             target_host=str(target_host or ""),
         )
         # Upgrade requires_approval if blast radius estimate says so
-        if pre_blast_radius.get("requires_approval") and policy_decision.get("decision") == "allowed" and not break_glass:
+        if (
+            pre_blast_radius.get("requires_approval")
+            and policy_decision.get("decision") == "allowed"
+            and not break_glass
+            and not demo_command_bypass
+        ):
             policy_decision = {
                 **policy_decision,
                 "decision": "requires_approval",
@@ -9211,7 +9414,15 @@ def execute_command_view(request: HttpRequest):
         if reused_existing and intent.response_json and not approval_token:
             return JsonResponse(intent.response_json)
 
-        frequency_check = _check_service_execution_frequency(service_name, policy_pack=_pack_dict)
+        frequency_check = (
+            {
+                "allowed": True,
+                "reason": "Service execution frequency checks bypassed by demo command mode.",
+                "demo_command_bypass": True,
+            }
+            if demo_command_bypass
+            else _check_service_execution_frequency(service_name, policy_pack=_pack_dict)
+        )
         if not frequency_check["allowed"]:
             policy_decision = {
                 **policy_decision,
@@ -9325,6 +9536,7 @@ def execute_command_view(request: HttpRequest):
                 "typed_action": resolved_typed_action,
                 "typed_action_summary": action_summary(resolved_typed_action),
                 "policy_decision": policy_decision,
+                "demo_command_bypass": demo_command_bypass,
                 "ranking": ranking,
                 "estimated_blast_radius": pre_blast_radius,
                 "behavior_version": current_behavior_version_payload(),
@@ -9414,7 +9626,8 @@ def execute_command_view(request: HttpRequest):
                     "remediation_requires_approval": _to_bool(
                         analysis_sections.get("remediation_requires_approval"),
                         default=_to_bool((linked_recommendation or {}).get("remediation_requires_approval"), default=False),
-                    ),
+                    ) if not demo_command_bypass else False,
+                    "demo_command_bypass": demo_command_bypass,
                     "remediation_typed_action": analysis_sections.get("remediation_typed_action") or ((linked_recommendation or {}).get("remediation_typed_action")) or {},
                     "agent_response": agent_response,
                     "verification": verification,
@@ -9472,6 +9685,7 @@ def execute_command_view(request: HttpRequest):
                             "remediation_variance": remediation_variance or None,
                             "incident_state_fingerprint": state_fingerprint,
                             "policy_decision": policy_decision,
+                            "demo_command_bypass": demo_command_bypass,
                             "typed_action": resolved_typed_action,
                         }),
                     )
@@ -9574,6 +9788,7 @@ def execute_command_view(request: HttpRequest):
             "remediation_variance": remediation_variance or None,
             "incident_state_fingerprint": state_fingerprint,
             "policy_decision": policy_decision,
+            "demo_command_bypass": demo_command_bypass,
             "typed_action": resolved_typed_action,
             "typed_action_summary": action_summary(resolved_typed_action),
             "ranking": ranking,
@@ -13229,3 +13444,410 @@ def _code_context_graph_payload(*, application: str = "", repository_name: str =
             "relation_count": len(relations),
         },
     }
+
+
+# ============================================================
+# Platform Super-Admin API (cross-tenant)
+# Gated by Django is_superuser. Used by the React /admin pages.
+# ============================================================
+
+
+def _admin_required(request: HttpRequest):
+    if not getattr(request.user, "is_authenticated", False):
+        return JsonResponse({"error": "authentication_required"}, status=401)
+    if not getattr(request.user, "is_superuser", False):
+        return JsonResponse({"error": "superuser_required"}, status=403)
+    return None
+
+
+def _serialize_admin_tenant(tenant: "Tenant") -> Dict[str, Any]:
+    return {
+        "tenant_id": str(tenant.tenant_id),
+        "name": tenant.name,
+        "slug": tenant.slug,
+        "domain": tenant.domain,
+        "is_active": bool(tenant.is_active),
+        "created_at": tenant.created_at.isoformat() if tenant.created_at else "",
+        "member_count": tenant.memberships.filter(is_active=True).count(),
+    }
+
+
+def _serialize_admin_user(user) -> Dict[str, Any]:
+    memberships = TenantMembership.objects.select_related("tenant").filter(user=user, is_active=True)
+    return {
+        "id": user.id,
+        "username": user.get_username(),
+        "email": user.email or "",
+        "is_active": bool(user.is_active),
+        "is_superuser": bool(user.is_superuser),
+        "is_staff": bool(user.is_staff),
+        "memberships": [
+            {
+                "membership_id": str(m.membership_id),
+                "tenant_id": str(m.tenant.tenant_id),
+                "tenant_name": m.tenant.name,
+                "role": m.role,
+            }
+            for m in memberships
+        ],
+        "date_joined": user.date_joined.isoformat() if user.date_joined else "",
+    }
+
+
+def _slugify_simple(value: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in (value or "").strip())
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    return cleaned.strip("-") or f"tenant-{uuid.uuid4().hex[:6]}"
+
+
+@csrf_exempt
+@login_required
+def admin_tenants_view(request: HttpRequest):
+    """GET: list all tenants. POST: create a new tenant."""
+    guard = _admin_required(request)
+    if guard is not None:
+        return guard
+
+    if request.method == "GET":
+        tenants = Tenant.objects.all().order_by("name")
+        return JsonResponse({"count": tenants.count(), "results": [_serialize_admin_tenant(t) for t in tenants]})
+
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except Exception as exc:
+        return JsonResponse({"error": "invalid_json", "detail": str(exc)}, status=400)
+
+    name = str(body.get("name") or "").strip()
+    if not name:
+        return JsonResponse({"error": "name_required"}, status=400)
+    slug = str(body.get("slug") or "").strip().lower() or _slugify_simple(name)
+    domain = str(body.get("domain") or "").strip()
+    if Tenant.objects.filter(slug=slug).exists():
+        return JsonResponse({"error": "slug_taken", "slug": slug}, status=409)
+
+    tenant = Tenant.objects.create(name=name, slug=slug, domain=domain, is_active=True)
+    audit_event(
+        request,
+        "admin.tenant.created",
+        object_type="tenant",
+        object_id=str(tenant.tenant_id),
+        metadata={"name": name, "slug": slug, "domain": domain},
+    )
+    return JsonResponse({"status": "created", "tenant": _serialize_admin_tenant(tenant)}, status=201)
+
+
+@csrf_exempt
+@login_required
+def admin_tenant_detail_view(request: HttpRequest, tenant_id: str):
+    guard = _admin_required(request)
+    if guard is not None:
+        return guard
+    tenant = Tenant.objects.filter(tenant_id=tenant_id).first()
+    if not tenant:
+        return JsonResponse({"error": "tenant_not_found"}, status=404)
+
+    if request.method == "GET":
+        return JsonResponse(_serialize_admin_tenant(tenant))
+
+    if request.method not in {"POST", "PATCH"}:
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except Exception as exc:
+        return JsonResponse({"error": "invalid_json", "detail": str(exc)}, status=400)
+
+    update_fields = []
+    if "name" in body:
+        value = str(body.get("name") or "").strip()
+        if value:
+            tenant.name = value
+            update_fields.append("name")
+    if "domain" in body:
+        tenant.domain = str(body.get("domain") or "").strip()
+        update_fields.append("domain")
+    if "is_active" in body:
+        tenant.is_active = bool(body.get("is_active"))
+        update_fields.append("is_active")
+    if update_fields:
+        update_fields.append("updated_at")
+        tenant.save(update_fields=update_fields)
+        audit_event(
+            request,
+            "admin.tenant.updated",
+            object_type="tenant",
+            object_id=str(tenant.tenant_id),
+            metadata={"updated_fields": update_fields},
+        )
+    return JsonResponse({"status": "updated", "tenant": _serialize_admin_tenant(tenant)})
+
+
+@csrf_exempt
+@login_required
+def admin_users_view(request: HttpRequest):
+    """GET: list all users. POST: create a new user."""
+    guard = _admin_required(request)
+    if guard is not None:
+        return guard
+
+    if request.method == "GET":
+        users = User.objects.all().order_by("username")
+        return JsonResponse({"count": users.count(), "results": [_serialize_admin_user(u) for u in users]})
+
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except Exception as exc:
+        return JsonResponse({"error": "invalid_json", "detail": str(exc)}, status=400)
+
+    username = str(body.get("username") or "").strip()
+    if not username:
+        return JsonResponse({"error": "username_required"}, status=400)
+    if User.objects.filter(username=username).exists():
+        return JsonResponse({"error": "username_taken"}, status=409)
+    email = str(body.get("email") or "").strip().lower()
+    password = body.get("password") or ""
+    if not password or len(str(password)) < 8:
+        return JsonResponse({"error": "password_too_short", "detail": "Minimum 8 characters."}, status=400)
+    is_superuser = bool(body.get("is_superuser"))
+
+    user = User.objects.create_user(username=username, email=email, password=password)
+    if is_superuser:
+        user.is_superuser = True
+        user.is_staff = True
+        user.save(update_fields=["is_superuser", "is_staff"])
+    audit_event(
+        request,
+        "admin.user.created",
+        object_type="user",
+        object_id=str(user.id),
+        metadata={"username": username, "email": email, "is_superuser": is_superuser},
+    )
+    return JsonResponse({"status": "created", "user": _serialize_admin_user(user)}, status=201)
+
+
+@csrf_exempt
+@login_required
+def admin_user_detail_view(request: HttpRequest, user_id: str):
+    guard = _admin_required(request)
+    if guard is not None:
+        return guard
+    try:
+        target_user = User.objects.get(id=int(user_id))
+    except (User.DoesNotExist, ValueError):
+        return JsonResponse({"error": "user_not_found"}, status=404)
+
+    if request.method == "GET":
+        return JsonResponse(_serialize_admin_user(target_user))
+
+    if request.method not in {"POST", "PATCH"}:
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except Exception as exc:
+        return JsonResponse({"error": "invalid_json", "detail": str(exc)}, status=400)
+
+    update_fields: List[str] = []
+    metadata: Dict[str, Any] = {}
+    if "email" in body:
+        target_user.email = str(body.get("email") or "").strip().lower()
+        update_fields.append("email")
+        metadata["email"] = target_user.email
+    if "is_active" in body:
+        # Prevent admins from deactivating themselves and being locked out.
+        if target_user.id == getattr(request.user, "id", None) and not body.get("is_active"):
+            return JsonResponse({"error": "cannot_deactivate_self"}, status=400)
+        target_user.is_active = bool(body.get("is_active"))
+        update_fields.append("is_active")
+        metadata["is_active"] = target_user.is_active
+    if "is_superuser" in body:
+        if target_user.id == getattr(request.user, "id", None) and not body.get("is_superuser"):
+            return JsonResponse({"error": "cannot_demote_self"}, status=400)
+        target_user.is_superuser = bool(body.get("is_superuser"))
+        target_user.is_staff = bool(body.get("is_superuser")) or target_user.is_staff
+        update_fields.extend(["is_superuser", "is_staff"])
+        metadata["is_superuser"] = target_user.is_superuser
+    if "password" in body:
+        password = body.get("password") or ""
+        if not password or len(str(password)) < 8:
+            return JsonResponse({"error": "password_too_short", "detail": "Minimum 8 characters."}, status=400)
+        target_user.set_password(password)
+        update_fields.append("password")
+        metadata["password_changed"] = True
+    if update_fields:
+        target_user.save(update_fields=list(set(update_fields)))
+        audit_event(
+            request,
+            "admin.user.updated",
+            object_type="user",
+            object_id=str(target_user.id),
+            metadata=metadata,
+        )
+    return JsonResponse({"status": "updated", "user": _serialize_admin_user(target_user)})
+
+
+@csrf_exempt
+@login_required
+def admin_memberships_view(request: HttpRequest):
+    """POST: create or update a membership (assign user to tenant)."""
+    guard = _admin_required(request)
+    if guard is not None:
+        return guard
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except Exception as exc:
+        return JsonResponse({"error": "invalid_json", "detail": str(exc)}, status=400)
+
+    tenant_id = str(body.get("tenant_id") or "").strip()
+    user_id_raw = body.get("user_id")
+    role = str(body.get("role") or "viewer").strip().lower()
+    tenant = Tenant.objects.filter(tenant_id=tenant_id).first()
+    if not tenant:
+        return JsonResponse({"error": "tenant_not_found"}, status=404)
+    try:
+        target_user = User.objects.get(id=int(user_id_raw))
+    except (User.DoesNotExist, ValueError, TypeError):
+        return JsonResponse({"error": "user_not_found"}, status=404)
+    valid_roles = {choice[0] for choice in TenantMembership._meta.get_field("role").choices}
+    if role not in valid_roles:
+        return JsonResponse({"error": "invalid_role"}, status=400)
+
+    membership, created = TenantMembership.objects.update_or_create(
+        tenant=tenant,
+        user=target_user,
+        defaults={"role": role, "is_active": True, "invited_by": request.user},
+    )
+    audit_event(
+        request,
+        "admin.membership.created" if created else "admin.membership.updated",
+        object_type="tenant_membership",
+        object_id=str(membership.membership_id),
+        metadata={"tenant_id": tenant_id, "user_id": target_user.id, "role": role},
+    )
+    return JsonResponse({"status": "created" if created else "updated", "member": _serialize_tenant_membership(membership)}, status=201 if created else 200)
+
+
+@csrf_exempt
+@login_required
+def admin_membership_detail_view(request: HttpRequest, membership_id: str):
+    guard = _admin_required(request)
+    if guard is not None:
+        return guard
+    membership = TenantMembership.objects.select_related("tenant", "user").filter(membership_id=membership_id).first()
+    if not membership:
+        return JsonResponse({"error": "membership_not_found"}, status=404)
+
+    if request.method == "GET":
+        return JsonResponse(_serialize_tenant_membership(membership))
+
+    if request.method == "DELETE":
+        membership.is_active = False
+        membership.save(update_fields=["is_active", "updated_at"])
+        audit_event(
+            request,
+            "admin.membership.disabled",
+            object_type="tenant_membership",
+            object_id=str(membership.membership_id),
+            metadata={"tenant_id": str(membership.tenant.tenant_id), "user_id": membership.user_id},
+        )
+        return JsonResponse({"status": "disabled", "member": _serialize_tenant_membership(membership)})
+
+    if request.method not in {"POST", "PATCH"}:
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except Exception as exc:
+        return JsonResponse({"error": "invalid_json", "detail": str(exc)}, status=400)
+    update_fields: List[str] = []
+    if "role" in body:
+        role = str(body.get("role") or "").strip().lower()
+        valid_roles = {choice[0] for choice in TenantMembership._meta.get_field("role").choices}
+        if role not in valid_roles:
+            return JsonResponse({"error": "invalid_role"}, status=400)
+        membership.role = role
+        update_fields.append("role")
+    if "is_active" in body:
+        membership.is_active = bool(body.get("is_active"))
+        update_fields.append("is_active")
+    if "extra_permissions" in body:
+        extras = body.get("extra_permissions") or []
+        if not isinstance(extras, list):
+            return JsonResponse({"error": "extra_permissions_must_be_list"}, status=400)
+        catalog = all_known_permissions()
+        cleaned = sorted({str(value) for value in extras if isinstance(value, str) and value in catalog})
+        membership.extra_permissions = cleaned
+        update_fields.append("extra_permissions")
+    if update_fields:
+        update_fields.append("updated_at")
+        membership.save(update_fields=list(set(update_fields)))
+        audit_event(
+            request,
+            "admin.membership.updated",
+            object_type="tenant_membership",
+            object_id=str(membership.membership_id),
+            metadata={"updated_fields": update_fields},
+        )
+    return JsonResponse({"status": "updated", "member": _serialize_tenant_membership(membership)})
+
+
+@login_required
+def admin_permissions_catalog_view(request: HttpRequest):
+    guard = _admin_required(request)
+    if guard is not None:
+        return guard
+    catalog = sorted(all_known_permissions())
+    grouped: Dict[str, List[str]] = {}
+    for permission in catalog:
+        prefix = permission.split(".", 1)[0] if "." in permission else "other"
+        grouped.setdefault(prefix, []).append(permission)
+    return JsonResponse({"count": len(catalog), "permissions": catalog, "grouped": grouped})
+
+
+@login_required
+def admin_audit_view(request: HttpRequest):
+    """Cross-tenant audit log. Optional ?limit=, ?tenant_id=, ?action= filters."""
+    guard = _admin_required(request)
+    if guard is not None:
+        return guard
+    try:
+        limit = int(request.GET.get("limit") or 100)
+    except (TypeError, ValueError):
+        limit = 100
+    limit = max(1, min(limit, 500))
+    queryset = TenantAuditEvent.objects.select_related("tenant", "actor").order_by("-created_at")
+    tenant_filter = (request.GET.get("tenant_id") or "").strip()
+    if tenant_filter:
+        queryset = queryset.filter(tenant__tenant_id=tenant_filter)
+    action_filter = (request.GET.get("action") or "").strip()
+    if action_filter:
+        queryset = queryset.filter(action__icontains=action_filter)
+    events = list(queryset[:limit])
+    return JsonResponse(
+        {
+            "count": len(events),
+            "results": [
+                {
+                    "event_id": str(event.event_id),
+                    "tenant_id": str(event.tenant.tenant_id) if event.tenant else "",
+                    "tenant_name": event.tenant.name if event.tenant else "",
+                    "actor": event.actor.get_username() if event.actor else "",
+                    "action": event.action,
+                    "object_type": event.object_type or "",
+                    "object_id": event.object_id or "",
+                    "metadata": event.metadata_json or {},
+                    "created_at": event.created_at.isoformat() if event.created_at else "",
+                }
+                for event in events
+            ],
+        }
+    )

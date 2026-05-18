@@ -23,6 +23,7 @@ from genai.tools.investigation import (
     _infer_runtime_entities_from_question,
     build_investigation_context,
 )
+from genai.tools.prometheus import handle_prometheus_query as handle_prometheus_tool_query
 from genai.tools.router import deterministic_route
 from genai.archive_service import verify_archive_manifest
 from genai.apps import GenaiConfig
@@ -707,6 +708,85 @@ class IncidentDeepDiveProjectionTests(TestCase):
         self.assertEqual(IncidentAlert.objects.count(), 2)
         self.assertEqual(mocked_auto_investigate.call_count, 1)
 
+    @patch("genai.views._ensure_investigation_run_for_incident", return_value=None)
+    @patch("genai.views.query_llm")
+    @patch("genai.views.collect_alert_context")
+    def test_alertmanager_ingest_without_session_uses_default_tenant(self, mocked_collect_context, mocked_query_llm, mocked_auto_investigate):
+        mocked_collect_context.return_value = {
+            "target_host": "app-inventory",
+            "service_name": "app-inventory",
+            "dependency_graph": {},
+        }
+        mocked_query_llm.return_value = (
+            True,
+            200,
+            json.dumps(
+                {
+                    "summary": "Inventory errors are elevated.",
+                    "target_host": "app-inventory",
+                    "diagnostic_command": "tail -n 200 /var/log/demo/app-inventory.log",
+                    "why": "Confirm application errors from the local service log.",
+                    "should_execute": True,
+                }
+            ),
+        )
+
+        response = self.client.post(
+            "/genai/alerts/ingest/",
+            data=json.dumps(
+                {
+                    "receiver": "aiops",
+                    "status": "firing",
+                    "groupKey": "{}:{alertname=\"DemoAppErrorsHigh\"}",
+                    "commonLabels": {
+                        "alertname": "DemoAppErrorsHigh",
+                        "service": "app-inventory",
+                        "instance": "app-inventory:8000",
+                    },
+                    "alerts": [
+                        {
+                            "status": "firing",
+                            "fingerprint": "am-fingerprint-default-tenant-1",
+                            "startsAt": "2026-05-15T09:30:00Z",
+                            "labels": {
+                                "alertname": "DemoAppErrorsHigh",
+                                "service": "app-inventory",
+                                "instance": "app-inventory:8000",
+                                "severity": "critical",
+                            },
+                            "annotations": {"summary": "Inventory errors are high."},
+                        },
+                        {
+                            "status": "firing",
+                            "fingerprint": "am-fingerprint-default-tenant-2",
+                            "startsAt": "2026-05-15T09:31:00Z",
+                            "labels": {
+                                "alertname": "DemoAppLatencyHigh",
+                                "service": "app-inventory",
+                                "instance": "app-inventory:8000",
+                                "severity": "warning",
+                            },
+                            "annotations": {"summary": "Inventory latency is high."},
+                        },
+                    ],
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        default_tenant = Tenant.objects.get(slug="default-workspace")
+        self.assertEqual(Incident.objects.count(), 2)
+        self.assertEqual(AlertEvent.objects.count(), 2)
+        self.assertFalse(Incident.objects.filter(tenant__isnull=True).exists())
+        self.assertFalse(AlertEvent.objects.filter(tenant__isnull=True).exists())
+        self.assertEqual(set(Incident.objects.values_list("tenant_id", flat=True)), {default_tenant.id})
+        self.assertEqual(set(AlertEvent.objects.values_list("tenant_id", flat=True)), {default_tenant.id})
+        payload = json.loads(response.content.decode("utf-8"))
+        self.assertEqual(payload["grouped_alert_count"], 2)
+        self.assertEqual(len(payload["grouped_incidents"]), 1)
+        self.assertEqual(mocked_auto_investigate.call_count, 2)
+
     def test_deep_dive_projection_does_not_replace_diagnostic_command_with_remediation_command(self):
         incident = Incident.objects.create(
             application="customer-portal",
@@ -1190,6 +1270,40 @@ class TenantRBACTests(TestCase):
             event.save()
         with self.assertRaises(ValueError):
             event.delete()
+
+    def test_legacy_dashboard_routes_redirect_to_react_routes(self):
+        self.client.force_login(self.viewer)
+        incident = Incident.objects.create(
+            tenant=self.tenant,
+            application="customer-portal",
+            title="Inventory incident",
+            status="open",
+            severity="critical",
+            primary_service="app-inventory",
+            target_host="app-inventory",
+        )
+
+        expectations = [
+            ("/genai/", "/assistant"),
+            ("/genai/app/assistant/", "/assistant"),
+            ("/genai/alerts/dashboard/", "/alerts"),
+            ("/genai/incidents/dashboard/", "/incidents"),
+            (f"/genai/incidents/{incident.incident_key}/", f"/incidents?incident={incident.incident_key}"),
+            ("/genai/investigations/dashboard/", "/investigations"),
+            ("/genai/operations/dashboard/", "/analytics"),
+            ("/genai/code-context/dashboard/", "/code-context"),
+            ("/genai/applications/dashboard/", "/topology"),
+        ]
+
+        for path, target in expectations:
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 302, path)
+            self.assertEqual(response["Location"], target, path)
+
+    def test_django_admin_route_is_disabled_by_default(self):
+        response = self.client.get("/admin/")
+
+        self.assertEqual(response.status_code, 404)
 
 
 class IntegrationApiTests(TestCase):
@@ -1940,6 +2054,7 @@ class PolicyEngineTests(SimpleTestCase):
     @patch.dict(
         "os.environ",
         {
+            "AIOPS_DEMO_COMMAND_BYPASS": "false",
             "AIOPS_POLICY_ALLOW_PROTECTED_ENV_RESTARTS": "false",
             "AIOPS_POLICY_REQUIRE_APPROVAL_FOR_RESTARTS": "true",
         },
@@ -1957,6 +2072,7 @@ class PolicyEngineTests(SimpleTestCase):
         self.assertEqual(decision["decision"], "blocked")
         self.assertEqual(decision["environment"], "production")
 
+    @patch.dict("os.environ", {"AIOPS_DEMO_COMMAND_BYPASS": "false"}, clear=False)
     def test_break_glass_requires_reason_even_when_policy_allows_bypass(self):
         decision = evaluate_execution_policy(
             command="docker restart aiops-demo-orders",
@@ -1973,6 +2089,7 @@ class PolicyEngineTests(SimpleTestCase):
         self.assertEqual(decision["decision"], "blocked")
         self.assertIn("Break-glass execution requires a reason.", decision["blocked_reasons"])
 
+    @patch.dict("os.environ", {"AIOPS_DEMO_COMMAND_BYPASS": "false"}, clear=False)
     def test_break_glass_respects_policy_pack_disable(self):
         decision = evaluate_execution_policy(
             command="docker restart aiops-demo-orders",
@@ -1990,6 +2107,68 @@ class PolicyEngineTests(SimpleTestCase):
         self.assertIn("Break-glass execution is blocked by policy.", decision["blocked_reasons"])
 
 
+class PrometheusQueryToolTests(SimpleTestCase):
+    def test_db_error_rate_uses_deterministic_valid_service_query(self):
+        calls = []
+
+        def fake_llm(prompt):
+            calls.append(prompt)
+            return True, 200, json.dumps(
+                {
+                    "answer": "The db service currently has a 0 errors/sec HTTP error rate.",
+                    "follow_up_questions": [],
+                    "suggested_command": None,
+                }
+            )
+
+        class FakeResponse:
+            ok = True
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"status": "success", "data": {"result": [{"metric": {}, "value": [1, "0"]}]}}
+
+        with patch("genai.tools.prometheus.requests.get", return_value=FakeResponse()) as mocked_get:
+            result, _vis, err, generated_query = handle_prometheus_tool_query(
+                "What is the current error rate of the 'db' service?",
+                fake_llm,
+                "http://prometheus:9090",
+                logging.getLogger("test.prometheus"),
+            )
+
+        self.assertEqual(err, "")
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            generated_query,
+            'sum(rate(demo_http_requests_total{service="db",status=~"5.."}[5m])) or vector(0)',
+        )
+        mocked_get.assert_called_once()
+        self.assertEqual(
+            mocked_get.call_args.kwargs["params"]["query"],
+            'sum(rate(demo_http_requests_total{service="db",status=~"5.."}[5m])) or vector(0)',
+        )
+        self.assertEqual(len(calls), 1)
+
+    def test_invalid_llm_promql_regex_is_rejected_before_prometheus_call(self):
+        def fake_llm(prompt):
+            return True, 200, 'sum(rate(ifInErrors{instance=~"^(?!-).*$"}[5m]))'
+
+        with patch("genai.tools.prometheus.requests.get") as mocked_get:
+            result, _vis, err, generated_query = handle_prometheus_tool_query(
+                "Show interface input errors for all devices",
+                fake_llm,
+                "http://prometheus:9090",
+                logging.getLogger("test.prometheus"),
+            )
+
+        self.assertIsNone(result)
+        self.assertIn("invalid Prometheus query", err)
+        self.assertEqual(generated_query, 'sum(rate(ifInErrors{instance=~"^(?!-).*$"}[5m]))')
+        mocked_get.assert_not_called()
+
+
 class ExecutionApprovalFlowTests(TestCase):
     def setUp(self):
         self.tenant = Tenant.objects.create(name="Safety Tenant", slug="safety-tenant")
@@ -2000,8 +2179,11 @@ class ExecutionApprovalFlowTests(TestCase):
     @patch.dict(
         "os.environ",
         {
+            "AIOPS_DEMO_COMMAND_BYPASS": "false",
             "AIOPS_POLICY_ALLOW_PROTECTED_ENV_RESTARTS": "true",
             "AIOPS_POLICY_REQUIRE_APPROVAL_FOR_RESTARTS": "true",
+            "AIOPS_POLICY_EXECUTION_RETRY_LIMIT": "999999",
+            "AIOPS_POLICY_RESTART_COOLDOWN_SECONDS": "0",
         },
         clear=False,
     )
@@ -2023,6 +2205,9 @@ class ExecutionApprovalFlowTests(TestCase):
         ), patch(
             "genai.views._get_cached_state_decision",
             return_value={},
+        ), patch(
+            "genai.views._check_service_execution_frequency",
+            return_value={"allowed": True, "count": 0, "max_frequency": 5, "window_seconds": 1800},
         ), patch(
             "genai.views.delegate_command_to_agent",
             return_value=(True, "restarted", {"exit_code": 0}),
@@ -2178,8 +2363,11 @@ class TargetConfigurationTests(TestCase):
     @patch.dict(
         "os.environ",
         {
+            "AIOPS_DEMO_COMMAND_BYPASS": "false",
             "AIOPS_POLICY_ALLOW_PROTECTED_ENV_RESTARTS": "true",
             "AIOPS_POLICY_REQUIRE_APPROVAL_FOR_RESTARTS": "true",
+            "AIOPS_POLICY_EXECUTION_RETRY_LIMIT": "999999",
+            "AIOPS_POLICY_RESTART_COOLDOWN_SECONDS": "0",
         },
         clear=False,
     )
@@ -2198,6 +2386,7 @@ class TargetConfigurationTests(TestCase):
     @patch.dict(
         "os.environ",
         {
+            "AIOPS_DEMO_COMMAND_BYPASS": "false",
             "AIOPS_POLICY_ALLOW_DB_CHANGES": "false",
         },
         clear=False,
@@ -2217,6 +2406,32 @@ class TargetConfigurationTests(TestCase):
     @patch.dict(
         "os.environ",
         {
+            "AIOPS_DEMO_COMMAND_BYPASS": "true",
+            "AIOPS_POLICY_ALLOW_DB_CHANGES": "false",
+            "AIOPS_POLICY_REQUIRE_APPROVAL_FOR_UNKNOWN_ACTIONS": "true",
+        },
+        clear=False,
+    )
+    def test_demo_command_bypass_allows_policy_blocked_remediation(self):
+        decision = evaluate_execution_policy(
+            command='psql -h db -c "DELETE FROM incidents"',
+            target_host="db",
+            execution_type="remediation",
+            context={"service_name": "db", "labels": {"environment": "staging"}},
+            approval_present=False,
+            actor="tester",
+        )
+        self.assertEqual(decision["decision"], "allowed")
+        self.assertTrue(decision["demo_command_bypass"])
+        self.assertFalse(decision["blocked"])
+        self.assertFalse(decision["requires_approval"])
+        self.assertEqual(decision["blocked_reasons"], [])
+        self.assertEqual(decision["approval_reasons"], [])
+
+    @patch.dict(
+        "os.environ",
+        {
+            "AIOPS_DEMO_COMMAND_BYPASS": "false",
             "AIOPS_POLICY_ALLOW_PROTECTED_ENV_RESTARTS": "true",
             "AIOPS_POLICY_REQUIRE_APPROVAL_FOR_RESTARTS": "false",
             "AIOPS_POLICY_EXECUTION_RETRY_LIMIT": "2",
@@ -2268,6 +2483,7 @@ class TargetConfigurationTests(TestCase):
     @patch.dict(
         "os.environ",
         {
+            "AIOPS_DEMO_COMMAND_BYPASS": "false",
             "AIOPS_POLICY_ALLOW_PROTECTED_ENV_RESTARTS": "true",
             "AIOPS_POLICY_REQUIRE_APPROVAL_FOR_RESTARTS": "false",
             "AIOPS_POLICY_EXECUTION_RETRY_LIMIT": "5",
@@ -2779,10 +2995,34 @@ class FleetSerializationTests(TestCase):
 
 
 class TrackThreeFixTests(SimpleTestCase):
-    def test_resolve_embedding_endpoint_derives_from_chat_completion_url(self):
+    def test_resolve_embedding_endpoint_uses_explicit_url(self):
         with patch.dict(
             os.environ,
-            {"VLLM_API_URL": "http://10.0.0.8:8001/v1/chat/completions", "VLLM_EMBEDDING_URL": ""},
+            {"VLLM_EMBEDDING_URL": "http://3.105.109.59:8002/v1/embeddings"},
+            clear=False,
+        ):
+            self.assertEqual(_resolve_embedding_endpoint(), "http://3.105.109.59:8002/v1/embeddings")
+
+    def test_resolve_embedding_endpoint_does_not_derive_from_chat_completion_url_by_default(self):
+        with patch.dict(
+            os.environ,
+            {
+                "VLLM_API_URL": "http://10.0.0.8:8001/v1/chat/completions",
+                "VLLM_EMBEDDING_URL": "",
+                "VLLM_DERIVE_EMBEDDING_URL_FROM_CHAT": "false",
+            },
+            clear=False,
+        ):
+            self.assertEqual(_resolve_embedding_endpoint(), "")
+
+    def test_resolve_embedding_endpoint_derives_from_chat_completion_url_when_enabled(self):
+        with patch.dict(
+            os.environ,
+            {
+                "VLLM_API_URL": "http://10.0.0.8:8001/v1/chat/completions",
+                "VLLM_EMBEDDING_URL": "",
+                "VLLM_DERIVE_EMBEDDING_URL_FROM_CHAT": "true",
+            },
             clear=False,
         ):
             self.assertEqual(_resolve_embedding_endpoint(), "http://10.0.0.8:8001/v1/embeddings")

@@ -3,7 +3,7 @@
 This document describes the current implemented architecture of the OpsMitra control plane. It is aligned to the codebase as it exists now:
 
 - **self-hosted control plane** — Django + React, deployed via Docker Compose or Helm
-- **air-gapped local inference** through `vLLM`
+- **air-gapped local inference** through `vLLM` plus an explicit embedding endpoint
 - **code-context-aware investigation** and **policy-gated remediation**
 - **multi-tenant** with RBAC across every privileged surface
 - **fleet-managed** Linux, Kubernetes, and OT targets through a single control plane
@@ -20,7 +20,7 @@ Related diagram sources:
 The platform has five interacting planes:
 
 1. **Control plane** — Django application for incidents, investigations, runbooks, approvals, policies, signal analytics, fleet onboarding, predictor, and integration writeback.
-2. **Inference plane** — Self-hosted `vLLM` serving a local model over an OpenAI-compatible API.
+2. **Inference plane** — Self-hosted `vLLM` serving a local chat/reasoning model plus a separate OpenAI-compatible embedding endpoint.
 3. **Observability plane** — Prometheus / VictoriaMetrics, Alertmanager, OpenTelemetry Collector, Jaeger / Tempo, Elasticsearch / OpenSearch, Filebeat, Grafana.
 4. **Execution plane** — Fleet agents (Linux, Kubernetes, OT) that receive policy-gated commands from the control plane.
 5. **Application plane** — Customer workloads under management; plus a demo workload that produces realistic incidents.
@@ -59,8 +59,8 @@ The strongest way to describe the platform:
      |                                                                    |
      v                                                                    v
  +---------+   +-----------+   +-----------------+        +---------------------------+
- | Postgres|   | Redis     |   | Local vLLM      |        | applications / containers |
- |  16     |   | (queues   |   | OpenAI-compatible|       | services / kubelets / PLCs|
+ | Postgres|   | Redis     |   | Local AI runtime |       | applications / containers |
+ |+pgvector|   | (queues   |   | vLLM + embeddings|       | services / kubelets / PLCs|
  +---------+   |  + cache) |   | no AI egress     |       +---------------------------+
                +-----------+   +-----------------+
 ```
@@ -131,14 +131,16 @@ Tenant audit events are append-only at the Django model and signal layer — the
 
 ---
 
-## 5. Air-Gapped Inference Plane
+## 5. Air-Gapped Inference And Vector Plane
 
 The inference layer is intentionally local-first.
 
 Implementation:
 
 - [genai/llm_backend.py](./genai/llm_backend.py)
-- `VLLM_BASE_URL`, `VLLM_MODEL`
+- [genai/vector_backend.py](./genai/vector_backend.py)
+- `VLLM_API_URL`, `VLLM_MODEL_NAME`
+- `VLLM_EMBEDDING_URL`, `VECTOR_EMBED_MODEL`, `PGVECTOR_DIMENSIONS`
 
 Runtime behavior:
 
@@ -146,6 +148,7 @@ Runtime behavior:
 2. The prompt is sent to the local `vLLM` endpoint over the OpenAI-compatible API.
 3. The local model returns a grounded answer, typed action recommendation, explanation, or summary.
 4. Output is recorded with the full retrieval trace for audit.
+5. Code, runbook, and incident-memory semantic search use the explicit embedding endpoint and store vectors in pgvector.
 
 Architecture implications:
 
@@ -153,8 +156,27 @@ Architecture implications:
 - no external API key is required for the primary product story
 - the same inference path is used for investigations, RCA, remediation reasoning, runbook generation, narrative generation, and post-action analysis
 - the model is BYO — any vLLM-compatible model fits
+- embedding is intentionally separate from chat inference; instruct models should not be assumed to support `/v1/embeddings`
 
 The application controls what evidence is retrieved and what gets sent to the model. The model does not own direct, uncontrolled access to telemetry or code.
+
+### 5.1 Vector Storage
+
+Compose uses `pgvector/pgvector:pg13` so the database contains the `vector` extension. The application creates a standalone `vector_store` table on first use:
+
+```text
+collection, object_id, vector(<PGVECTOR_DIMENSIONS>), metadata, timestamps
+```
+
+Current recommended embedding profile:
+
+```env
+VLLM_EMBEDDING_URL=http://<embedding-host>:8002/v1/embeddings
+VECTOR_EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
+PGVECTOR_DIMENSIONS=384
+```
+
+If pgvector is unavailable in an environment, the vector backend now degrades by skipping vector upsert/search rather than failing incident or investigation flow. Production deployments should still provide pgvector or an external vector backend because code-context, runbook, and incident-memory retrieval quality depends on embeddings.
 
 ---
 

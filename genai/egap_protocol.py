@@ -168,6 +168,9 @@ def _authorization_config() -> Dict[str, Any]:
                                             "AIOPS_POLICY_CRITICAL_SERVICES",
                                             "db,gateway,frontend,app-orders,app-inventory,app-billing",
                                         )),
+        # Demo-only bypass. Keep disabled in production: when enabled, command
+        # policy blocks, approvals, retry limits, and cooldowns are bypassed.
+        "demo_command_bypass":          _env_bool("AIOPS_DEMO_COMMAND_BYPASS", False),
         # Permissions
         "allow_db_changes":             _env_bool("AIOPS_POLICY_ALLOW_DB_CHANGES", True),
         "allow_protected_env_restarts": _env_bool("AIOPS_POLICY_ALLOW_PROTECTED_ENV_RESTARTS", False),
@@ -574,17 +577,22 @@ def egap_dispatch(
             blocked_reasons = []
             approval_reasons = []
 
+    demo_command_bypass = bool(config.get("demo_command_bypass"))
+    if demo_command_bypass:
+        blocked_reasons = []
+        approval_reasons = []
+
     # §3 AUDIT
     audit_key = _audit_key(command, target_host, service, action_type)
     history   = _load_audit_history(audit_key)
     now_ts    = time.time()
     recent    = [e for e in history if now_ts - float(e.get("timestamp", 0)) <= config["retry_window_seconds"]]
     cooldown_remaining_seconds = 0
-    if len(recent) >= config["retry_limit"]:
+    if not demo_command_bypass and len(recent) >= config["retry_limit"]:
         blocked_reasons.append(
             f"Retry limit reached for action '{action_type}' on service '{service or target_host}'."
         )
-    if action_type == "restart_service" and config["cooldown_seconds"] > 0:
+    if not demo_command_bypass and action_type == "restart_service" and config["cooldown_seconds"] > 0:
         last_success = max(
             (
                 float(entry.get("timestamp", 0))
@@ -611,6 +619,7 @@ def egap_dispatch(
     reason = (
         blocked_reasons[0] if blocked_reasons
         else approval_reasons[0] if approval_reasons
+        else "Allowed by demo command bypass." if demo_command_bypass
         else "Allowed by policy."
     )
 
@@ -630,6 +639,7 @@ def egap_dispatch(
         "critical_service":   critical,
         "protected_environment": protected,
         "policy_version":     config["policy_version"],
+        "demo_command_bypass": demo_command_bypass,
         "actor":              actor or "system",
     }
 
@@ -638,6 +648,7 @@ def egap_dispatch(
         "action_key":   audit_key,
         "retry_count":  len(recent),
         "retry_limit":  config["retry_limit"],
+        "demo_command_bypass": demo_command_bypass,
     }
 
     # §4 APPROVALS
@@ -678,6 +689,7 @@ def egap_dispatch(
         "blocked_reasons":           blocked_reasons,
         "approval_reasons":          approval_reasons,
         "policy_version":            config["policy_version"],
+        "demo_command_bypass":       demo_command_bypass,
         "action_type":               action_type,
         "risk_level":                clf["risk_level"],
         "environment":               environment,

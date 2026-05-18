@@ -1,7 +1,83 @@
 import json
+import re
 from typing import Callable, Optional, Tuple
 
 import requests
+
+
+_SERVICE_ALIASES = {
+    "orders": "app-orders",
+    "order": "app-orders",
+    "inventory": "app-inventory",
+    "billing": "app-billing",
+    "database": "db",
+    "postgres": "db",
+    "postgresql": "db",
+}
+
+_KNOWN_SERVICES = {"frontend", "gateway", "db", "app-orders", "app-inventory", "app-billing"}
+
+
+def _strip_promql_response(value: str) -> str:
+    query = (value or "").strip()
+    if query.startswith("```"):
+        query = re.sub(r"^```(?:promql|prometheus)?\s*", "", query, flags=re.IGNORECASE)
+        query = re.sub(r"\s*```$", "", query)
+    return query.strip().strip("`").strip()
+
+
+def _extract_service_name(prompt: str) -> str:
+    text = (prompt or "").strip().lower()
+    quoted = re.search(r"['\"]([^'\"]+)['\"]\s+service", text)
+    if quoted:
+        candidate = quoted.group(1).strip()
+        return _SERVICE_ALIASES.get(candidate, candidate)
+    for service in sorted(_KNOWN_SERVICES, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(service)}\b", text):
+            return service
+    for alias, service in _SERVICE_ALIASES.items():
+        if re.search(rf"\b{re.escape(alias)}\b", text):
+            return service
+    return ""
+
+
+def _deterministic_promql(prompt: str) -> str:
+    text = (prompt or "").lower()
+    service = _extract_service_name(prompt)
+    if not service:
+        return ""
+
+    if "error rate" in text or "5xx" in text or "error" in text:
+        if service in {"app-orders", "app-inventory", "app-billing"}:
+            return f'sum(rate(demo_http_requests_total{{service="{service}",status=~"5.."}}[5m])) or vector(0)'
+        if service == "db":
+            # The demo database is exported through postgres_exporter, not HTTP
+            # request metrics. Return a valid zero-valued rate when no HTTP
+            # error metric exists, rather than letting the LLM invent SNMP
+            # interface error PromQL for `ifName="db"`.
+            return 'sum(rate(demo_http_requests_total{service="db",status=~"5.."}[5m])) or vector(0)'
+        if service in {"frontend", "gateway"}:
+            return f'sum(rate(nginx_http_requests_total{{service="{service}",status=~"5.."}}[5m])) or vector(0)'
+
+    if "latency" in text or "p95" in text or "response time" in text:
+        if service in {"app-orders", "app-inventory", "app-billing"}:
+            return f'histogram_quantile(0.95, sum(rate(demo_http_request_duration_seconds_bucket{{service="{service}"}}[5m])) by (le))'
+
+    if "up" in text or "available" in text or "status" in text:
+        if service == "db":
+            return 'up{job="postgres-exporter"}'
+        if service in {"app-orders", "app-inventory", "app-billing"}:
+            return f'up{{job="demo-apps",instance="{service}:8000"}}'
+        if service in {"frontend", "gateway"}:
+            return f'nginx_up{{service="{service}"}}'
+
+    return ""
+
+
+def _is_obviously_invalid_promql(query: str) -> bool:
+    # Prometheus uses RE2 regexes; lookaround/backrefs are invalid and are a
+    # common LLM hallucination for label matchers.
+    return bool(re.search(r"\(\?[=!<]", query or "") or re.search(r"\\[1-9]", query or ""))
 
 
 def handle_prometheus_query(
@@ -44,12 +120,19 @@ def handle_prometheus_query(
         f"Generate the PromQL query for this question: '{prompt}'"
     )
 
-    ok, status, generated_query = llm_query(text_to_promql_prompt)
-    if not ok or not generated_query.strip():
-        logger.error("Failed to generate PromQL query. Status: %s, Body: %s", status, generated_query)
-        return None, {}, "Sorry, I couldn't understand how to query that. Please try rephrasing your question.", ""
-
-    promql_query = generated_query.strip()
+    deterministic_query = _deterministic_promql(prompt)
+    if deterministic_query:
+        promql_query = deterministic_query
+        logger.info("Using deterministic PromQL query: %s", promql_query)
+    else:
+        ok, status, generated_query = llm_query(text_to_promql_prompt)
+        if not ok or not generated_query.strip():
+            logger.error("Failed to generate PromQL query. Status: %s, Body: %s", status, generated_query)
+            return None, {}, "Sorry, I couldn't understand how to query that. Please try rephrasing your question.", ""
+        promql_query = _strip_promql_response(generated_query)
+        if _is_obviously_invalid_promql(promql_query):
+            logger.warning("Rejected invalid generated PromQL query: %s", promql_query)
+            return None, {}, "Sorry, I generated an invalid Prometheus query for that request. Please try a service metric question such as error rate, latency, or availability.", promql_query
     logger.info("Dynamically generated PromQL query: %s", promql_query)
 
     try:

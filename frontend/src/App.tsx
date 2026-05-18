@@ -1,5 +1,8 @@
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+import type { ReactNode } from "react";
 import { AppShell } from "./components/AppShell";
+import { useAuth } from "./lib/auth";
+import { AdminPage } from "./pages/AdminPage";
 import { ApplicationsPage } from "./pages/ApplicationsPage";
 import { AssistantPage } from "./pages/AssistantPage";
 import { AlertsPage } from "./pages/AlertsPage";
@@ -17,6 +20,7 @@ import { InvestigationDetailPage } from "./pages/InvestigationDetailPage";
 import { InvestigationsPage } from "./pages/InvestigationsPage";
 import { IntegrationsPage } from "./pages/IntegrationsPage";
 import { IntegrationConfigPage } from "./pages/IntegrationConfigPage";
+import { LoginPage } from "./pages/LoginPage";
 import { PredictionsPage } from "./pages/PredictionsPage";
 import { TenantManagementPage } from "./pages/TenantManagementPage";
 
@@ -25,10 +29,33 @@ function LegacyAssistantRedirect() {
   return <Navigate to={`/genai${location.search}`} replace />;
 }
 
+function RequireAuth({ children }: { children: ReactNode }) {
+  const { loading, user } = useAuth();
+  const location = useLocation();
+  if (loading) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--color-muted,#9ca3af)" }}>
+        Loading…
+      </div>
+    );
+  }
+  if (!user) {
+    return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />;
+  }
+  return <>{children}</>;
+}
+
 export function App() {
   return (
     <Routes>
-      <Route element={<AppShell />}>
+      <Route path="/login" element={<LoginPage />} />
+      <Route
+        element={
+          <RequireAuth>
+            <AppShell />
+          </RequireAuth>
+        }
+      >
         <Route path="/" element={<Navigate to="/domain-onboarding" replace />} />
         <Route path="/domain-onboarding" element={<EnrollTargetPage />} />
         <Route path="/ingestion" element={<IngestionPage />} />
@@ -41,6 +68,7 @@ export function App() {
         <Route path="/integrations" element={<IntegrationsPage />} />
         <Route path="/integrations/:vendor" element={<IntegrationConfigPage />} />
         <Route path="/settings/members" element={<TenantManagementPage />} />
+        <Route path="/admin/*" element={<AdminPage />} />
         <Route path="/topology" element={<ApplicationsPage />} />
         <Route path="/code-context" element={<CodeContextPage />} />
         <Route path="/genai" element={<AssistantPage />} />

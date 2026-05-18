@@ -19,6 +19,9 @@ services:
       JAEGER_URL: ${JAEGER_URL:-http://jaeger:16686}
       AGENT_SECRET_TOKEN: ${AGENT_SECRET_TOKEN:-}
       AGENT_PORT: ${AGENT_PORT:-9999}
+      AIOPS_ADMIN_USERNAME: ${AIOPS_ADMIN_USERNAME:-admin}
+      AIOPS_ADMIN_EMAIL: ${AIOPS_ADMIN_EMAIL:-admin@example.com}
+      AIOPS_ADMIN_PASSWORD: ${AIOPS_ADMIN_PASSWORD:-password}
       APP_LOG_DIR: /var/log/aiops
       AIOPS_WEB_CONCURRENCY: ${AIOPS_WEB_CONCURRENCY:-2}
       AIOPS_GUNICORN_TIMEOUT: ${AIOPS_GUNICORN_TIMEOUT:-120}
@@ -54,6 +57,7 @@ services:
       AIOPS_POLICY_ALLOW_PROTECTED_ENV_RESTARTS: ${AIOPS_POLICY_ALLOW_PROTECTED_ENV_RESTARTS:-false}
       AIOPS_POLICY_REQUIRE_APPROVAL_FOR_RESTARTS: ${AIOPS_POLICY_REQUIRE_APPROVAL_FOR_RESTARTS:-true}
       AIOPS_POLICY_REQUIRE_APPROVAL_FOR_UNKNOWN_ACTIONS: ${AIOPS_POLICY_REQUIRE_APPROVAL_FOR_UNKNOWN_ACTIONS:-true}
+      AIOPS_DEMO_COMMAND_BYPASS: ${AIOPS_DEMO_COMMAND_BYPASS:-false}
       AIOPS_INTENT_SIGNING_SECRET: ${AIOPS_INTENT_SIGNING_SECRET:-}
       AIOPS_APPROVAL_TOKEN_TTL_SECONDS: ${AIOPS_APPROVAL_TOKEN_TTL_SECONDS:-900}
       AIOPS_EXECUTION_MAX_FREQUENCY_PER_SERVICE: ${AIOPS_EXECUTION_MAX_FREQUENCY_PER_SERVICE:-5}
@@ -90,10 +94,14 @@ services:
       AIOPS_PUBLIC_OTLP_GRPC_ENDPOINT: ${AIOPS_PUBLIC_OTLP_GRPC_ENDPOINT:-}
       SSO_ENABLED: ${SSO_ENABLED:-false}
       VLLM_API_KEY: ${VLLM_API_KEY:-}
-      VLLM_API_URL: ${VLLM_API_URL:-http://3.105.109.59:8001/v1/chat/completions}
+      VLLM_API_URL: ${VLLM_API_URL:-}
       VLLM_MODEL_NAME: ${VLLM_MODEL_NAME:-qwen32b}
       VLLM_VISION_MODEL_NAME: ${VLLM_VISION_MODEL_NAME:-qwen32b}
       VLLM_EMBEDDING_URL: ${VLLM_EMBEDDING_URL:-}
+      VLLM_DERIVE_EMBEDDING_URL_FROM_CHAT: ${VLLM_DERIVE_EMBEDDING_URL_FROM_CHAT:-false}
+      VECTOR_BACKEND: ${VECTOR_BACKEND:-pgvector}
+      VECTOR_EMBED_MODEL: ${VECTOR_EMBED_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      PGVECTOR_DIMENSIONS: ${PGVECTOR_DIMENSIONS:-384}
       VLLM_VERIFY_SSL: ${VLLM_VERIFY_SSL:-false}
       VLLM_TIMEOUT: ${VLLM_TIMEOUT:-120}
       VLLM_MAX_TOKENS: ${VLLM_MAX_TOKENS:-4096}
@@ -109,6 +117,12 @@ services:
       - ./demo:/source/demo:ro  # demo source & SQL mounted read-only for source-reader MCP tool
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz/', timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
     depends_on:
       db:
         condition: service_healthy
@@ -126,7 +140,7 @@ services:
       - "${AIOPS_FRONTEND_PORT:-8089}:8080"
     depends_on:
       web:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
 
   predictor:
@@ -173,6 +187,7 @@ services:
       AIOPS_POLICY_ALLOW_PROTECTED_ENV_RESTARTS: ${AIOPS_POLICY_ALLOW_PROTECTED_ENV_RESTARTS:-false}
       AIOPS_POLICY_REQUIRE_APPROVAL_FOR_RESTARTS: ${AIOPS_POLICY_REQUIRE_APPROVAL_FOR_RESTARTS:-true}
       AIOPS_POLICY_REQUIRE_APPROVAL_FOR_UNKNOWN_ACTIONS: ${AIOPS_POLICY_REQUIRE_APPROVAL_FOR_UNKNOWN_ACTIONS:-true}
+      AIOPS_DEMO_COMMAND_BYPASS: ${AIOPS_DEMO_COMMAND_BYPASS:-false}
       AIOPS_INTENT_SIGNING_SECRET: ${AIOPS_INTENT_SIGNING_SECRET:-}
       AIOPS_APPROVAL_TOKEN_TTL_SECONDS: ${AIOPS_APPROVAL_TOKEN_TTL_SECONDS:-900}
       AIOPS_EXECUTION_MAX_FREQUENCY_PER_SERVICE: ${AIOPS_EXECUTION_MAX_FREQUENCY_PER_SERVICE:-5}
@@ -197,6 +212,11 @@ services:
       AIOPS_REPLAY_RESTART_AVOIDANCE_WEIGHT: ${AIOPS_REPLAY_RESTART_AVOIDANCE_WEIGHT:-0.10}
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,aiops-web,web}
       SCHEMA_CACHE_TTL: ${SCHEMA_CACHE_TTL:-300}
+      VLLM_EMBEDDING_URL: ${VLLM_EMBEDDING_URL:-}
+      VLLM_DERIVE_EMBEDDING_URL_FROM_CHAT: ${VLLM_DERIVE_EMBEDDING_URL_FROM_CHAT:-false}
+      VECTOR_BACKEND: ${VECTOR_BACKEND:-pgvector}
+      VECTOR_EMBED_MODEL: ${VECTOR_EMBED_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      PGVECTOR_DIMENSIONS: ${PGVECTOR_DIMENSIONS:-384}
     volumes:
       - mediafiles:/code/mediafiles
       - app_logs:/var/log/aiops
@@ -246,7 +266,7 @@ services:
     restart: unless-stopped
 
   db:
-    image: postgres:13
+    image: pgvector/pgvector:pg13
     container_name: aiops-db
     command:
       - postgres
@@ -300,7 +320,7 @@ services:
     restart: unless-stopped
 
   db-init:
-    image: postgres:13
+    image: pgvector/pgvector:pg13
     environment:
       PGPASSWORD: ${POSTGRES_PASSWORD:-password}
     command:
