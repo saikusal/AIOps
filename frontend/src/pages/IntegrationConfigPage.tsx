@@ -192,24 +192,24 @@ export function IntegrationConfigPage() {
   return (
     <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="integration-config-layout">
       <header className="integration-config-header">
-        <button className="back-btn" onClick={() => navigate("/integrations")}>←</button>
-        <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+        <button className="back-btn" type="button" onClick={() => navigate("/integrations")} aria-label="Back to integrations">←</button>
+        <div className="integration-config-title">
           {logo && (
-            <div className="integration-logo-box" style={{ width: "64px", height: "64px" }}>
+            <div className="integration-logo-box integration-logo-box--large">
               <img src={logo} alt={`${vendorName} logo`} />
             </div>
           )}
           <div>
             <h2>Configure {vendorName}</h2>
-            <p style={{ color: "var(--text-muted)", fontSize: "0.9rem", margin: 0 }}>
+            <p>
               Set up credentials and binding for the {vendorName} integration.
             </p>
           </div>
         </div>
       </header>
 
-      {error && <div className="rounded-lg border border-red-500/40 bg-red-900/20 p-3 mb-6 text-sm text-red-300">{error}</div>}
-      {isLoading && <div className="text-sm text-muted mb-6">Loading integration...</div>}
+      {error && <div className="integration-alert integration-alert--error">{error}</div>}
+      {isLoading && <div className="integration-alert">Loading integration...</div>}
 
       <form onSubmit={handleSave}>
         <div className="config-section">
@@ -237,23 +237,26 @@ export function IntegrationConfigPage() {
             <input type="number" value={binding.priority} onChange={(event) => setForm((current) => ({ ...current, bindings: [{ ...binding, priority: Number(event.target.value) || 10 }] }))} min={1} />
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: "12px", marginTop: "24px", paddingTop: "24px", borderTop: "1px solid var(--glass-border)" }}>
+          <div className="integration-enabled-row">
             <input
               type="checkbox"
               id="enabledCheck"
               checked={form.enabled}
               onChange={(event) => setForm((current) => ({ ...current, enabled: event.target.checked }))}
-              style={{ width: "18px", height: "18px", accentColor: "var(--accent-blue)" }}
             />
-            <label htmlFor="enabledCheck" style={{ fontSize: "0.95rem", fontWeight: 600, cursor: "pointer" }}>Enable this integration immediately</label>
+            <label htmlFor="enabledCheck">Enable this integration immediately</label>
           </div>
         </div>
 
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: "16px", marginTop: "32px" }}>
-          <button type="button" className="action-button" style={{ background: "rgba(255,255,255,0.05)" }} onClick={() => navigate("/integrations")} disabled={isSaving}>
+        <div className="integration-form-actions">
+          <button type="button" className="action-button action-button--ghost" onClick={() => navigate("/integrations")} disabled={isSaving}>
             Cancel
           </button>
+<<<<<<< Updated upstream
           <button type="submit" className="action-button action-button--primary" style={{ minWidth: "160px" }} disabled={isSaving || isLoading}>
+=======
+          <button type="submit" className="action-button action-button--primary integration-save-button" disabled={isSaving || isLoading || !canManageIntegrations}>
+>>>>>>> Stashed changes
             {isSaving ? "Saving..." : "Save Integration"}
           </button>
         </div>

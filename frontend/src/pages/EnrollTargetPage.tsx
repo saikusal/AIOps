@@ -539,7 +539,7 @@ export function EnrollTargetPage() {
           </div>
 
           <div className="eyebrow">5. Primary Service Mapping</div>
-          <h3>Identify the workload OpsMitra should treat as primary</h3>
+          <h3>Identify the workload AIOps Platform should treat as primary</h3>
           <div className="form-grid">
             <label className="form-field">
               <span>Service name</span>
@@ -622,7 +622,7 @@ export function EnrollTargetPage() {
             </label>
             <label className="form-field">
               <span>OpenSearch ingest pipeline</span>
-              <input value={form.opensearch_pipeline} onChange={(event) => setForm((current) => ({ ...current, opensearch_pipeline: event.target.value }))} placeholder="opsmitra-linux-default" />
+              <input value={form.opensearch_pipeline} onChange={(event) => setForm((current) => ({ ...current, opensearch_pipeline: event.target.value }))} placeholder="aiops-platform-linux-default" />
             </label>
             <label className="form-field form-field--checkbox">
               <span>Ship logs centrally</span>

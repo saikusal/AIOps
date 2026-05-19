@@ -144,6 +144,22 @@ from .typed_actions import (
     infer_typed_action,
     serialize_action_signature,
 )
+<<<<<<< Updated upstream
+=======
+from .blast_radius_estimation import estimate_blast_radius as estimate_pre_execution_blast_radius
+from .rollback_snapshots import capture_pre_execution_snapshot, build_rollback_command_from_snapshot
+from .egap_protocol import egap_dispatch as _egap_dispatch_direct
+from .tenancy import (
+    audit_event,
+    get_default_tenant,
+    has_permission,
+    permissions_for_role,
+    require_permission,
+    resolve_request_tenant,
+    tenant_object_or_404,
+    tenant_queryset,
+)
+>>>>>>> Stashed changes
 from better_profanity import profanity
 import os
 
@@ -585,7 +601,250 @@ def _incident_fingerprint(alert_payload: Dict[str, Any], target_host: str, servi
     return f"{alert_name}:{service_name or target_host}"
 
 
+<<<<<<< Updated upstream
 def _correlate_alert_to_incident(alert_payload: Dict[str, Any], context: Dict[str, Any], summary: str, why: str) -> Incident:
+=======
+def _find_active_incident_alert_for_payload(
+    alert_payload: Dict[str, Any],
+    context: Optional[Dict[str, Any]] = None,
+    tenant=None,
+) -> Optional[IncidentAlert]:
+    context = context or {}
+    labels = alert_payload.get("labels") if isinstance(alert_payload.get("labels"), dict) else {}
+    alert_name = alert_payload.get("alert_name") or labels.get("alertname") or "unknown_alert"
+    target_host = context.get("target_host") or _extract_target_host_from_payload(alert_payload) or ""
+    service_name = context.get("service_name") or labels.get("service") or target_host
+    application_info = _get_application_info(service_name or target_host)
+    application = application_info.get("application", "")
+    fingerprint = _incident_fingerprint(alert_payload, target_host, service_name)
+
+    query = (
+        IncidentAlert.objects.select_related("incident")
+        .filter(
+            incident__status__in=["open", "investigating"],
+            incident__application=application,
+            incident__is_deleted=False,
+            alert_name=alert_name,
+            alert_fingerprint=fingerprint,
+        )
+        .exclude(status="resolved")
+        .order_by("-last_seen_at")
+    )
+    if tenant is not None:
+        query = query.filter(incident__tenant=tenant)
+    if not alert_payload.get("starts_at") and not alert_payload.get("fingerprint"):
+        query = query.filter(target_host=target_host or "", service_name=service_name or "")
+    return query.first()
+
+
+def _record_duplicate_alert_update(incident_alert: IncidentAlert, alert_payload: Dict[str, Any]) -> Incident:
+    incident = incident_alert.incident
+    labels = alert_payload.get("labels") if isinstance(alert_payload.get("labels"), dict) else {}
+    annotations = alert_payload.get("annotations") if isinstance(alert_payload.get("annotations"), dict) else {}
+    status = str(alert_payload.get("status") or "firing").lower()
+    incident_alert.status = status
+    incident_alert.labels = labels
+    incident_alert.annotations = annotations
+    incident_alert.raw_payload = alert_payload
+    incident_alert.save(update_fields=["status", "labels", "annotations", "raw_payload", "last_seen_at"])
+
+    if incident.status == "open":
+        incident.status = "investigating"
+    incident.summary = incident.summary or str(annotations.get("summary") or "")
+    incident.save(update_fields=["status", "summary", "updated_at"])
+    IncidentTimelineEvent.objects.create(
+        incident=incident,
+        event_type="alert_updated",
+        title=f"{incident_alert.alert_name} {status}",
+        detail="Duplicate Alertmanager notification for the active alert lifecycle.",
+        payload={
+            "alert_name": incident_alert.alert_name,
+            "status": status,
+            "target_host": incident_alert.target_host,
+            "service_name": incident_alert.service_name,
+            "deduplicated": True,
+        },
+    )
+    return incident
+
+
+def _same_alert_lifecycle(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    left_labels = left.get("labels") if isinstance(left.get("labels"), dict) else {}
+    right_labels = right.get("labels") if isinstance(right.get("labels"), dict) else {}
+    return (
+        str(left.get("alert_name") or left_labels.get("alertname") or "") == str(right.get("alert_name") or right_labels.get("alertname") or "")
+        and str(left.get("fingerprint") or left_labels.get("fingerprint") or "") == str(right.get("fingerprint") or right_labels.get("fingerprint") or "")
+        and str(left.get("starts_at") or "") == str(right.get("starts_at") or "")
+    )
+
+
+def _alert_source_name(from_alertmanager: bool, alert_payload: Optional[Dict[str, Any]] = None) -> str:
+    if from_alertmanager:
+        return "alertmanager"
+    payload = alert_payload or {}
+    return str(payload.get("source") or "manual")
+
+
+def _resolve_alert_capture_tenant(request: Optional[HttpRequest] = None, tenant=None):
+    """Alert webhooks can be unauthenticated, so fall back to the default workspace."""
+    if tenant is not None:
+        return tenant
+    if request is not None:
+        request_tenant = getattr(request, "tenant", None)
+        if request_tenant is not None:
+            return request_tenant
+    return get_default_tenant()
+
+
+def _serialize_correlation_links(links: List[Any]) -> List[Dict[str, Any]]:
+    payload = []
+    for link in links:
+        related = link.related_incident
+        payload.append(
+            {
+                "incident_key": str(related.incident_key),
+                "incident_number": related.incident_number or "",
+                "title": related.title,
+                "score": link.score,
+                "reasons": link.reasons or [],
+            }
+        )
+    return payload
+
+
+def _serialize_related_incidents(incident: Incident) -> List[Dict[str, Any]]:
+    related: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+    outgoing = incident.outgoing_correlation_links.select_related("related_incident").order_by("-score", "-created_at")[:10]
+    incoming = incident.incoming_correlation_links.select_related("source_incident").order_by("-score", "-created_at")[:10]
+    for link in outgoing:
+        related_incident = link.related_incident
+        if related_incident.id in seen:
+            continue
+        seen.add(related_incident.id)
+        related.append(
+            {
+                "incident_key": str(related_incident.incident_key),
+                "incident_number": related_incident.incident_number or "",
+                "title": related_incident.title,
+                "score": link.score,
+                "reasons": link.reasons or [],
+                "direction": "outgoing",
+            }
+        )
+    for link in incoming:
+        related_incident = link.source_incident
+        if related_incident.id in seen:
+            continue
+        seen.add(related_incident.id)
+        related.append(
+            {
+                "incident_key": str(related_incident.incident_key),
+                "incident_number": related_incident.incident_number or "",
+                "title": related_incident.title,
+                "score": link.score,
+                "reasons": link.reasons or [],
+                "direction": "incoming",
+            }
+        )
+    return sorted(related, key=lambda item: int(item.get("score") or 0), reverse=True)[:10]
+
+
+def _serialize_external_tickets(incident: Incident) -> List[Dict[str, Any]]:
+    tickets = (
+        incident.external_tickets.select_related("integration")
+        .order_by("-created_at")[:20]
+    )
+    return [
+        {
+            "ticket_id": str(ticket.ticket_id),
+            "integration_type": ticket.integration.integration_type,
+            "integration_name": ticket.integration.name,
+            "external_id": ticket.external_id,
+            "external_key": ticket.external_key,
+            "external_url": ticket.external_url,
+            "status": ticket.status,
+            "message": ticket.message,
+            "created_at": ticket.created_at.isoformat(),
+            "updated_at": ticket.updated_at.isoformat(),
+        }
+        for ticket in tickets
+    ]
+
+
+def _materialize_grouped_alert_incidents(primary_alert: Dict[str, Any], *, source: str = "alertmanager", tenant=None) -> List[Dict[str, Any]]:
+    tenant = _resolve_alert_capture_tenant(tenant=tenant)
+    grouped_alerts = primary_alert.get("grouped_alerts") if isinstance(primary_alert.get("grouped_alerts"), list) else []
+    materialized: List[Dict[str, Any]] = []
+    for grouped_alert in grouped_alerts:
+        if not isinstance(grouped_alert, dict) or _same_alert_lifecycle(primary_alert, grouped_alert):
+            continue
+        alert_name = str(grouped_alert.get("alert_name") or ((grouped_alert.get("labels") or {}).get("alertname")) or "AlertmanagerAlert")
+        status = str(grouped_alert.get("status") or "firing").lower()
+        alert_event, event_duplicate = persist_alert_event(grouped_alert, source=source, tenant=tenant)
+        suppressed, suppression_reason = evaluate_suppression(alert_event)
+        if suppressed:
+            mark_suppression(alert_event, True, suppression_reason)
+            materialized.append(
+                {
+                    "alert_name": alert_name,
+                    "action": "suppressed",
+                    "alert_event_id": str(alert_event.event_id),
+                    "repeat_count": alert_event.repeat_count,
+                    "suppression_reason": suppression_reason,
+                }
+            )
+            continue
+        mark_suppression(alert_event, False, "")
+        context = {
+            "target_host": grouped_alert.get("target_host") or _extract_target_host_from_payload(grouped_alert) or "",
+            "service_name": grouped_alert.get("service_name") or ((grouped_alert.get("labels") or {}).get("service")) or "",
+            "dependency_graph": {},
+        }
+        existing_alert = _find_active_incident_alert_for_payload(grouped_alert, context, tenant=tenant)
+        if existing_alert and status == "firing":
+            incident = _record_duplicate_alert_update(existing_alert, grouped_alert)
+            attach_incident(alert_event, incident)
+            action = "updated"
+        else:
+            annotations = grouped_alert.get("annotations") if isinstance(grouped_alert.get("annotations"), dict) else {}
+            summary = str(annotations.get("summary") or annotations.get("description") or f"{alert_name} {status}")
+            incident = _correlate_alert_to_incident(
+                grouped_alert,
+                context,
+                summary,
+                "Individual alert from grouped Alertmanager payload. Created separately for per-alert incident tracking.",
+                auto_investigate=True,
+                tenant=tenant,
+            )
+            attach_incident(alert_event, incident)
+            correlate_incident(alert_event, incident)
+            action = "created"
+        materialized.append(
+            {
+                "alert_name": alert_name,
+                "incident_key": str(incident.incident_key),
+                "incident_number": incident.incident_number or "",
+                "action": action,
+                "alert_event_id": str(alert_event.event_id),
+                "alert_event_duplicate": event_duplicate,
+                "repeat_count": alert_event.repeat_count,
+            }
+        )
+    return materialized
+
+
+def _correlate_alert_to_incident(
+    alert_payload: Dict[str, Any],
+    context: Dict[str, Any],
+    summary: str,
+    why: str,
+    *,
+    auto_investigate: bool = True,
+    tenant=None,
+) -> Incident:
+    tenant = _resolve_alert_capture_tenant(tenant=tenant)
+>>>>>>> Stashed changes
     labels = alert_payload.get("labels") if isinstance(alert_payload.get("labels"), dict) else {}
     annotations = alert_payload.get("annotations") if isinstance(alert_payload.get("annotations"), dict) else {}
     alert_name = alert_payload.get("alert_name") or labels.get("alertname") or "unknown_alert"
@@ -6576,6 +6835,63 @@ def ingest_alert_view(request: HttpRequest):
 
     alert_name = alert_payload.get("alert_name") or ((alert_payload.get("labels") or {}).get("alertname") or "unknown")
     logger.info(f"[INGEST] Alert received: {alert_name} | From AlertManager: {from_alertmanager}")
+<<<<<<< Updated upstream
+=======
+    alert_status = str(alert_payload.get("status") or "firing").lower()
+    alert_source = _alert_source_name(from_alertmanager, alert_payload)
+    tenant = _resolve_alert_capture_tenant(request)
+    alert_event, alert_event_duplicate = persist_alert_event(alert_payload, source=alert_source, tenant=tenant)
+    suppressed, suppression_reason = evaluate_suppression(alert_event)
+    if suppressed:
+        mark_suppression(alert_event, True, suppression_reason)
+        grouped_incidents = _materialize_grouped_alert_incidents(alert_payload, source=alert_source, tenant=tenant) if from_alertmanager else []
+        return JsonResponse(
+            {
+                "status": "accepted_suppressed",
+                "message": "Alert matched a suppression rule or maintenance window; no incident or LLM investigation was started.",
+                "alert_name": alert_name,
+                "alert_event_id": str(alert_event.event_id),
+                "repeat_count": alert_event.repeat_count,
+                "suppression_reason": suppression_reason,
+                "grouped_alert_count": len(alert_payload.get("grouped_alerts") or []),
+                "grouped_incidents": grouped_incidents,
+            },
+            status=200,
+        )
+    mark_suppression(alert_event, False, "")
+    existing_active_alert = _find_active_incident_alert_for_payload(alert_payload, tenant=tenant)
+    if (
+        from_alertmanager
+        and existing_active_alert
+        and alert_status == "firing"
+        and envelope_execute is None
+    ):
+        incident = _record_duplicate_alert_update(existing_active_alert, alert_payload)
+        attach_incident(alert_event, incident)
+        grouped_incidents = _materialize_grouped_alert_incidents(alert_payload, source=alert_source, tenant=tenant)
+        return JsonResponse(
+            {
+                "status": "accepted_duplicate",
+                "message": "Duplicate Alertmanager notification updated the active incident without rerunning full investigation.",
+                "alert_name": alert_name,
+                "alert_event_id": str(alert_event.event_id),
+                "alert_event_duplicate": alert_event_duplicate,
+                "repeat_count": alert_event.repeat_count,
+                "incident": {
+                    "incident_key": str(incident.incident_key),
+                    "incident_number": incident.incident_number or "",
+                    "title": incident.title,
+                    "status": incident.status,
+                    "primary_service": incident.primary_service,
+                    "target_host": incident.target_host,
+                },
+                "deduplicated": True,
+                "grouped_alert_count": len(alert_payload.get("grouped_alerts") or []),
+                "grouped_incidents": grouped_incidents,
+            },
+            status=200,
+        )
+>>>>>>> Stashed changes
     
     context = collect_alert_context(alert_payload)
     target_host = (
@@ -7492,7 +7808,7 @@ FLEET_PROFILE_SEED = [
         "summary": "Read-only cluster agent with workload discovery, heartbeat, and Kubernetes runtime context for monitored clusters.",
         "default_for_target": "kubernetes",
         "components": [
-            "OpsMitra Cluster Agent",
+            "AIOps Platform Cluster Agent",
             "Kubernetes discovery helper",
             "cluster heartbeat",
         ],
@@ -8461,7 +8777,7 @@ def _render_fluent_bit_config(target: Target) -> str:
     input_blocks = "\n".join(_fluent_bit_input_block(target, item) for item in log_sources)
     filter_blocks = "\n".join(_fluent_bit_filter_block(target, item) for item in log_sources)
     output_blocks = _fluent_bit_output_blocks(log_sources)
-    return f"""# Generated by OpsMitra for target {target.target_id}
+    return f"""# Generated by AIOps Platform for target {target.target_id}
 # Review paths, credentials, and runtime-specific mounts before deployment.
 
 [SERVICE]
@@ -8787,7 +9103,7 @@ def _kubernetes_blueprint_payload(
         "install_command": install_command,
         "components": profile.components or [],
         "next_steps": [
-            f"Create the `{namespace}` namespace and deploy the OpsMitra cluster agent manifest.",
+            f"Create the `{namespace}` namespace and deploy the AIOps Platform cluster agent manifest.",
             "The cluster agent enrolls itself back into the control plane using the generated enrollment token.",
             "The agent starts cluster heartbeat and workload discovery for deployments, services, ingresses, and namespaces.",
             "Fleet and topology surfaces update automatically once the agent reports its first heartbeat.",

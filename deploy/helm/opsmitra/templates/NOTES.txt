@@ -1,4 +1,4 @@
-OpsMitra control plane has been installed.
+AIOps Platform control plane has been installed.
 
 Primary services:
 - Web API: {{ include "opsmitra.webServiceName" . }}:{{ .Values.service.webPort }}

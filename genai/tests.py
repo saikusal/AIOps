@@ -91,6 +91,17 @@ from genai.models import (
     TargetRuntimeProfile,
     TargetServiceBinding,
 )
+<<<<<<< Updated upstream
+=======
+from genai.alert_pipeline import (
+    correlate_incident,
+    evaluate_suppression,
+    noise_reduction_stats,
+    persist_alert_event,
+)
+from genai.integration_writeback import create_incident_writebacks
+from genai.tenancy import get_default_tenant
+>>>>>>> Stashed changes
 from genai.views import (
     _default_policy_profile_for_target,
     _ensure_investigation_run_for_incident,
@@ -214,6 +225,702 @@ class RouterTests(SimpleTestCase):
         self.assertEqual(payload["data"][0]["spans"][0]["operationName"], "checkout")
 
 
+<<<<<<< Updated upstream
+=======
+class AlertEvidencePolicyTests(SimpleTestCase):
+    def test_all_demo_rule_alerts_have_explicit_family_mapping(self):
+        rules_path = Path(settings.BASE_DIR) / "demo" / "alerts" / "demo-rules.yml"
+        rule_text = rules_path.read_text()
+        alert_names = re.findall(r"^\s*-\s+alert:\s+([A-Za-z0-9_:-]+)\s*$", rule_text, flags=re.MULTILINE)
+
+        self.assertTrue(alert_names)
+        self.assertEqual(set(alert_names), set(DEMO_ALERT_FAMILY_MAP))
+
+    def test_demo_alert_family_mapping_uses_supported_families(self):
+        supported = {"availability", "error_rate", "latency", "saturation", "dependency", "generic"}
+
+        self.assertTrue(DEMO_ALERT_FAMILY_MAP)
+        self.assertFalse(set(DEMO_ALERT_FAMILY_MAP.values()) - supported)
+
+    def test_each_demo_alert_classifies_to_registered_family(self):
+        for alert_name, expected_family in DEMO_ALERT_FAMILY_MAP.items():
+            with self.subTest(alert_name=alert_name):
+                payload = {
+                    "alert_name": alert_name,
+                    "status": "firing",
+                    "labels": {"alertname": alert_name, "source": "demo"},
+                }
+                self.assertEqual(_classify_alert_family(payload, {}), expected_family)
+
+    def test_service_down_alert_uses_availability_family_and_control_plane_diagnostic(self):
+        context = {
+            "alert_name": "DemoServiceDown",
+            "target_host": "app-orders",
+            "service_name": "app-orders",
+            "dependency_graph": {"depends_on": ["db"], "blast_radius": ["gateway", "frontend"]},
+            "metrics": {
+                "alert_state": {
+                    "result": [
+                        {
+                            "metric": {"alertstate": "pending"},
+                            "value": [1715530000, "1"],
+                        }
+                    ]
+                },
+                "custom_query": {},
+            },
+            "elasticsearch": {"hits": {"hits": []}},
+            "jaeger": {"data": []},
+        }
+        alert_payload = {
+            "alert_name": "DemoServiceDown",
+            "status": "firing",
+            "target_host": "app-orders",
+            "labels": {"service": "app-orders", "severity": "critical", "source": "demo"},
+            "annotations": {"summary": "Demo backend service target is down"},
+        }
+
+        evidence = _assess_recommendation_evidence(context)
+        plan = _coerce_diagnostic_plan(alert_payload, context, {}, "app-orders")
+
+        self.assertEqual(evidence["alert_family"], "availability")
+        self.assertEqual(evidence["safe_action"], "diagnose")
+        self.assertIn("unavailable", evidence["confidence_reason"].lower())
+        self.assertTrue(any("scrape target" in item.lower() or "availability alert" in item.lower() for item in evidence["hard_evidence"]))
+        self.assertEqual(plan["target_host"], "control-agent")
+        self.assertEqual(plan["target_type"], "control_plane")
+        self.assertEqual(plan["diagnostic_command"], "docker inspect aiops-app-orders")
+        self.assertIn("availability incident", plan["summary"].lower())
+        self.assertIn("missing application logs or traces do not weaken this scenario", plan["why"].lower())
+
+    def test_latency_alert_is_diagnosable_without_log_contradiction(self):
+        context = {
+            "alert_name": "DemoAppLatencyHigh",
+            "target_host": "app-inventory",
+            "service_name": "app-inventory",
+            "dependency_graph": {"depends_on": ["db"], "blast_radius": ["gateway", "frontend"]},
+            "metrics": {
+                "alert_state": {
+                    "result": [
+                        {
+                            "metric": {"alertstate": "firing"},
+                            "value": [1715530000, "1"],
+                        }
+                    ]
+                },
+                "custom_query": {},
+            },
+            "elasticsearch": {"hits": {"hits": []}},
+            "jaeger": {"data": []},
+        }
+
+        evidence = _assess_recommendation_evidence(context)
+
+        self.assertEqual(evidence["alert_family"], "latency")
+        self.assertEqual(evidence["safe_action"], "diagnose")
+        self.assertNotIn("Recent logs do not contain clear active error messages.", evidence["structured_evidence"]["signals"]["contradicting"])
+
+
+class IncidentDeepDiveProjectionTests(TestCase):
+    def test_alert_event_deduplicates_same_lifecycle(self):
+        payload = {
+            "alert_name": "DemoAppErrorsHigh",
+            "status": "firing",
+            "fingerprint": "am-fingerprint-1",
+            "starts_at": "2026-05-13T01:00:00Z",
+            "labels": {"alertname": "DemoAppErrorsHigh", "service": "app-inventory"},
+        }
+
+        first, first_duplicate = persist_alert_event(payload, source="alertmanager")
+        second, second_duplicate = persist_alert_event(payload, source="alertmanager")
+
+        self.assertFalse(first_duplicate)
+        self.assertTrue(second_duplicate)
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(second.repeat_count, 2)
+        stats = noise_reduction_stats(minutes=1440)
+        self.assertEqual(stats["raw_notifications"], 2)
+        self.assertEqual(stats["unique_lifecycles"], 1)
+        self.assertEqual(stats["duplicate_notifications"], 1)
+
+    def test_alert_suppression_matches_scoped_rule(self):
+        AlertSuppression.objects.create(
+            name="Suppress inventory demo errors",
+            alert_name="DemoAppErrorsHigh",
+            service_name="app-inventory",
+            reason="planned_validation_noise",
+        )
+        event, _duplicate = persist_alert_event(
+            {
+                "alert_name": "DemoAppErrorsHigh",
+                "status": "firing",
+                "labels": {"alertname": "DemoAppErrorsHigh", "service": "app-inventory"},
+            },
+            source="manual",
+        )
+
+        suppressed, reason = evaluate_suppression(event)
+
+        self.assertTrue(suppressed)
+        self.assertEqual(reason, "planned_validation_noise")
+
+    def test_maintenance_window_suppresses_matching_alert(self):
+        now = datetime.now(timezone.utc)
+        MaintenanceWindow.objects.create(
+            name="Inventory deployment",
+            service_name="app-inventory",
+            starts_at=now - timedelta(minutes=5),
+            ends_at=now + timedelta(minutes=10),
+            reason="deployment_window",
+        )
+        event, _duplicate = persist_alert_event(
+            {
+                "alert_name": "DemoAppLatencyHigh",
+                "status": "firing",
+                "labels": {"alertname": "DemoAppLatencyHigh", "service": "app-inventory"},
+            },
+            source="manual",
+        )
+
+        suppressed, reason = evaluate_suppression(event)
+
+        self.assertTrue(suppressed)
+        self.assertEqual(reason, "deployment_window")
+
+    def test_alert_correlation_links_related_incidents_without_merging(self):
+        existing = Incident.objects.create(
+            application="customer-portal",
+            title="Inventory errors",
+            status="investigating",
+            severity="critical",
+            primary_service="app-inventory",
+            target_host="app-inventory",
+            labels={"environment": "prod"},
+        )
+        current = Incident.objects.create(
+            application="customer-portal",
+            title="Inventory latency",
+            status="open",
+            severity="warning",
+            primary_service="app-inventory",
+            target_host="app-inventory",
+            labels={"environment": "prod"},
+        )
+        event, _duplicate = persist_alert_event(
+            {
+                "alert_name": "DemoAppLatencyHigh",
+                "status": "firing",
+                "labels": {
+                    "alertname": "DemoAppLatencyHigh",
+                    "service": "app-inventory",
+                    "environment": "prod",
+                },
+            },
+            source="alertmanager",
+        )
+
+        links = correlate_incident(event, current)
+
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0].related_incident_id, existing.id)
+        self.assertIn("same_service", links[0].reasons)
+        self.assertEqual(Incident.objects.count(), 2)
+        self.assertEqual(IncidentCorrelationLink.objects.count(), 1)
+
+    @patch("genai.views.query_llm")
+    @patch("genai.views.collect_alert_context")
+    def test_suppressed_ingest_skips_telemetry_and_llm(self, mocked_collect_context, mocked_query_llm):
+        AlertSuppression.objects.create(
+            name="Suppress inventory demo errors",
+            alert_name="DemoAppErrorsHigh",
+            service_name="app-inventory",
+            reason="planned_validation_noise",
+        )
+
+        response = self.client.post(
+            "/genai/alerts/ingest/",
+            data=json.dumps(
+                {
+                    "alert_name": "DemoAppErrorsHigh",
+                    "status": "firing",
+                    "labels": {"alertname": "DemoAppErrorsHigh", "service": "app-inventory"},
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content.decode("utf-8"))
+        self.assertEqual(payload["status"], "accepted_suppressed")
+        self.assertEqual(payload["suppression_reason"], "planned_validation_noise")
+        mocked_collect_context.assert_not_called()
+        mocked_query_llm.assert_not_called()
+        self.assertEqual(AlertEvent.objects.count(), 1)
+        self.assertEqual(Incident.objects.count(), 0)
+
+    def test_noise_rules_api_creates_and_disables_controls(self):
+        user = get_user_model().objects.create_user(username="noise-operator", password="test")
+        self.client.force_login(user)
+
+        create_response = self.client.post(
+            "/genai/alerts/noise/rules/",
+            data=json.dumps(
+                {
+                    "rule_type": "suppression",
+                    "name": "Suppress inventory error storm",
+                    "alert_name": "DemoAppErrorsHigh",
+                    "service_name": "app-inventory",
+                    "reason": "known_upstream_validation",
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(create_response.status_code, 201)
+        created = json.loads(create_response.content.decode("utf-8"))["rule"]
+        self.assertEqual(created["rule_type"], "suppression")
+        self.assertEqual(created["created_by_username"], "noise-operator")
+        self.assertTrue(AlertSuppression.objects.filter(suppression_id=created["id"], enabled=True).exists())
+
+        list_response = self.client.get("/genai/alerts/noise/rules/")
+        self.assertEqual(list_response.status_code, 200)
+        listed = json.loads(list_response.content.decode("utf-8"))
+        self.assertEqual(len(listed["suppressions"]), 1)
+        self.assertIn("stats", listed)
+
+        disable_response = self.client.post(
+            f"/genai/alerts/noise/rules/suppression/{created['id']}/delete/",
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(disable_response.status_code, 200)
+        self.assertFalse(AlertSuppression.objects.get(suppression_id=created["id"]).enabled)
+
+    def test_incident_save_assigns_human_incident_number(self):
+        incident = Incident.objects.create(
+            application="customer-portal",
+            title="Inventory incident",
+            status="open",
+            severity="critical",
+            primary_service="app-inventory",
+            target_host="app-inventory",
+        )
+
+        self.assertEqual(incident.incident_number, f"INC-{incident.pk:06d}")
+
+    def test_delete_incident_soft_deletes_and_hides_from_recent_list(self):
+        user = get_user_model().objects.create_user(username="operator", password="test")
+        self.client.force_login(user)
+        incident = Incident.objects.create(
+            application="customer-portal",
+            title="Inventory incident",
+            status="open",
+            severity="critical",
+            primary_service="app-inventory",
+            target_host="app-inventory",
+        )
+
+        response = self.client.post(
+            f"/genai/incidents/{incident.incident_key}/delete/",
+            data=json.dumps({"reason": "Noise during validation."}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        incident.refresh_from_db()
+        self.assertTrue(incident.is_deleted)
+        self.assertEqual(incident.deleted_by_username, "operator")
+        self.assertEqual(incident.delete_reason, "Noise during validation.")
+        self.assertTrue(incident.timeline.filter(event_type="incident_deleted").exists())
+
+        recent = self.client.get("/genai/incidents/recent/")
+        payload = json.loads(recent.content.decode("utf-8"))
+        self.assertEqual(payload["results"], [])
+
+    @patch("genai.views._ensure_investigation_run_for_incident", return_value=None)
+    def test_same_active_alert_updates_existing_incident(self, _mocked_auto_investigate):
+        payload = {
+            "alert_name": "DemoAppErrorsHigh",
+            "status": "firing",
+            "target_host": "app-inventory",
+            "labels": {"alertname": "DemoAppErrorsHigh", "service": "app-inventory"},
+        }
+        context = {"target_host": "app-inventory", "service_name": "app-inventory"}
+
+        first = _correlate_alert_to_incident(payload, context, "Inventory errors detected.", "Initial firing.")
+        second = _correlate_alert_to_incident(payload, context, "Inventory errors still detected.", "Repeat firing.")
+
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(Incident.objects.count(), 1)
+        self.assertEqual(first.alerts.count(), 1)
+
+    @patch("genai.views._ensure_investigation_run_for_incident", return_value=None)
+    def test_alert_correlation_without_request_tenant_uses_default_tenant(self, _mocked_auto_investigate):
+        payload = {
+            "alert_name": "DemoAppErrorsHigh",
+            "status": "firing",
+            "target_host": "app-inventory",
+            "labels": {"alertname": "DemoAppErrorsHigh", "service": "app-inventory", "severity": "critical"},
+        }
+        context = {"target_host": "app-inventory", "service_name": "app-inventory"}
+
+        incident = _correlate_alert_to_incident(payload, context, "Inventory errors detected.", "Initial firing.", tenant=None)
+
+        self.assertEqual(incident.tenant, get_default_tenant())
+        self.assertIsNotNone(incident.tenant_id)
+
+    @patch("genai.views._ensure_investigation_run_for_incident", return_value=None)
+    @patch("genai.views.query_llm", return_value=(False, "unavailable", ""))
+    @patch("genai.views.collect_alert_context")
+    def test_alert_ingest_without_request_tenant_assigns_default_tenant(
+        self,
+        mocked_collect_context,
+        _mocked_query_llm,
+        _mocked_auto_investigate,
+    ):
+        mocked_collect_context.return_value = {
+            "target_host": "app-inventory",
+            "service_name": "app-inventory",
+            "dependency_graph": {},
+        }
+
+        response = self.client.post(
+            "/genai/alerts/ingest/",
+            data=json.dumps(
+                {
+                    "alert_name": "DemoAppErrorsHigh",
+                    "status": "firing",
+                    "target_host": "app-inventory",
+                    "labels": {"alertname": "DemoAppErrorsHigh", "service": "app-inventory", "severity": "critical"},
+                    "annotations": {"summary": "Inventory errors are high."},
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        incident = Incident.objects.get()
+        alert_event = AlertEvent.objects.get()
+        self.assertEqual(incident.tenant, get_default_tenant())
+        self.assertEqual(alert_event.tenant, get_default_tenant())
+        self.assertEqual(alert_event.incident, incident)
+
+    @patch("genai.views._ensure_investigation_run_for_incident", return_value=None)
+    def test_resolved_same_alert_creates_new_incident_on_next_firing(self, _mocked_auto_investigate):
+        payload = {
+            "alert_name": "DemoAppErrorsHigh",
+            "status": "firing",
+            "target_host": "app-inventory",
+            "labels": {"alertname": "DemoAppErrorsHigh", "service": "app-inventory"},
+        }
+        context = {"target_host": "app-inventory", "service_name": "app-inventory"}
+
+        first = _correlate_alert_to_incident(payload, context, "Inventory errors detected.", "Initial firing.")
+        first.status = "resolved"
+        first.resolved_at = datetime.now(timezone.utc)
+        first.save(update_fields=["status", "resolved_at", "updated_at"])
+        first.alerts.update(status="resolved")
+
+        second = _correlate_alert_to_incident(payload, context, "Inventory errors detected again.", "Fresh firing.")
+
+        self.assertNotEqual(first.id, second.id)
+        self.assertEqual(Incident.objects.count(), 2)
+
+    @patch("genai.views._ensure_investigation_run_for_incident", return_value=None)
+    def test_alertmanager_starts_at_separates_alert_lifecycles(self, _mocked_auto_investigate):
+        context = {"target_host": "app-inventory", "service_name": "app-inventory"}
+        base_payload = {
+            "alert_name": "DemoAppErrorsHigh",
+            "status": "firing",
+            "target_host": "app-inventory",
+            "fingerprint": "am-fingerprint-1",
+            "labels": {"alertname": "DemoAppErrorsHigh", "service": "app-inventory"},
+        }
+
+        first = _correlate_alert_to_incident(
+            {**base_payload, "starts_at": "2026-05-13T01:00:00Z"},
+            context,
+            "Inventory errors detected.",
+            "Initial firing.",
+        )
+        repeat = _correlate_alert_to_incident(
+            {**base_payload, "starts_at": "2026-05-13T01:00:00Z"},
+            context,
+            "Inventory errors still detected.",
+            "Repeat firing.",
+        )
+        fresh = _correlate_alert_to_incident(
+            {**base_payload, "starts_at": "2026-05-13T02:00:00Z"},
+            context,
+            "Inventory errors detected again.",
+            "Fresh firing.",
+        )
+
+        self.assertEqual(first.id, repeat.id)
+        self.assertNotEqual(first.id, fresh.id)
+        self.assertEqual(Incident.objects.count(), 2)
+
+    @patch("genai.views._ensure_investigation_run_for_incident", return_value=None)
+    @patch("genai.views.query_llm")
+    @patch("genai.views.collect_alert_context")
+    def test_duplicate_alertmanager_notification_skips_full_investigation(self, mocked_collect_context, mocked_query_llm, mocked_auto_investigate):
+        incident = Incident.objects.create(
+            application="customer-portal",
+            title="Inventory incident",
+            status="investigating",
+            severity="critical",
+            primary_service="app-inventory",
+            target_host="app-inventory",
+        )
+        IncidentAlert.objects.create(
+            incident=incident,
+            alert_name="DemoAppErrorsHigh",
+            alert_fingerprint="am-fingerprint-1:2026-05-13T01:00:00Z",
+            status="firing",
+            target_host="app-inventory",
+            service_name="app-inventory",
+        )
+
+        response = self.client.post(
+            "/genai/alerts/ingest/",
+            data=json.dumps(
+                {
+                    "receiver": "aiops",
+                    "status": "firing",
+                    "groupKey": "{}:{alertname=\"DemoAppErrorsHigh\"}",
+                    "commonLabels": {
+                        "alertname": "DemoAppErrorsHigh",
+                        "service": "app-inventory",
+                        "instance": "app-inventory:8000",
+                    },
+                    "alerts": [
+                        {
+                            "status": "firing",
+                            "fingerprint": "am-fingerprint-1",
+                            "startsAt": "2026-05-13T01:00:00Z",
+                            "labels": {
+                                "alertname": "DemoAppErrorsHigh",
+                                "service": "app-inventory",
+                                "instance": "app-inventory:8000",
+                            },
+                            "annotations": {"summary": "Inventory errors are still high."},
+                        },
+                        {
+                            "status": "firing",
+                            "fingerprint": "am-fingerprint-2",
+                            "startsAt": "2026-05-13T01:01:00Z",
+                            "labels": {
+                                "alertname": "DemoAppLatencyHigh",
+                                "service": "app-inventory",
+                                "instance": "app-inventory:8000",
+                            },
+                            "annotations": {"summary": "Inventory latency is high."},
+                        },
+                    ],
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content.decode("utf-8"))
+        self.assertEqual(payload["status"], "accepted_duplicate")
+        self.assertTrue(payload["deduplicated"])
+        self.assertEqual(payload["grouped_alert_count"], 2)
+        self.assertEqual(len(payload["grouped_incidents"]), 1)
+        self.assertEqual(payload["grouped_incidents"][0]["alert_name"], "DemoAppLatencyHigh")
+        self.assertEqual(payload["grouped_incidents"][0]["action"], "created")
+        mocked_collect_context.assert_not_called()
+        mocked_query_llm.assert_not_called()
+        self.assertTrue(incident.timeline.filter(event_type="alert_updated").exists())
+        self.assertEqual(Incident.objects.count(), 2)
+        self.assertEqual(IncidentAlert.objects.count(), 2)
+        self.assertEqual(mocked_auto_investigate.call_count, 1)
+
+    def test_deep_dive_projection_does_not_replace_diagnostic_command_with_remediation_command(self):
+        incident = Incident.objects.create(
+            application="customer-portal",
+            title="Inventory incident",
+            status="investigating",
+            severity="critical",
+            primary_service="app-inventory",
+            target_host="app-inventory",
+        )
+        IncidentTimelineEvent.objects.create(
+            incident=incident,
+            event_type="diagnostic_command_executed",
+            title="Diagnostic command executed",
+            detail="tail -n 200 /var/log/demo/app-inventory.log",
+            payload={
+                "command": "tail -n 200 /var/log/demo/app-inventory.log",
+                "target_host": "app-inventory",
+                "final_answer": "Inventory errors confirmed.",
+                "command_output": "status=503",
+                "analysis_sections": {
+                    "remediation_command": "docker restart aiops-app-inventory",
+                    "remediation_target_host": "control-agent",
+                },
+            },
+        )
+        IncidentTimelineEvent.objects.create(
+            incident=incident,
+            event_type="remediation_command_executed",
+            title="Remediation command executed",
+            detail="docker restart aiops-app-inventory",
+            payload={
+                "command": "docker restart aiops-app-inventory",
+                "target_host": "control-agent",
+                "final_answer": "Container restarted.",
+                "command_output": "restarted",
+            },
+        )
+
+        projection = _incident_deep_dive_projection(
+            incident=incident,
+            linked_recommendation={},
+            latest_investigation={},
+        )
+
+        self.assertEqual(projection["diagnostic_command"], "tail -n 200 /var/log/demo/app-inventory.log")
+        self.assertEqual(projection["target_host"], "app-inventory")
+        self.assertEqual(projection["remediation_command"], "docker restart aiops-app-inventory")
+        self.assertEqual(projection["remediation_target_host"], "control-agent")
+        self.assertEqual(projection["post_remediation_ai_analysis"], "Container restarted.")
+
+    def test_timeline_payload_exposes_backend_resolved_deep_dive_card(self):
+        incident = Incident.objects.create(
+            application="customer-portal",
+            title="Orders availability incident",
+            status="open",
+            severity="critical",
+            primary_service="app-orders",
+            target_host="app-orders",
+            summary="app-orders is unavailable.",
+        )
+        InvestigationRun.objects.create(
+            incident=incident,
+            route="investigation",
+            question="Old generic run",
+            application="customer-portal",
+            service="app-orders",
+            target_host="app-orders",
+            status="completed",
+            current_stage="completed",
+            evidence_bundle_json={
+                "evidence_assessment": {
+                    "safe_action": "observe",
+                    "confidence_reason": "No hard failure evidence is present.",
+                    "missing_evidence": ["No current service error-rate sample was available."],
+                }
+            },
+            missing_evidence_json=["No current service error-rate sample was available."],
+        )
+        recent_entry = {
+            "alert_id": "alert-demo",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "alert_name": "DemoServiceDown",
+            "status": "firing",
+            "incident_key": str(incident.incident_key),
+            "target_host": "control-agent",
+            "target_type": "control_plane",
+            "diagnostic_command": "docker inspect aiops-app-orders",
+            "should_execute": True,
+            "decision_policy": "diagnose",
+            "confidence_reason": "The target appears unavailable from the observability control plane.",
+            "evidence_assessment": {
+                "safe_action": "diagnose",
+                "alert_family": "availability",
+                "hard_evidence": ["Prometheus indicates the scrape target is unavailable."],
+                "missing_evidence": [],
+            },
+        }
+
+        with patch("genai.views.cache.get", return_value=[recent_entry]), patch(
+            "genai.views._compute_incident_revenue_impact",
+            return_value=None,
+        ):
+            from genai.views import _incident_timeline_payload
+
+            payload = _incident_timeline_payload(incident)
+
+        self.assertEqual(payload["deep_dive"]["diagnostic_command"], "docker inspect aiops-app-orders")
+        self.assertEqual(payload["deep_dive"]["target_host"], "control-agent")
+        self.assertEqual(payload["deep_dive"]["target_type"], "control_plane")
+        self.assertTrue(payload["deep_dive"]["should_execute"])
+        self.assertEqual(payload["deep_dive"]["decision_policy"], "diagnose")
+        self.assertEqual(payload["deep_dive"]["missing_evidence"], [])
+
+    def test_timeline_payload_derives_pending_command_from_active_alert_without_recent_recommendation(self):
+        incident = Incident.objects.create(
+            application="customer-portal",
+            title="Orders availability incident",
+            status="open",
+            severity="critical",
+            primary_service="app-orders",
+            target_host="app-orders",
+            summary="app-orders is unavailable.",
+        )
+        IncidentAlert.objects.create(
+            incident=incident,
+            alert_name="DemoServiceDown",
+            status="firing",
+            target_host="app-orders",
+            service_name="app-orders",
+            labels={"service": "app-orders", "source": "demo"},
+            annotations={"summary": "Demo backend service target is down"},
+            raw_payload={
+                "alert_name": "DemoServiceDown",
+                "status": "firing",
+                "target_host": "app-orders",
+                "labels": {"service": "app-orders", "source": "demo"},
+                "annotations": {"summary": "Demo backend service target is down"},
+            },
+        )
+        InvestigationRun.objects.create(
+            incident=incident,
+            route="investigation",
+            question="Old generic run",
+            application="customer-portal",
+            service="app-orders",
+            target_host="app-orders",
+            status="completed",
+            current_stage="completed",
+            evidence_bundle_json={"evidence_assessment": {"safe_action": "observe"}},
+        )
+
+        metrics_context = {
+            "alert_name": "DemoServiceDown",
+            "target_host": "app-orders",
+            "service_name": "app-orders",
+            "dependency_graph": {"depends_on": ["db"], "blast_radius": ["gateway", "frontend"]},
+            "metrics": {
+                "alert_state": {
+                    "result": [{"metric": {"alertstate": "firing"}, "value": [1715530000, "1"]}]
+                },
+                "custom_query": {},
+            },
+            "elasticsearch": {"hits": {"hits": []}},
+            "jaeger": {"data": []},
+        }
+        with patch("genai.views.cache.get", return_value=[]), patch(
+            "genai.views.collect_alert_context",
+            return_value=metrics_context,
+        ), patch(
+            "genai.views._compute_incident_revenue_impact",
+            return_value=None,
+        ):
+            from genai.views import _incident_timeline_payload
+
+            payload = _incident_timeline_payload(incident)
+
+        self.assertEqual(payload["deep_dive"]["diagnostic_command"], "docker inspect aiops-app-orders")
+        self.assertEqual(payload["deep_dive"]["target_host"], "control-agent")
+        self.assertTrue(payload["deep_dive"]["should_execute"])
+        self.assertEqual(payload["deep_dive"]["decision_policy"], "diagnose")
+
+
+>>>>>>> Stashed changes
 class LogSearchTests(TestCase):
     def test_fetch_elasticsearch_logs_prefers_onboarded_target_metadata_for_prod(self):
         target = Target.objects.create(

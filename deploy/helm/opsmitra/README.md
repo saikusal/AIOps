@@ -1,6 +1,6 @@
-# OpsMitra Control Plane Helm Chart
+# AIOps Platform Control Plane Helm Chart
 
-This chart deploys the OpsMitra control plane on Kubernetes.
+This chart deploys the AIOps Platform control plane on Kubernetes.
 
 ## What it deploys
 

@@ -56,6 +56,9 @@ export function IntegrationsPage() {
     return map;
   }, [integrations]);
 
+  const configuredCount = catalog.filter((integration) => configuredMap.has(integration.vendorId)).length;
+  const coreCount = catalog.filter((integration) => integration.tier === "Core").length;
+
   const handleTest = async (vendorId: string, name: string) => {
     setIsTesting(vendorId);
     setTestResult(null);
@@ -73,14 +76,31 @@ export function IntegrationsPage() {
   };
 
   return (
-    <div className="page-card" style={{ maxWidth: "1200px", margin: "0 auto" }}>
-      <header className="mb-10">
-        <h2 className="text-3xl font-extrabold mb-3">Connected Infrastructure</h2>
-        <p className="text-base text-muted max-w-2xl">Manage external telemetry sources, cloud providers, and observability platforms from one place.</p>
+    <div className="integrations-page">
+      <header className="integrations-hero">
+        <div>
+          <div className="eyebrow">Integration Hub</div>
+          <h2>Connected Infrastructure</h2>
+          <p>Manage external telemetry sources, cloud providers, and observability platforms from one place.</p>
+        </div>
+        <div className="integrations-summary" aria-label="Integration summary">
+          <div>
+            <span>Configured</span>
+            <strong>{configuredCount}</strong>
+          </div>
+          <div>
+            <span>Catalog</span>
+            <strong>{catalog.length}</strong>
+          </div>
+          <div>
+            <span>Core Sources</span>
+            <strong>{coreCount}</strong>
+          </div>
+        </div>
       </header>
 
-      {error && <div className="rounded-lg border border-red-500/40 bg-red-900/20 p-3 mb-6 text-sm text-red-300">{error}</div>}
-      {isLoading && <div className="text-sm text-muted mb-6">Loading integrations...</div>}
+      {error && <div className="integration-alert integration-alert--error">{error}</div>}
+      {isLoading && <div className="integration-alert">Loading integrations...</div>}
 
       <div className="integration-grid">
         {catalog.map((integration, i) => {
@@ -101,10 +121,18 @@ export function IntegrationsPage() {
                 <div className="integration-info">
                   <h3>
                     {integration.name}
-                    {isConfigured && <span style={{ width: "10px", height: "10px", borderRadius: "50%", background: "#22c55e", display: "inline-block" }}></span>}
+                    {isConfigured && <span className="integration-status-dot" aria-label="Configured"></span>}
                   </h3>
+<<<<<<< Updated upstream
                   <span className="integration-type">{integration.type}</span>
                   {configured?.health_status && <span className="integration-type">{configured.health_status}</span>}
+=======
+                  <div className="integration-meta-row">
+                    <span className="integration-type">{integration.type}</span>
+                    {configured?.health_status && <span className="integration-type">{configured.health_status}</span>}
+                  </div>
+                  {(configured?.capabilities || []).length ? <span className="integration-capabilities">{configured?.capabilities?.join(" · ")}</span> : null}
+>>>>>>> Stashed changes
                 </div>
                 <span className="integration-tier">{integration.tier}</span>
               </div>
@@ -113,7 +141,7 @@ export function IntegrationsPage() {
                 <motion.div
                   initial={{ opacity: 0, scale: 0.95 }}
                   animate={{ opacity: 1, scale: 1 }}
-                  className={`text-sm font-medium p-3 mb-4 rounded-lg border ${testResult.status === "success" ? "bg-green-900/20 border-green-500/50 text-green-400" : "bg-red-900/20 border-red-500/50 text-red-400"}`}
+                  className={`integration-test-result ${testResult.status === "success" ? "is-success" : "is-error"}`}
                 >
                   {testResult.message}
                 </motion.div>
@@ -121,17 +149,15 @@ export function IntegrationsPage() {
 
               <div className="integration-actions">
                 <button
-                  className={`action-button flex-1 py-2.5 ${isConfigured ? "bg-white/5" : "action-button--primary"}`}
+                  className={`action-button integration-action ${isConfigured ? "action-button--ghost" : ""}`}
                   onClick={() => navigate(`/integrations/${integration.vendorId}`)}
-                  style={{ borderRadius: "8px" }}
                 >
                   {isConfigured ? "Edit Config" : "Configure"}
                 </button>
                 <button
-                  className="action-button flex-1 py-2.5 relative"
+                  className="action-button action-button--ghost integration-action"
                   onClick={() => handleTest(integration.vendorId, integration.name)}
                   disabled={isTesting === integration.vendorId || !isConfigured}
-                  style={{ borderRadius: "8px" }}
                 >
                   {isTesting === integration.vendorId ? "Testing..." : "Test Connection"}
                 </button>

@@ -182,7 +182,7 @@ def _enroll(state: Dict[str, Any]) -> str:
             "cluster_name": CLUSTER_NAME,
         },
         "components": [
-            "OpsMitra Cluster Agent",
+            "AIOps Platform Cluster Agent",
             "Kubernetes discovery helper",
             "cluster heartbeat",
         ],
@@ -272,7 +272,7 @@ def _heartbeat(target_id: str) -> None:
         "collector_status": "warning" if errors else "healthy",
         "metadata_json": metadata_json,
         "components": [
-            {"name": "OpsMitra Cluster Agent", "status": "healthy", "version": "v1"},
+            {"name": "AIOps Platform Cluster Agent", "status": "healthy", "version": "v1"},
             {"name": "Kubernetes discovery helper", "status": "warning" if errors else "healthy"},
         ],
         "discovered_services": discovered_services,

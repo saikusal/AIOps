@@ -1,4 +1,4 @@
-# OpsMitra Cluster Agent Helm Chart
+# AIOps Platform Cluster Agent Helm Chart
 
 This chart deploys the monitored-cluster agent into a customer Kubernetes cluster.
 
@@ -6,7 +6,7 @@ This chart deploys the monitored-cluster agent into a customer Kubernetes cluste
 
 The cluster agent:
 
-- enrolls the cluster into OpsMitra using an enrollment token
+- enrolls the cluster into AIOps Platform using an enrollment token
 - sends heartbeat updates back to the control plane
 - discovers namespaces, nodes, services, deployments, statefulsets, daemonsets, and ingresses
 - executes queued Kubernetes diagnostic commands from the control plane

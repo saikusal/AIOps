@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   acknowledgeSla,
@@ -11,6 +11,12 @@ import {
   generateTimelineNarrative,
   getRunbookDownloadUrl,
   getTimelineNarrativeDownloadUrl,
+<<<<<<< Updated upstream
+=======
+  type AlertRecommendation,
+  type BlastRadiusEstimate,
+  type IncidentTimeline,
+>>>>>>> Stashed changes
   type RunbookResult,
   type TypedAction,
 } from "../lib/api";
@@ -49,6 +55,35 @@ function formatSlaMinutes(minutes: number | null): string {
   return `${Math.round(minutes / 60)}h ${Math.round(minutes % 60)}m left`;
 }
 
+<<<<<<< Updated upstream
+=======
+function formatDateTime(value?: string | null): string {
+  if (!value) return "not recorded";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
+function compactText(value?: string | null, fallback = "Not available yet."): string {
+  return value?.replace(/\s+/g, " ").trim() || fallback;
+}
+
+function joinDetail(parts: Array<string | undefined | null | false>): string {
+  return parts.filter(Boolean).join(" ");
+}
+
+function hasDisplayValue(value: unknown): boolean {
+  if (value === undefined || value === null || value === "") return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(value as Record<string, unknown>).length > 0;
+  return true;
+}
+
+function firstDisplayValue<T>(...values: T[]): T | undefined {
+  return values.find((value) => hasDisplayValue(value));
+}
+
+>>>>>>> Stashed changes
 type DecisionEvidenceMeta = {
   decision_policy?: string;
   confidence_reason?: string;
@@ -135,6 +170,261 @@ function DecisionPanel({ meta }: { meta: DecisionEvidenceMeta }) {
         </div>
       ) : null}
     </article>
+  );
+}
+
+type JourneyStatus = "pending" | "active" | "completed" | "blocked" | "failed" | "resolved";
+
+type VisualJourneyStage = {
+  key: string;
+  label: string;
+  meta: string;
+  status: JourneyStatus;
+  detail: string;
+  action?: ReactNode;
+};
+
+type ImpactResource = {
+  id: string;
+  label: string;
+  kind: "alert" | "service" | "dependency" | "impacted" | "runbook";
+  status: JourneyStatus;
+  meta: string;
+};
+
+function normalizeStatus(value?: string | null): string {
+  return String(value || "").toLowerCase().replace(/[_\s]+/g, "-");
+}
+
+function statusToJourneyStatus(value?: string | null): JourneyStatus {
+  const status = normalizeStatus(value);
+  if (["resolved", "closed", "verified", "healthy"].includes(status)) return "resolved";
+  if (["completed", "success", "succeeded", "done"].includes(status)) return "completed";
+  if (["running", "in-progress", "executing", "active", "firing", "open", "triggered"].includes(status)) return "active";
+  if (["approval-required", "blocked", "waiting", "verification-pending"].includes(status)) return "blocked";
+  if (["failed", "error", "breached", "critical"].includes(status)) return "failed";
+  return "pending";
+}
+
+function isTerminalIncident(status?: string | null): boolean {
+  return ["resolved", "closed", "verified"].includes(normalizeStatus(status));
+}
+
+function hasRunbook(selectedKey: string | undefined, incident: IncidentTimeline, runbookState: Record<string, RunbookResult | null>) {
+  return Boolean(selectedKey && (runbookState[selectedKey] || incident.latest_runbook));
+}
+
+function buildImpactResources(
+  incident: IncidentTimeline,
+  selectedAlert: AlertRecommendation | undefined,
+  deepDiveEntry: (AlertRecommendation & Record<string, unknown>) | null,
+  runbookReady: boolean,
+): ImpactResource[] {
+  const rootLabel = incident.primary_service || incident.target_host || "Primary service";
+  const alertLabel = selectedAlert?.alert_name || incident.alerts?.[0]?.alert_name || "Alert signal";
+  const dependencyNames = Array.from(new Set([
+    ...(selectedAlert?.depends_on || []),
+    ...(deepDiveEntry?.depends_on || []),
+  ].filter(Boolean)));
+  const impactedNames = Array.from(new Set([
+    ...(incident.blast_radius || []),
+    ...(selectedAlert?.blast_radius || []),
+  ].filter((item) => item && item !== rootLabel)));
+
+  return [
+    {
+      id: `alert-${alertLabel}`,
+      label: alertLabel,
+      kind: "alert",
+      status: statusToJourneyStatus(selectedAlert?.status || incident.status),
+      meta: selectedAlert?.status || "signal",
+    },
+    {
+      id: `service-${rootLabel}`,
+      label: rootLabel,
+      kind: "service",
+      status: incident.sla?.breached ? "failed" : statusToJourneyStatus(incident.status),
+      meta: incident.target_host || "primary resource",
+    },
+    ...dependencyNames.slice(0, 4).map((name) => ({
+      id: `dependency-${name}`,
+      label: name,
+      kind: "dependency" as const,
+      status: "completed" as const,
+      meta: "upstream dependency",
+    })),
+    ...impactedNames.slice(0, 6).map((name) => ({
+      id: `impacted-${name}`,
+      label: name,
+      kind: "impacted" as const,
+      status: isTerminalIncident(incident.status) ? "resolved" as const : "active" as const,
+      meta: "blast radius",
+    })),
+    {
+      id: `runbook-${incident.incident_key}`,
+      label: runbookReady ? "Runbook ready" : "Runbook pending",
+      kind: "runbook",
+      status: runbookReady ? "completed" : "pending",
+      meta: "knowledge base",
+    },
+  ];
+}
+
+function JourneyIcon({ kind }: { kind: ImpactResource["kind"] }) {
+  const common = {
+    width: 22,
+    height: 22,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.8,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+
+  if (kind === "alert") {
+    return (
+      <svg {...common}>
+        <path d="M12 3l9 16H3L12 3z" />
+        <path d="M12 9v4" />
+        <path d="M12 17h.01" />
+      </svg>
+    );
+  }
+  if (kind === "dependency") {
+    return (
+      <svg {...common}>
+        <rect x="3" y="4" width="6" height="6" rx="2" />
+        <rect x="15" y="4" width="6" height="6" rx="2" />
+        <path d="M9 7h6" />
+        <path d="M12 10v7" />
+        <circle cx="12" cy="19" r="2" />
+      </svg>
+    );
+  }
+  if (kind === "impacted") {
+    return (
+      <svg {...common}>
+        <circle cx="12" cy="12" r="8" />
+        <path d="M12 8v4l3 2" />
+        <path d="M4 12H2" />
+        <path d="M22 12h-2" />
+      </svg>
+    );
+  }
+  if (kind === "runbook") {
+    return (
+      <svg {...common}>
+        <path d="M6 4h9l3 3v13H6z" />
+        <path d="M15 4v4h4" />
+        <path d="M9 12h6" />
+        <path d="M9 16h5" />
+      </svg>
+    );
+  }
+  return (
+    <svg {...common}>
+      <rect x="5" y="5" width="14" height="14" rx="3" />
+      <path d="M9 9h6v6H9z" />
+      <path d="M12 2v3" />
+      <path d="M12 19v3" />
+      <path d="M2 12h3" />
+      <path d="M19 12h3" />
+    </svg>
+  );
+}
+
+function IncidentVisualJourney({
+  incident,
+  stages,
+  resources,
+  graphUrl,
+}: {
+  incident: IncidentTimeline;
+  stages: VisualJourneyStage[];
+  resources: ImpactResource[];
+  graphUrl: string;
+}) {
+  const primaryStatus = incident.sla?.breached ? "failed" : statusToJourneyStatus(incident.status);
+  const revenueLost = incident.business_impact?.revenue_lost ?? 0;
+
+  return (
+    <section className={`incident-journey incident-journey--${primaryStatus}`}>
+      <div className="incident-journey__header">
+        <div>
+          <div className="eyebrow">Live Incident Journey</div>
+          <h3>{incident.incident_number ? `${incident.incident_number} · ${incident.title}` : incident.title}</h3>
+          <p>{incident.reasoning || incident.summary}</p>
+        </div>
+        <div className="incident-journey__status-orb" aria-label={`Incident status ${incident.status}`}>
+          <span />
+          <strong>{incident.status || "unknown"}</strong>
+        </div>
+      </div>
+
+      <div className="incident-journey__metrics">
+        <div className={`incident-journey__metric is-${primaryStatus}`}>
+          <span>Severity</span>
+          <strong>{incident.severity || incident.priority || "unknown"}</strong>
+        </div>
+        <div className={`incident-journey__metric ${incident.sla?.breached ? "is-failed" : ""}`}>
+          <span>SLA</span>
+          <strong>{incident.sla ? formatSlaMinutes(incident.sla.resolution_remaining_minutes) : "not set"}</strong>
+        </div>
+        <div className="incident-journey__metric">
+          <span>Affected</span>
+          <strong>{incident.primary_service || incident.target_host}</strong>
+        </div>
+        <div className="incident-journey__metric">
+          <span>Blast Radius</span>
+          <strong>{incident.blast_radius?.length || 0}</strong>
+        </div>
+        <div className={`incident-journey__metric ${revenueLost > 0 ? "is-failed" : ""}`}>
+          <span>Revenue</span>
+          <strong>{formatCurrency(revenueLost, incident.business_impact?.currency || "INR")}</strong>
+        </div>
+      </div>
+
+      <div className="incident-journey__stage-track" aria-label="Incident lifecycle stages">
+        {stages.map((stage, index) => (
+          <article key={stage.key} className={`incident-stage incident-stage--${stage.status}`}>
+            <div className="incident-stage__rail">
+              <span className="incident-stage__dot">{index + 1}</span>
+            </div>
+            <div className="incident-stage__content">
+              <span>{stage.meta}</span>
+              <strong>{stage.label}</strong>
+              <p>{stage.detail}</p>
+              {stage.action ? <div className="incident-stage__action">{stage.action}</div> : null}
+            </div>
+          </article>
+        ))}
+      </div>
+
+      <div className="incident-resource-map">
+        <div className="incident-resource-map__header">
+          <div>
+            <div className="eyebrow">Impacted Resource Map</div>
+            <h3>{incident.primary_service || incident.target_host}</h3>
+          </div>
+          <Link className="shell__link shell__link--small" to={graphUrl}>
+            Open 3D Incident Graph
+          </Link>
+        </div>
+        <div className="incident-resource-map__canvas">
+          {resources.map((resource) => (
+            <article key={resource.id} className={`incident-resource incident-resource--${resource.kind} incident-resource--${resource.status}`}>
+              <span className="incident-resource__icon">
+                <JourneyIcon kind={resource.kind} />
+              </span>
+              <strong>{resource.label}</strong>
+              <small>{resource.meta}</small>
+            </article>
+          ))}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -434,6 +724,221 @@ export function IncidentsPage() {
     }
   }, [selectedKey, timelineQuery.data]);
 
+  const runbookReady = Boolean(selectedKey && timelineQuery.data && hasRunbook(selectedKey, timelineQuery.data, runbookState));
+  const narrativeReady = Boolean(selectedKey && (narrativeState[selectedKey] || timelineQuery.data?.latest_narrative?.narrative));
+  const incidentGraphUrl = timelineQuery.data ? `/graph/incident/${encodeURIComponent(timelineQuery.data.incident_key)}` : "#";
+  const alertGraphUrl = selectedAlert ? `/graph/${encodeURIComponent(selectedAlert.alert_id)}` : incidentGraphUrl;
+  const revenueLost = timelineQuery.data?.business_impact?.revenue_lost ?? 0;
+  const rcaStatus = executeMutation.isPending || deepDiveEntry?.execution_status === "running"
+    ? "active"
+    : deepDiveEntry?.execution_status === "failed"
+      ? "failed"
+      : deepDiveEntry?.post_command_ai_analysis || deepDiveEntry?.final_answer
+        ? "completed"
+        : deepDiveEntry
+          ? "pending"
+          : "blocked";
+  const remediationStatus = remediationMutation.isPending || deepDiveEntry?.remediation_execution_status === "running"
+    ? "active"
+    : deepDiveEntry?.remediation_execution_status === "approval_required" || deepDiveEntry?.remediation_execution_status === "verification_pending"
+      ? "blocked"
+      : deepDiveEntry?.remediation_execution_status === "failed"
+        ? "failed"
+        : ["completed", "verified"].includes(normalizeStatus(deepDiveEntry?.remediation_execution_status))
+          ? "completed"
+          : deepDiveEntry?.remediation_command
+            ? "pending"
+            : "blocked";
+  const journeyStages: VisualJourneyStage[] = timelineQuery.data ? [
+    {
+      key: "summary",
+      label: "Incident Summary",
+      meta: `${timelineQuery.data.severity || timelineQuery.data.priority || "unknown"} severity`,
+      status: statusToJourneyStatus(timelineQuery.data.status),
+      detail: joinDetail([
+        compactText(timelineQuery.data.reasoning || timelineQuery.data.summary, "Incident summary is not available yet."),
+        `Primary service: ${timelineQuery.data.primary_service || "unknown"}.`,
+        `Target: ${timelineQuery.data.target_host || "unknown"}.`,
+        `Opened: ${formatDateTime(timelineQuery.data.opened_at)}.`,
+      ]),
+      action: (
+        <>
+          <Link className="shell__link shell__link--small" to={alertGraphUrl}>
+            Alert Graph
+          </Link>
+          {timelineQuery.data.sla && !timelineQuery.data.sla.response_acknowledged_at ? (
+            <button
+              className="shell__link shell__link--small incident-journey__link-button"
+              onClick={() => slaAckMutation.mutate()}
+              disabled={slaAckMutation.isPending || !canManageIncidents}
+            >
+              {slaAckMutation.isPending ? "Acknowledging..." : "Acknowledge SLA"}
+            </button>
+          ) : null}
+        </>
+      ),
+    },
+    {
+      key: "timeline",
+      label: "Timeline",
+      meta: `${timelineQuery.data.timeline_count || timelineQuery.data.timeline.length} events`,
+      status: timelineQuery.data.timeline.length > 0 ? "completed" : "pending",
+      detail: joinDetail([
+        `Opened ${formatDateTime(timelineQuery.data.opened_at)}.`,
+        timelineQuery.data.resolved_at ? `Resolved ${formatDateTime(timelineQuery.data.resolved_at)}.` : `Last updated ${formatDateTime(timelineQuery.data.updated_at)}.`,
+        timelineQuery.data.timeline[0]
+          ? `Latest event: ${timelineQuery.data.timeline[0].title} - ${compactText(timelineQuery.data.timeline[0].detail)}`
+          : "No detailed timeline events have been recorded yet.",
+      ]),
+      action: (
+        <Link className="shell__link shell__link--small" to={incidentGraphUrl}>
+          3D Incident Graph
+        </Link>
+      ),
+    },
+    {
+      key: "evidence",
+      label: "Evidence",
+      meta: deepDiveEntry?.target_host || selectedAlert?.target_host || timelineQuery.data.target_host || "target pending",
+      status: rcaStatus,
+      detail: joinDetail([
+        compactText(
+          deepDiveEntry?.analysis_sections?.evidence ||
+            deepDiveEntry?.post_command_ai_analysis ||
+            deepDiveEntry?.initial_ai_diagnosis ||
+            selectedAlert?.summary,
+          "Diagnostic evidence is ready for deep-dive execution.",
+        ),
+        (deepDiveEntry?.hard_evidence || selectedAlert?.hard_evidence || []).length
+          ? `Hard evidence: ${(deepDiveEntry?.hard_evidence || selectedAlert?.hard_evidence || []).slice(0, 3).join("; ")}.`
+          : null,
+        (deepDiveEntry?.missing_evidence || selectedAlert?.missing_evidence || []).length
+          ? `Missing evidence: ${(deepDiveEntry?.missing_evidence || selectedAlert?.missing_evidence || []).slice(0, 2).join("; ")}.`
+          : null,
+      ]),
+      action: (
+        <>
+          <button
+            className="assistant-button assistant-button--secondary"
+            onClick={() => executeMutation.mutate()}
+            disabled={executeMutation.isPending || !deepDiveEntry?.diagnostic_command || !deepDiveEntry.target_host || !canRunDiagnostics}
+          >
+            {executeMutation.isPending || deepDiveEntry?.execution_status === "running" ? "Running..." : "Run Deep Dive"}
+          </button>
+          <Link className="shell__link shell__link--small" to={`/investigations?incident_key=${encodeURIComponent(timelineQuery.data.incident_key)}`}>
+            Investigation
+          </Link>
+        </>
+      ),
+    },
+    {
+      key: "impact",
+      label: "Impact",
+      meta: `${timelineQuery.data.blast_radius?.length || 0} resources`,
+      status: timelineQuery.data.sla?.breached || revenueLost > 0 ? "failed" : statusToJourneyStatus(timelineQuery.data.status),
+      detail: joinDetail([
+        compactText(deepDiveEntry?.analysis_sections?.impact, "Impact is calculated from the blast radius, SLA state, and business telemetry."),
+        `${timelineQuery.data.blast_radius?.length || 0} services are in the current blast radius.`,
+        timelineQuery.data.business_impact
+          ? `${formatCurrency(revenueLost, timelineQuery.data.business_impact.currency || "INR")} estimated revenue impact across ${timelineQuery.data.business_impact.failed_transactions ?? 0} failed transactions.`
+          : "Business impact telemetry is not available yet.",
+        timelineQuery.data.sla
+          ? `Resolution SLA: ${formatSlaMinutes(timelineQuery.data.sla.resolution_remaining_minutes)}.`
+          : "SLA is not set.",
+      ]),
+      action: (
+        <Link className="shell__link shell__link--small" to={incidentGraphUrl}>
+          Impact Graph
+        </Link>
+      ),
+    },
+    {
+      key: "resolution-actions",
+      label: "Resolution actions",
+      meta: deepDiveEntry?.remediation_requires_approval ? "approval gated" : "operator controlled",
+      status: remediationStatus,
+      detail: joinDetail([
+        compactText(
+          deepDiveEntry?.remediation_why ||
+            deepDiveEntry?.analysis_sections?.resolution ||
+            deepDiveEntry?.analysis_sections?.remediation_steps?.join("; "),
+          "Recommended remediation will appear after RCA evidence is available.",
+        ),
+        deepDiveEntry?.remediation_command ? `Command: ${deepDiveEntry.remediation_command}.` : null,
+        deepDiveEntry?.remediation_execution_status ? `Execution status: ${deepDiveEntry.remediation_execution_status}.` : null,
+      ]),
+      action: (
+        <>
+          {deepDiveEntry?.remediation_command ? (
+            <button
+              className="assistant-button assistant-button--secondary"
+              onClick={() => remediationMutation.mutate()}
+              disabled={
+                remediationMutation.isPending ||
+                !deepDiveEntry.remediation_command ||
+                !deepDiveEntry.remediation_target_host ||
+                !canRunRemediation ||
+                Boolean(safetyPanel)
+              }
+            >
+              {remediationMutation.isPending || deepDiveEntry.remediation_execution_status === "running"
+                ? "Running Remediation..."
+                : "Run Remediation"}
+            </button>
+          ) : null}
+          <button
+            className="assistant-button assistant-button--secondary"
+            onClick={() => runbookMutation.mutate()}
+            disabled={runbookMutation.isPending || !selectedKey || !canManageIncidents}
+          >
+            {runbookMutation.isPending ? "Generating..." : "Generate Runbook"}
+          </button>
+          {selectedKey && runbookReady ? (
+            <a className="shell__link shell__link--small" href={getRunbookDownloadUrl(selectedKey)}>
+              Download
+            </a>
+          ) : null}
+        </>
+      ),
+    },
+    {
+      key: "executive-summary",
+      label: "Executive summary",
+      meta: narrativeReady ? "narrative ready" : "review pending",
+      status: isTerminalIncident(timelineQuery.data.status)
+        ? "resolved"
+        : deepDiveEntry?.remediation_execution_status === "verified"
+          ? "completed"
+          : narrativeMutation.isPending
+            ? "active"
+            : "pending",
+      detail: joinDetail([
+        compactText(
+          narrativeState[selectedKey || ""] || timelineQuery.data.latest_narrative?.narrative || deepDiveEntry?.final_answer,
+          "Prepare the executive summary once validation evidence lands.",
+        ),
+        runbookReady ? "Runbook artifact is available for download." : null,
+      ]),
+      action: (
+        <>
+          <button
+            className="assistant-button assistant-button--secondary"
+            onClick={() => narrativeMutation.mutate()}
+            disabled={narrativeMutation.isPending || !selectedKey || !canManageIncidents}
+          >
+            {narrativeMutation.isPending ? "Generating..." : "Post-Incident Narrative"}
+          </button>
+          {selectedKey && narrativeReady ? (
+            <a className="shell__link shell__link--small" href={getTimelineNarrativeDownloadUrl(selectedKey)}>
+              Download
+            </a>
+          ) : null}
+        </>
+      ),
+    },
+  ] : [];
+  const impactResources = timelineQuery.data ? buildImpactResources(timelineQuery.data, selectedAlert, deepDiveEntry, runbookReady) : [];
+
   return (
     <>
       <section className="hero-card hero-card--incidents">
@@ -486,6 +991,7 @@ export function IncidentsPage() {
         <section className="incident-detail">
           {timelineQuery.data ? (
             <>
+<<<<<<< Updated upstream
               <div className="incident-detail__hero">
                 <div>
                   <div className="eyebrow">Incident</div>
@@ -589,6 +1095,58 @@ export function IncidentsPage() {
                   </div>
                 </div>
               </div>
+=======
+              <IncidentVisualJourney
+                incident={timelineQuery.data}
+                stages={journeyStages}
+                resources={impactResources}
+                graphUrl={incidentGraphUrl}
+              />
+              {(timelineQuery.data.related_incidents || []).length > 0 ? (
+                <article className="incident-related">
+                  <div>
+                    <div className="eyebrow">Correlation</div>
+                    <h3>Related Incidents</h3>
+                  </div>
+                  <div className="incident-related__list">
+                    {(timelineQuery.data.related_incidents || []).map((related) => (
+                      <button
+                        key={related.incident_key}
+                        className="incident-related__item"
+                        onClick={() => setActiveIncidentKey(related.incident_key)}
+                      >
+                        <span>{related.incident_number || related.incident_key}</span>
+                        <strong>{related.title}</strong>
+                        <small>{related.score}% · {(related.reasons || []).map((reason) => reason.replace(/_/g, " ")).join(", ")}</small>
+                      </button>
+                    ))}
+                  </div>
+                </article>
+              ) : null}
+              {(timelineQuery.data.external_tickets || []).length > 0 ? (
+                <article className="incident-related">
+                  <div>
+                    <div className="eyebrow">Writeback</div>
+                    <h3>External Tickets</h3>
+                  </div>
+                  <div className="incident-related__list">
+                    {(timelineQuery.data.external_tickets || []).map((ticket) => (
+                      <a
+                        key={ticket.ticket_id}
+                        className="incident-related__item"
+                        href={ticket.external_url || undefined}
+                        target={ticket.external_url ? "_blank" : undefined}
+                        rel="noreferrer"
+                      >
+                        <span>{ticket.integration_name}</span>
+                        <strong>{ticket.external_key || ticket.external_id || ticket.status}</strong>
+                        <small>{ticket.status} · {ticket.message || ticket.integration_type}</small>
+                      </a>
+                    ))}
+                  </div>
+                </article>
+              ) : null}
+>>>>>>> Stashed changes
               <div className="incident-timeline-list">
                 {deepDiveEntry ? (
                   <article className="incident-deep-dive incident-deep-dive--investigation">
